@@ -1,0 +1,12 @@
+services:
+  stock-market-mcp:
+    image: ghcr.io/arasalieri/stock-market-mcp
+    build: .
+    container_name: stock-market-mcp
+    restart: unless-stopped
+    environment:
+      # Listen on all interfaces inside the container so the published port
+      # is LAN-visible on the host (accepted risk: read-only data, no auth).
+      SMM_HOST: 0.0.0.0
+    ports:
+      - "8000:8000"
