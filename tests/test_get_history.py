@@ -35,6 +35,9 @@ class HistoryFakeFetcher(DataFetcher):
     def fetch_quote(self, ticker):
         raise LookupError(f"unknown ticker: {ticker}")
 
+    def fetch_fundamentals(self, ticker):
+        raise AssertionError("get_history tests never fetch fundamentals")
+
     def fetch_history(self, ticker, period):
         self.history_calls.append((ticker, period))
         return fake_history()

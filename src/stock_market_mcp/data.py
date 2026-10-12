@@ -8,6 +8,8 @@ import pandas as pd
 class DataFetcher(Protocol):
     def fetch_quote(self, ticker: str) -> dict: ...
 
+    def fetch_fundamentals(self, ticker: str) -> dict: ...
+
     # Default body (pyright treats a raise-only body as abstract) so quote-only
     # fakes stay structurally valid; real fetchers override this.
     def fetch_history(self, ticker: str, period: str) -> pd.DataFrame:
@@ -35,3 +37,18 @@ class YfinanceFetcher:
         if df.empty:
             raise LookupError(f"no history data for ticker: {ticker}")
         return df
+
+    def fetch_fundamentals(self, ticker: str) -> dict:
+        import yfinance as yf
+
+        t = yf.Ticker(ticker)
+        info = t.info
+        if not info or not info.get("longName"):
+            raise LookupError(f"no fundamentals data for ticker: {ticker}")
+        return {
+            "ticker": ticker.upper(),
+            "long_name": info["longName"],
+            "sector": info.get("sector"),
+            "industry": info.get("industry"),
+            "market_cap": info.get("marketCap"),
+        }

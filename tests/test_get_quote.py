@@ -26,6 +26,9 @@ class FakeFetcher(DataFetcher):
             raise LookupError(f"unknown ticker: {ticker}")
         return quote
 
+    def fetch_fundamentals(self, ticker):
+        raise AssertionError("get_quote tests never fetch fundamentals")
+
 
 @pytest.fixture
 def server_url():

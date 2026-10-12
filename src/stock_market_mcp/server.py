@@ -70,6 +70,14 @@ def build_server(fetcher: DataFetcher) -> MCPServer:
             raise ToolError(str(exc)) from exc
 
     @mcp.tool()
+    def get_fundamentals(ticker: str) -> dict:
+        """Key company fundamentals (name, sector, industry, market cap)."""
+        try:
+            return fetcher.fetch_fundamentals(ticker)
+        except Exception as exc:
+            raise ToolError(str(exc)) from exc
+
+    @mcp.tool()
     def get_history(
         ticker: str, period: str = "1y", indicators: list[str] | None = None
     ) -> dict:
