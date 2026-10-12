@@ -2,9 +2,16 @@
 
 from typing import Protocol
 
+import pandas as pd
+
 
 class DataFetcher(Protocol):
     def fetch_quote(self, ticker: str) -> dict: ...
+
+    # Default body (pyright treats a raise-only body as abstract) so quote-only
+    # fakes stay structurally valid; real fetchers override this.
+    def fetch_history(self, ticker: str, period: str) -> pd.DataFrame:
+        return pd.DataFrame()
 
 
 class YfinanceFetcher:
@@ -20,3 +27,11 @@ class YfinanceFetcher:
         if price is None or price != price:
             raise LookupError(f"no quote data for ticker: {ticker}")
         return {"price": price, "currency": info["currency"], "ticker": ticker.upper()}
+
+    def fetch_history(self, ticker: str, period: str) -> pd.DataFrame:
+        import yfinance as yf
+
+        df = yf.Ticker(ticker).history(period=period)
+        if df.empty:
+            raise LookupError(f"no history data for ticker: {ticker}")
+        return df

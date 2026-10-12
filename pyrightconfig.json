@@ -1,5 +1,6 @@
 {
   "include": ["src", "tests"],
-  "venvPath": "/home/ara/projects/solo/stock-market-mcp",
-  "venv": ".venv"
+  "venvPath": ".",
+  "venv": ".venv",
+  "reportPrivateImportUsage": false
 }
