@@ -16,44 +16,55 @@ from stock_market_mcp.cache import (
 )
 from stock_market_mcp.data import DataFetcher
 
-# Curated allowlist: the only indicator names get_history will compute.
-INDICATOR_ALLOWLIST = {
-    "sma", "ema", "rsi", "macd", "bbands", "atr", "adx", "vwap",
-}
+
+def _suffixed_frame(ind: pd.Series | None) -> pd.DataFrame | None:
+    """Frame a single-output indicator; pandas-ta returns None on insufficient rows."""
+    if ind is None:
+        return None
+    return ind.to_frame()
 
 
-def _indicator_frame(name: str, df: pd.DataFrame) -> pd.DataFrame:
-    """Indicator values for one allowed name, keyed by pandas-ta's own column names."""
-    if name == "sma":
-        return ta.sma(cast("pd.Series", df["Close"])).to_frame()
-    if name == "ema":
-        return ta.ema(cast("pd.Series", df["Close"])).to_frame()
-    if name == "rsi":
-        return ta.rsi(cast("pd.Series", df["Close"])).to_frame()
-    if name == "macd":
-        return ta.macd(cast("pd.Series", df["Close"]))
-    if name == "bbands":
-        return ta.bbands(cast("pd.Series", df["Close"]))
-    if name == "atr":
-        return ta.atr(
-            cast("pd.Series", df["High"]),
-            cast("pd.Series", df["Low"]),
-            cast("pd.Series", df["Close"]),
-        ).to_frame()
-    if name == "adx":
-        return ta.adx(
+# Dispatch table: indicator name -> handler producing the indicator frame(s),
+# or None when the history is too short for that indicator (loud error path).
+_INDICATOR_DISPATCH = {
+    "sma": lambda df: _suffixed_frame(ta.sma(cast("pd.Series", df["Close"]))),
+    "ema": lambda df: _suffixed_frame(ta.ema(cast("pd.Series", df["Close"]))),
+    "rsi": lambda df: _suffixed_frame(ta.rsi(cast("pd.Series", df["Close"]))),
+    "macd": lambda df: ta.macd(cast("pd.Series", df["Close"])),
+    "bbands": lambda df: ta.bbands(cast("pd.Series", df["Close"])),
+    "atr": lambda df: _suffixed_frame(
+        ta.atr(
             cast("pd.Series", df["High"]),
             cast("pd.Series", df["Low"]),
             cast("pd.Series", df["Close"]),
         )
-    if name == "vwap":
-        return ta.vwap(
+    ),
+    "adx": lambda df: ta.adx(
+        cast("pd.Series", df["High"]),
+        cast("pd.Series", df["Low"]),
+        cast("pd.Series", df["Close"]),
+    ),
+    "vwap": lambda df: _suffixed_frame(
+        ta.vwap(
             cast("pd.Series", df["High"]),
             cast("pd.Series", df["Low"]),
             cast("pd.Series", df["Close"]),
             cast("pd.Series", df["Volume"]),
-        ).to_frame()
-    raise ToolError(f"unsupported indicator: {name}")
+        )
+    ),
+}
+
+# Curated allowlist: the only indicator names get_history will compute.
+# Derived from the dispatch table so adding a branch extends the allowlist too.
+INDICATOR_ALLOWLIST = frozenset(_INDICATOR_DISPATCH)
+
+
+def _indicator_frame(name: str, df: pd.DataFrame) -> pd.DataFrame:
+    """Indicator values for one allowed name, keyed by pandas-ta's own column names."""
+    handler = _INDICATOR_DISPATCH.get(name)
+    if handler is None:
+        raise ToolError(f"unsupported indicator: {name}")
+    return handler(df)
 
 
 def _rows(df):

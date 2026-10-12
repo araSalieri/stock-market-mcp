@@ -5,15 +5,24 @@ from typing import Protocol
 import pandas as pd
 
 
+def _unimplemented_fetch_history(
+    self: "DataFetcher", ticker: str, period: str
+) -> pd.DataFrame:
+    """Loud default: the spec forbids empty data, so a quote-only fake must fail loudly."""
+    raise NotImplementedError(f"{type(self).__name__} does not implement fetch_history")
+
+
 class DataFetcher(Protocol):
     def fetch_quote(self, ticker: str) -> dict: ...
 
     def fetch_fundamentals(self, ticker: str) -> dict: ...
 
-    # Default body (pyright treats a raise-only body as abstract) so quote-only
-    # fakes stay structurally valid; real fetchers override this.
-    def fetch_history(self, ticker: str, period: str) -> pd.DataFrame:
-        return pd.DataFrame()
+    # Default implementation (assigned function, not a raise-only def, so pyright
+    # treats it as concrete) so quote-only fakes stay structurally valid; real
+    # fetchers override this. Raising keeps the "never empty data" rule: a
+    # quote-only fake leaking into history surfaces as a loud failure instead
+    # of an empty frame.
+    fetch_history = _unimplemented_fetch_history
 
 
 class YfinanceFetcher:

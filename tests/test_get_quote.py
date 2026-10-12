@@ -1,14 +1,9 @@
-import threading
-import time
-
 import pytest
 from mcp import ClientSession, types
 from mcp.client.streamable_http import streamable_http_client
 from mcp.types import CallToolResult
-from uvicorn import Config, Server
 
 from stock_market_mcp.data import DataFetcher
-from stock_market_mcp.server import build_server
 
 
 class FakeFetcher(DataFetcher):
@@ -28,27 +23,8 @@ class FakeFetcher(DataFetcher):
 
     def fetch_fundamentals(self, ticker):
         raise AssertionError("get_quote tests never fetch fundamentals")
-
-
-@pytest.fixture
-def server_url():
-    urls = []
-
-    def start(fetcher):
-        app = build_server(fetcher).streamable_http_app()
-        config = Config(app, host="127.0.0.1", port=0, log_level="warning")
-        server = Server(config)
-        threading.Thread(target=server.run, daemon=True).start()
-        for _ in range(100):
-            if server.started and server.servers:
-                break
-            time.sleep(0.05)
-        url = f"http://127.0.0.1:{server.servers[0].sockets[0].getsockname()[1]}/mcp"
-        urls.append(url)
-        return url
-
-    yield start
-    assert urls  # harness sanity: server was started
+    # fetch_history intentionally not overridden: relies on the Protocol default,
+    # which the loud-failure test below exercises end to end.
 
 
 async def call_tool(url: str, name: str, args: dict) -> CallToolResult:
@@ -78,6 +54,26 @@ async def test_get_quote_provider_failure_is_a_loud_tool_error(server_url):
 
     assert result.is_error
     assert "yahoo is down" in text_of(result)
+
+
+def test_datafetcher_default_fetch_history_fails_loudly_not_empty():
+    """The Protocol default must raise, never return empty data (spec: never empty)."""
+    fetcher = FakeFetcher(quotes={"AAPL": {"price": 190.0, "currency": "USD"}})
+
+    with pytest.raises(NotImplementedError, match="fetch_history"):
+        fetcher.fetch_history("AAPL", "1mo")
+
+
+async def test_quote_only_fake_leaking_into_history_is_a_loud_tool_error(server_url):
+    # A quote-only fake leaking into get_history must surface the loud failure,
+    # not an empty frame (spec: never empty data).
+    fetcher = FakeFetcher(quotes={"AAPL": {"price": 190.0, "currency": "USD"}})
+    result = await call_tool(
+        server_url(fetcher), "get_history", {"ticker": "AAPL", "period": "1mo"}
+    )
+
+    assert result.is_error
+    assert "fetch_history" in text_of(result)
 
 
 async def test_get_quote_returns_price_for_known_ticker(server_url):

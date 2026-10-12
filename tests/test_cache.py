@@ -3,11 +3,9 @@
 import time
 
 import pandas as pd
-import pytest
+from test_get_quote import call_tool, text_of
 
 from stock_market_mcp.data import DataFetcher
-
-from test_get_quote import call_tool, text_of
 
 # Short TTLs so tests can cross the expiry window without waiting on real timeouts.
 TEST_QUOTE_TTL = 0.2
@@ -46,42 +44,14 @@ class CountingFakeFetcher(DataFetcher):
         )
 
 
-@pytest.fixture
-def server_url():
-    """Seam harness from test_get_quote, with cache TTLs under test control."""
-    import threading
-
-    from uvicorn import Config, Server
-
-    from stock_market_mcp.server import build_server
-
-    started = []
-
-    def start(fetcher):
-        app = build_server(
-            fetcher,
-            quote_ttl=TEST_QUOTE_TTL,
-            history_ttl=TEST_HISTORY_TTL,
-            fundamentals_ttl=TEST_FUNDAMENTALS_TTL,
-        ).streamable_http_app()
-        config = Config(app, host="127.0.0.1", port=0, log_level="warning")
-        server = Server(config)
-        threading.Thread(target=server.run, daemon=True).start()
-        for _ in range(100):
-            if server.started and server.servers:
-                break
-            time.sleep(0.05)
-        url = f"http://127.0.0.1:{server.servers[0].sockets[0].getsockname()[1]}/mcp"
-        started.append(url)
-        return url
-
-    yield start
-    assert started  # harness sanity: server was started
-
-
 async def test_second_quote_within_ttl_is_served_from_cache(server_url):
     fetcher = CountingFakeFetcher()
-    url = server_url(fetcher)
+    url = server_url(
+        fetcher,
+        quote_ttl=TEST_QUOTE_TTL,
+        history_ttl=TEST_HISTORY_TTL,
+        fundamentals_ttl=TEST_FUNDAMENTALS_TTL,
+    )
 
     first = await call_tool(url, "get_quote", {"ticker": "AAPL"})
     second = await call_tool(url, "get_quote", {"ticker": "AAPL"})
@@ -94,7 +64,12 @@ async def test_second_quote_within_ttl_is_served_from_cache(server_url):
 
 async def test_quote_after_ttl_expiry_refetches(server_url):
     fetcher = CountingFakeFetcher()
-    url = server_url(fetcher)
+    url = server_url(
+        fetcher,
+        quote_ttl=TEST_QUOTE_TTL,
+        history_ttl=TEST_HISTORY_TTL,
+        fundamentals_ttl=TEST_FUNDAMENTALS_TTL,
+    )
 
     await call_tool(url, "get_quote", {"ticker": "AAPL"})
     time.sleep(TEST_QUOTE_TTL + 0.1)
@@ -105,7 +80,12 @@ async def test_quote_after_ttl_expiry_refetches(server_url):
 
 async def test_second_history_within_ttl_is_served_from_cache(server_url):
     fetcher = CountingFakeFetcher()
-    url = server_url(fetcher)
+    url = server_url(
+        fetcher,
+        quote_ttl=TEST_QUOTE_TTL,
+        history_ttl=TEST_HISTORY_TTL,
+        fundamentals_ttl=TEST_FUNDAMENTALS_TTL,
+    )
 
     first = await call_tool(url, "get_history", {"ticker": "AAPL", "period": "1mo"})
     second = await call_tool(url, "get_history", {"ticker": "AAPL", "period": "1mo"})
@@ -117,7 +97,12 @@ async def test_second_history_within_ttl_is_served_from_cache(server_url):
 
 async def test_history_after_ttl_expiry_refetches(server_url):
     fetcher = CountingFakeFetcher()
-    url = server_url(fetcher)
+    url = server_url(
+        fetcher,
+        quote_ttl=TEST_QUOTE_TTL,
+        history_ttl=TEST_HISTORY_TTL,
+        fundamentals_ttl=TEST_FUNDAMENTALS_TTL,
+    )
 
     await call_tool(url, "get_history", {"ticker": "AAPL", "period": "1mo"})
     time.sleep(TEST_HISTORY_TTL + 0.1)
@@ -128,7 +113,12 @@ async def test_history_after_ttl_expiry_refetches(server_url):
 
 async def test_second_fundamentals_within_ttl_is_served_from_cache(server_url):
     fetcher = CountingFakeFetcher()
-    url = server_url(fetcher)
+    url = server_url(
+        fetcher,
+        quote_ttl=TEST_QUOTE_TTL,
+        history_ttl=TEST_HISTORY_TTL,
+        fundamentals_ttl=TEST_FUNDAMENTALS_TTL,
+    )
 
     first = await call_tool(url, "get_fundamentals", {"ticker": "AAPL"})
     second = await call_tool(url, "get_fundamentals", {"ticker": "AAPL"})
@@ -140,7 +130,12 @@ async def test_second_fundamentals_within_ttl_is_served_from_cache(server_url):
 
 async def test_fundamentals_after_ttl_expiry_refetches(server_url):
     fetcher = CountingFakeFetcher()
-    url = server_url(fetcher)
+    url = server_url(
+        fetcher,
+        quote_ttl=TEST_QUOTE_TTL,
+        history_ttl=TEST_HISTORY_TTL,
+        fundamentals_ttl=TEST_FUNDAMENTALS_TTL,
+    )
 
     await call_tool(url, "get_fundamentals", {"ticker": "AAPL"})
     time.sleep(TEST_FUNDAMENTALS_TTL + 0.1)

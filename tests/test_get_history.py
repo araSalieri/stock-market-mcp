@@ -5,13 +5,9 @@ import math
 
 import pandas as pd
 import pytest
+from test_get_quote import call_tool, text_of
 
 from stock_market_mcp.data import DataFetcher
-
-from test_get_quote import call_tool, server_url as server_url_fixture, text_of
-
-# pytest resolves fixtures by parameter name; re-export the seam fixture.
-server_url = server_url_fixture
 
 
 def fake_history(rows: int = 60) -> pd.DataFrame:
@@ -29,8 +25,9 @@ def fake_history(rows: int = 60) -> pd.DataFrame:
 
 
 class HistoryFakeFetcher(DataFetcher):
-    def __init__(self):
+    def __init__(self, rows: int = 60):
         self.history_calls = []
+        self.rows = rows
 
     def fetch_quote(self, ticker):
         raise LookupError(f"unknown ticker: {ticker}")
@@ -40,7 +37,7 @@ class HistoryFakeFetcher(DataFetcher):
 
     def fetch_history(self, ticker, period):
         self.history_calls.append((ticker, period))
-        return fake_history()
+        return fake_history(self.rows)
 
 
 async def test_get_history_returns_ohlcv_rows(server_url):
@@ -75,6 +72,21 @@ async def test_get_history_unknown_indicator_is_a_loud_tool_error(server_url):
     assert result.is_error
     assert "badta" in text_of(result)
     assert "sma" in text_of(result)  # allowed names are listed, not just the bad one
+
+
+async def test_get_history_insufficient_rows_for_indicator_is_a_loud_tool_error(
+    server_url,
+):
+    # 5 rows is below pandas-ta's default 10-period lookback; sma() returns None.
+    fetcher = HistoryFakeFetcher(rows=5)
+    result = await call_tool(
+        server_url(fetcher),
+        "get_history",
+        {"ticker": "AAPL", "period": "1mo", "indicators": ["sma"]},
+    )
+
+    assert result.is_error
+    assert "not enough history rows" in text_of(result)
 
 
 async def test_get_history_computes_sma(server_url):

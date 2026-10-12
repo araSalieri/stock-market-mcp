@@ -1,12 +1,4 @@
-import pytest
-
-from test_get_quote import call_tool, server_url as _seam_server_url, text_of  # noqa: F401
-
-
-@pytest.fixture
-def mcp_url(request):
-    """The shared streamable-HTTP test server fixture from test_get_quote."""
-    return request.getfixturevalue("_seam_server_url")
+from test_get_quote import call_tool, text_of
 
 
 class FundamentalsFakeFetcher:
@@ -28,7 +20,7 @@ class FundamentalsFakeFetcher:
         return info
 
 
-async def test_get_fundamentals_returns_facts_for_known_ticker(mcp_url):
+async def test_get_fundamentals_returns_facts_for_known_ticker(server_url):
     fetcher = FundamentalsFakeFetcher(
         fundamentals={
             "AAPL": {
@@ -40,7 +32,7 @@ async def test_get_fundamentals_returns_facts_for_known_ticker(mcp_url):
             }
         }
     )
-    result = await call_tool(mcp_url(fetcher), "get_fundamentals", {"ticker": "AAPL"})
+    result = await call_tool(server_url(fetcher), "get_fundamentals", {"ticker": "AAPL"})
 
     assert not result.is_error
     text = text_of(result)
@@ -48,17 +40,17 @@ async def test_get_fundamentals_returns_facts_for_known_ticker(mcp_url):
     assert "Technology" in text
 
 
-async def test_get_fundamentals_unknown_ticker_is_a_loud_tool_error(mcp_url):
+async def test_get_fundamentals_unknown_ticker_is_a_loud_tool_error(server_url):
     fetcher = FundamentalsFakeFetcher()  # no fundamentals at all
-    result = await call_tool(mcp_url(fetcher), "get_fundamentals", {"ticker": "NOPE"})
+    result = await call_tool(server_url(fetcher), "get_fundamentals", {"ticker": "NOPE"})
 
     assert result.is_error
     assert "NOPE" in text_of(result)
 
 
-async def test_get_fundamentals_provider_failure_is_a_loud_tool_error(mcp_url):
+async def test_get_fundamentals_provider_failure_is_a_loud_tool_error(server_url):
     fetcher = FundamentalsFakeFetcher(error=RuntimeError("yahoo is down"))
-    result = await call_tool(mcp_url(fetcher), "get_fundamentals", {"ticker": "AAPL"})
+    result = await call_tool(server_url(fetcher), "get_fundamentals", {"ticker": "AAPL"})
 
     assert result.is_error
     assert "yahoo is down" in text_of(result)
