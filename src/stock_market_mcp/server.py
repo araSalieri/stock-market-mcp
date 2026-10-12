@@ -8,6 +8,12 @@ import pandas_ta as ta
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
+from stock_market_mcp.cache import (
+    FUNDAMENTALS_TTL_SECONDS,
+    HISTORY_TTL_SECONDS,
+    QUOTE_TTL_SECONDS,
+    CachingFetcher,
+)
 from stock_market_mcp.data import DataFetcher
 
 # Curated allowlist: the only indicator names get_history will compute.
@@ -58,7 +64,24 @@ def _rows(df):
     return json.loads(payload)
 
 
-def build_server(fetcher: DataFetcher) -> MCPServer:
+def build_server(
+    fetcher: DataFetcher,
+    *,
+    quote_ttl: float = QUOTE_TTL_SECONDS,
+    history_ttl: float = HISTORY_TTL_SECONDS,
+    fundamentals_ttl: float = FUNDAMENTALS_TTL_SECONDS,
+) -> MCPServer:
+    """Assemble the MCP server over an injectable fetcher behind the TTL cache.
+
+    The TTL parameters exist so tests can shrink the cache windows; production
+    callers use the module-level defaults (60s quotes, 300s history/fundamentals).
+    """
+    fetcher = CachingFetcher(
+        fetcher,
+        quote_ttl=quote_ttl,
+        history_ttl=history_ttl,
+        fundamentals_ttl=fundamentals_ttl,
+    )
     mcp = MCPServer("stock-market-mcp")
 
     @mcp.tool()
