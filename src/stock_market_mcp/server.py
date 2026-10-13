@@ -12,9 +12,13 @@ from stock_market_mcp.cache import (
     FUNDAMENTALS_TTL_SECONDS,
     HISTORY_TTL_SECONDS,
     QUOTE_TTL_SECONDS,
+    SIGNAL_TTL_SECONDS,
+    CachingClassifier,
     CachingFetcher,
 )
+from stock_market_mcp.classifier import OpenRouterClassifier, SignalClassifier
 from stock_market_mcp.data import DataFetcher
+from stock_market_mcp.prompt import build_signal_prompt
 
 
 def _suffixed_frame(ind: pd.Series | None) -> pd.DataFrame | None:
@@ -77,21 +81,27 @@ def _rows(df):
 
 def build_server(
     fetcher: DataFetcher,
+    classifier: SignalClassifier | None = None,
     *,
     quote_ttl: float = QUOTE_TTL_SECONDS,
     history_ttl: float = HISTORY_TTL_SECONDS,
     fundamentals_ttl: float = FUNDAMENTALS_TTL_SECONDS,
+    signal_ttl: float = SIGNAL_TTL_SECONDS,
 ) -> MCPServer:
-    """Assemble the MCP server over an injectable fetcher behind the TTL cache.
+    """Assemble the MCP server over an injectable fetcher and classifier.
 
     The TTL parameters exist so tests can shrink the cache windows; production
-    callers use the module-level defaults (60s quotes, 300s history/fundamentals).
+    callers use the module-level defaults (60s quotes, 300s the rest).
     """
     fetcher = CachingFetcher(
         fetcher,
         quote_ttl=quote_ttl,
         history_ttl=history_ttl,
         fundamentals_ttl=fundamentals_ttl,
+    )
+    signal_classifier = CachingClassifier(
+        classifier if classifier is not None else OpenRouterClassifier(),
+        signal_ttl=signal_ttl,
     )
     mcp = MCPServer("stock-market-mcp")
 
@@ -132,5 +142,23 @@ def build_server(
                 raise ToolError(f"not enough history rows for indicator: {name}")
             df = df.join(ind)
         return {"ticker": ticker.upper(), "period": period, "rows": _rows(df)}
+
+    @mcp.tool()
+    def get_signal(ticker: str, period: str = "1y") -> dict:
+        """Advisory buy/sell/hold verdict from history and indicators; input only, never acts on it."""
+        try:
+            df = fetcher.fetch_history(ticker, period)
+        except Exception as exc:
+            raise ToolError(str(exc)) from exc
+        for name in sorted(INDICATOR_ALLOWLIST):
+            ind = _indicator_frame(name, df)
+            if ind is None:
+                raise ToolError(f"not enough history rows for indicator: {name}")
+            df = df.join(ind)
+        prompt = build_signal_prompt(ticker.upper(), period, df)
+        try:
+            return signal_classifier.classify(prompt)
+        except Exception as exc:
+            raise ToolError(str(exc)) from exc
 
     return mcp

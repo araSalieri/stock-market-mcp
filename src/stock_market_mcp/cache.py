@@ -6,12 +6,14 @@ from typing import Any
 
 import pandas as pd
 
+from stock_market_mcp.classifier import SignalClassifier
 from stock_market_mcp.data import DataFetcher
 
 # Production TTLs: quotes move fast, history and fundamentals are stable.
 QUOTE_TTL_SECONDS = 60.0
 HISTORY_TTL_SECONDS = 300.0
 FUNDAMENTALS_TTL_SECONDS = 300.0
+SIGNAL_TTL_SECONDS = 300.0
 
 
 class CachingFetcher:
@@ -75,3 +77,43 @@ class CachingFetcher:
         result = self._fetcher.fetch_history(ticker, period)
         self._put(self._histories, key, result)
         return result
+
+
+class CachingClassifier:
+    """SignalClassifier decorator that serves repeated classify calls from a TTL cache.
+
+    Verdicts are cached per prompt (the prompt already pins ticker, period and
+    data rows) for SIGNAL_TTL_SECONDS. Failures are never cached: the delegate
+    raises, the cache stays empty.
+    """
+
+    def __init__(
+        self,
+        classifier: SignalClassifier,
+        signal_ttl: float = SIGNAL_TTL_SECONDS,
+    ) -> None:
+        self._classifier = classifier
+        self._signal_ttl = signal_ttl
+        self._lock = threading.Lock()
+        self._signals: dict[str, tuple[float, dict]] = {}
+
+    def classify(self, prompt: str) -> dict:
+        cached = self._get(self._signals, prompt, self._signal_ttl)
+        if cached is not None:
+            return cached
+        result = self._classifier.classify(prompt)
+        self._put(self._signals, prompt, result)
+        return result
+
+    def _get(self, cache: dict[Any, tuple[float, Any]], key: Any, ttl: float) -> Any:
+        with self._lock:
+            entry = cache.get(key)
+            if entry is not None and time.monotonic() - entry[0] < ttl:
+                return entry[1]
+        return None
+
+    def _put(
+        self, cache: dict[Any, tuple[float, Any]], key: Any, value: Any
+    ) -> None:
+        with self._lock:
+            cache[key] = (time.monotonic(), value)
