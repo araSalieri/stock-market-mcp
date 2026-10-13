@@ -8,5 +8,11 @@ services:
       # Listen on all interfaces inside the container so the published port
       # is LAN-visible on the host (accepted risk: read-only data, no auth).
       SMM_HOST: 0.0.0.0
+      # Passthrough only: values resolve from the host environment (or .env,
+      # which compose reads automatically). Empty defaults keep the classifier's
+      # loud missing-key error when the host has nothing to pass; no secret is
+      # ever stored in the image, repo, or this file.
+      SMM_OPENROUTER_API_KEY: ${SMM_OPENROUTER_API_KEY:-}
+      SMM_CLASSIFIER_MODEL: ${SMM_CLASSIFIER_MODEL:-}
     ports:
       - "8000:8000"

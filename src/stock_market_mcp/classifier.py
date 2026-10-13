@@ -19,7 +19,9 @@ OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 def classifier_model_id() -> str:
     """Model id for the signal classifier; SMM_CLASSIFIER_MODEL overrides the default."""
-    return os.environ.get("SMM_CLASSIFIER_MODEL", DEFAULT_CLASSIFIER_MODEL)
+    # Empty string counts as unset so compose's `${SMM_CLASSIFIER_MODEL:-}`
+    # passthrough falls back to the default instead of shipping an empty id.
+    return os.environ.get("SMM_CLASSIFIER_MODEL") or DEFAULT_CLASSIFIER_MODEL
 
 
 class SignalClassifier(Protocol):
