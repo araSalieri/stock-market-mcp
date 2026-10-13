@@ -208,7 +208,11 @@ async def test_signal_after_ttl_expiry_reinvokes_classifier(server_url):
 
 
 class FakeResponse:
-    """Minimal requests.Response stub: raise_for_status no-op, json returns the body."""
+    """Minimal requests.Response stub: raise_for_status no-op, json returns the body.
+
+    Used only by the Decisions-transport tests below; the fake_post in
+    _real_transport_with_bodies raises before a body is needed for HTTP errors.
+    """
 
     def __init__(self, body):
         self._body = body
@@ -220,24 +224,38 @@ class FakeResponse:
         return self._body
 
 
-def _openrouter_body(content):
-    return {"choices": [{"message": {"content": content}}]}
+PROMPT = json.dumps(
+    {"ticker": "AAPL", "period": "1y", "rows": [{"Date": "2024-01-03T00:00:00"}]}
+)
 
 
-GOOD_VERDICT = {
-    "verdict": "sell",
-    "confidence": 0.9,
-    "rationale": "overbought",
-    "data_date": "2024-01-03",
-}
+def _decisions_body(answer):
+    return {"answers": {"verdict": answer}, "usage": {"cost": 0.001}, "model": "typesafe/jev-1.13"}
+
+
+def _choice_answer(
+    choice="sell",
+    probabilities=None,
+    confidence: float | None = 0.9,
+):
+    answer = {
+        "type": "choice",
+        "choice": choice,
+        "probabilities": probabilities
+        if probabilities is not None
+        else {"buy": 0.1, "sell": 0.7, "hold": 0.2},
+    }
+    if confidence is not None:
+        answer["confidence"] = confidence
+    return answer
 
 
 def _real_transport_with_bodies(monkeypatch, bodies):
     """Real OpenRouterClassifier transport with requests.post serving bodies in order."""
     posts = []
 
-    def fake_post(*args, **kwargs):
-        posts.append(args)
+    def fake_post(url, **kwargs):
+        posts.append((url, kwargs))
         return FakeResponse(bodies.pop(0))
 
     monkeypatch.setenv("SMM_OPENROUTER_API_KEY", "test-key")
@@ -245,31 +263,134 @@ def _real_transport_with_bodies(monkeypatch, bodies):
     return EnforcingClassifier(OpenRouterClassifier()), posts
 
 
-def test_none_content_retried_once_then_valid_verdict(monkeypatch):
-    # A non-string message content is a formatting slip like bad JSON: it goes
-    # through the one-retry contract, and the retry's valid verdict succeeds.
+def test_decisions_answer_maps_to_strict_verdict(monkeypatch):
+    # The Decisions answer becomes the settled verdict dict: confidence straight
+    # from the answer, rationale citing the probabilities, data_date from the
+    # prompt's last row (the Decisions API returns no date of its own).
     classifier, posts = _real_transport_with_bodies(
-        monkeypatch,
-        [_openrouter_body(None), _openrouter_body(json.dumps(GOOD_VERDICT))],
+        monkeypatch, [_decisions_body(_choice_answer())]
     )
 
-    assert classifier.classify("prompt") == GOOD_VERDICT
+    verdict = classifier.classify(PROMPT)
+
+    assert verdict == {
+        "verdict": "sell",
+        "confidence": 0.9,
+        "rationale": "Decisions API chose sell (probabilities: buy=0.1, sell=0.7, hold=0.2)",
+        "data_date": "2024-01-03T00:00:00",
+    }
+    assert len(posts) == 1
+    url, kwargs = posts[0]
+    assert url == "https://openrouter.ai/api/alpha/decisions"
+    request = kwargs["json"]
+    assert request["model"] == classifier_model_id()
+    assert request["state"] == PROMPT
+    question = request["questions"]["verdict"]
+    assert question["type"] == "choice"
+    assert set(question["criteria"]) == {"buy", "sell", "hold"}
+    assert kwargs["headers"]["Authorization"] == "Bearer test-key"
+
+
+def test_missing_confidence_falls_back_to_chosen_probability(monkeypatch):
+    # confidence and probabilities are schema-optional; with confidence absent
+    # the chosen option's probability stands in for it.
+    classifier, _ = _real_transport_with_bodies(
+        monkeypatch,
+        [_decisions_body(_choice_answer(confidence=None))],
+    )
+
+    verdict = classifier.classify(PROMPT)
+
+    assert verdict["verdict"] == "sell"
+    assert verdict["confidence"] == 0.7
+
+
+def test_missing_verdict_answer_retried_once_then_valid(monkeypatch):
+    # A reply without answers.verdict is a contract violation like bad JSON:
+    # exactly one retry, and the retry's valid answer succeeds.
+    classifier, posts = _real_transport_with_bodies(
+        monkeypatch,
+        [
+            {"answers": {}, "usage": {}, "model": "typesafe/jev-1.13"},
+            _decisions_body(_choice_answer()),
+        ],
+    )
+
+    assert classifier.classify(PROMPT)["verdict"] == "sell"
     assert len(posts) == 2  # exactly one retry
 
 
-def test_none_content_twice_is_loud_contract_error(monkeypatch):
-    # Two non-string contents exhaust the retry: a loud SignalContractError
-    # naming the violation, never a fabricated success.
+def test_unexpected_answer_type_retried_once_then_loud(monkeypatch):
+    # Per the Decisions contract the answer's type field is checked before
+    # reading; an unexpected type is an error, never a default.
     classifier, posts = _real_transport_with_bodies(
-        monkeypatch, [_openrouter_body(None), _openrouter_body(None)]
+        monkeypatch,
+        [
+            _decisions_body({"type": "text", "text": "I think sell"}),
+            _decisions_body({"type": "text", "text": "I still think sell"}),
+        ],
     )
 
     with pytest.raises(SignalContractError) as exc_info:
-        classifier.classify("prompt")
+        classifier.classify(PROMPT)
 
     assert "twice" in str(exc_info.value)
-    assert "JSON" in str(exc_info.value)
+    assert "type" in str(exc_info.value)
     assert len(posts) == 2
+
+
+def test_choice_outside_buy_sell_hold_retried_once_then_loud(monkeypatch):
+    classifier, posts = _real_transport_with_bodies(
+        monkeypatch,
+        [
+            _decisions_body(_choice_answer(choice="maybe")),
+            _decisions_body(_choice_answer(choice="maybe")),
+        ],
+    )
+
+    with pytest.raises(SignalContractError) as exc_info:
+        classifier.classify(PROMPT)
+
+    assert "twice" in str(exc_info.value)
+    assert "maybe" in str(exc_info.value)
+    assert len(posts) == 2
+
+
+def test_missing_confidence_and_probability_is_a_contract_error(monkeypatch):
+    # With neither confidence nor a probability for the choice there is no
+    # schema-valid confidence: a contract violation, retried once then loud.
+    classifier, posts = _real_transport_with_bodies(
+        monkeypatch,
+        [
+            _decisions_body(_choice_answer(confidence=None, probabilities={})),
+            _decisions_body(_choice_answer(confidence=None, probabilities={})),
+        ],
+    )
+
+    with pytest.raises(SignalContractError) as exc_info:
+        classifier.classify(PROMPT)
+
+    assert "twice" in str(exc_info.value)
+    assert len(posts) == 2
+
+
+def test_provider_http_error_is_loud_and_never_retried(monkeypatch):
+    # Non-200 responses are provider failures (#12 semantics): loud HTTPError,
+    # never retried, never wrapped as a contract violation.
+    import requests
+
+    classifier, posts = _real_transport_with_bodies(monkeypatch, [])
+
+    def failing_post(url, **kwargs):
+        posts.append((url, kwargs))
+        raise requests.HTTPError("503 service unavailable")
+
+    monkeypatch.setattr("stock_market_mcp.classifier.requests.post", failing_post)
+
+    with pytest.raises(requests.HTTPError):
+        classifier.classify(PROMPT)
+
+    assert len(posts) == 1
 
 
 async def test_failed_signal_is_never_cached(server_url):

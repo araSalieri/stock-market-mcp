@@ -5,7 +5,7 @@ import json
 import pandas as pd
 import pytest
 
-from stock_market_mcp.prompt import build_signal_prompt
+from stock_market_mcp.prompt import DEFAULT_MAX_STATE_CHARS, build_signal_prompt
 
 
 def prompt_frame(rows: int = 3) -> pd.DataFrame:
@@ -47,3 +47,46 @@ def test_prompt_rows_are_compact_strings_not_nested_frames():
     prompt = build_signal_prompt("AAPL", "1mo", df)
 
     assert prompt.count('{"Date"') == 3  # one flat JSON object per row
+
+
+def wide_frame(rows: int) -> pd.DataFrame:
+    """Frame wide enough that each row's serialized form is non-trivial."""
+    idx = pd.date_range("2024-01-01", periods=rows, freq="h", name="Date")
+    return pd.DataFrame({"Close": [100.0 + i for i in range(rows)]}, index=idx)
+
+
+def test_prompt_truncates_oldest_rows_to_the_budget():
+    # typesafe/jev-1.13 rejects states over ~32k input tokens with a 400
+    # max_tokens_exceeded, so the builder bounds the payload: the MOST RECENT
+    # rows are kept and the oldest are dropped — recency is the point of a
+    # timing signal.
+    prompt = build_signal_prompt("AAPL", "1y", wide_frame(500), max_chars=8000)
+
+    assert len(prompt) <= 8000
+    payload = json.loads(prompt)
+    assert len(payload["rows"]) < 500
+    # Newest row survives; the oldest rows are the ones dropped.
+    assert payload["rows"][-1]["Close"] == pytest.approx(599.0)
+    assert payload["rows"][0]["Close"] > 100.0
+
+
+def test_prompt_keeps_every_row_within_the_budget():
+    df = wide_frame(20)
+
+    payload = json.loads(build_signal_prompt("AAPL", "1mo", df, max_chars=1_000_000))
+
+    assert len(payload["rows"]) == 20
+
+
+def test_prompt_budget_default_and_env_override(monkeypatch):
+    # Default budget sits under the discovered ~32k-token model cap; the env
+    # override is read at call time like the classifier key and model id.
+    small = build_signal_prompt("AAPL", "1y", wide_frame(500))
+    assert len(small) <= DEFAULT_MAX_STATE_CHARS
+
+    monkeypatch.setenv("SMM_CLASSIFIER_MAX_STATE_CHARS", "500")
+    bounded = build_signal_prompt("AAPL", "1y", wide_frame(500))
+    assert len(bounded) <= 500
+
+    monkeypatch.setenv("SMM_CLASSIFIER_MAX_STATE_CHARS", "")
+    assert len(build_signal_prompt("AAPL", "1y", wide_frame(500))) <= DEFAULT_MAX_STATE_CHARS  # empty env counts as unset

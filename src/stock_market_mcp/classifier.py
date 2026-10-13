@@ -14,7 +14,27 @@ DEFAULT_CLASSIFIER_MODEL = "typesafe/jev-1.13"
 
 # Endpoint pinned as a constant: https only, and requests.post with a timeout
 # (never urllib) so no file: or custom scheme can sneak into the transport.
-OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
+# The default model (typesafe/jev-1.13) is a Decisions model: it rejects
+# chat/completions with 400, so the transport targets the Decisions API.
+OPENROUTER_DECISIONS_URL = "https://openrouter.ai/api/alpha/decisions"
+
+# The single question the verdict hinges on. The state supplied by the caller
+# is the prompt builder's serialized OHLCV+indicators payload (the API accepts
+# a string state verbatim).
+_DECISION_QUESTIONS = {
+    "verdict": {
+        "type": "choice",
+        "instructions": (
+            "Given the supplied price history and indicators, is now the right "
+            "time to buy, sell, or hold this stock? The signal is advisory."
+        ),
+        "criteria": {
+            "buy": "Bullish momentum or trend evidence in the supplied data.",
+            "sell": "Bearish momentum or trend evidence in the supplied data.",
+            "hold": "Mixed or insufficient evidence in the supplied data.",
+        },
+    },
+}
 
 
 def classifier_model_id() -> str:
@@ -90,7 +110,7 @@ class EnforcingClassifier:
 
 
 class OpenRouterClassifier:
-    """Chat-completion transport against the OpenRouter endpoint, strict JSON contract."""
+    """Decisions-API transport against OpenRouter's /api/alpha/decisions endpoint."""
 
     def classify(self, prompt: str) -> dict:
         # Key is read at call time and never stored; a missing key is a loud
@@ -103,59 +123,56 @@ class OpenRouterClassifier:
             )
         request = {
             "model": classifier_model_id(),
-            "messages": [
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a market timing classifier. Judge the supplied "
-                        "price history and indicators. The signal is advisory. "
-                        "Answer with strict JSON only: "
-                        '{"verdict": "buy"|"sell"|"hold", "confidence": 0-1, '
-                        '"rationale": string grounded in the data, '
-                        '"data_date": the date of the last data row}.'
-                    ),
-                },
-                {"role": "user", "content": prompt},
-            ],
-            "response_format": {
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "signal_verdict",
-                    "strict": True,
-                    "schema": {
-                        "type": "object",
-                        "properties": {
-                            "verdict": {
-                                "type": "string",
-                                "enum": ["buy", "sell", "hold"],
-                            },
-                            "confidence": {
-                                "type": "number",
-                                "minimum": 0,
-                                "maximum": 1,
-                            },
-                            "rationale": {"type": "string"},
-                            "data_date": {"type": "string"},
-                        },
-                        "required": ["verdict", "confidence", "rationale", "data_date"],
-                        "additionalProperties": False,
-                    },
-                },
-            },
+            "state": prompt,
+            "questions": _DECISION_QUESTIONS,
         }
         response = requests.post(
-            OPENROUTER_CHAT_URL,
+            OPENROUTER_DECISIONS_URL,
             json=request,
             headers={"Authorization": f"Bearer {api_key}"},
             timeout=120,
         )
+        # Non-200 is a provider failure (#12 semantics): the HTTPError propagates
+        # loudly and is never retried or converted into a contract violation.
         response.raise_for_status()
         body = response.json()
-        content = body["choices"][0]["message"]["content"]
+        answers = body.get("answers")
+        if not isinstance(answers, dict) or "verdict" not in answers:
+            raise SignalContractError("decisions reply missing answer for 'verdict'")
+        answer = answers["verdict"]
+        # The type field must be checked before reading; an unexpected type is an
+        # error, never a default.
+        if not isinstance(answer, dict) or answer.get("type") != "choice":
+            raise SignalContractError(f"answer for 'verdict' has unexpected type: {answer!r}")
+        choice = answer.get("choice")
+        if choice not in _VALID_VERDICTS:
+            raise SignalContractError(
+                f"verdict must be one of buy/sell/hold, got: {choice!r}"
+            )
+        probabilities = answer.get("probabilities")
+        confidence = answer.get("confidence")
+        # confidence and probabilities are schema-optional; read through presence
+        # checks, and with neither there is no schema-valid confidence.
+        if confidence is None:
+            if not isinstance(probabilities, dict) or choice not in probabilities:
+                raise SignalContractError(
+                    f"answer has neither confidence nor a probability for '{choice}'"
+                )
+            confidence = probabilities[choice]
+        probs_desc = (
+            ", ".join(f"{key}={value}" for key, value in probabilities.items())
+            if isinstance(probabilities, dict)
+            else "unavailable"
+        )
+        # The Decisions reply carries no date of its own; the prompt's last row
+        # is the date of the last data row, flowing from the tool's input.
         try:
-            return json.loads(content)
-        except (json.JSONDecodeError, TypeError) as exc:
-            # A chatty/malformed model reply is a formatting slip, so it goes
-            # through the same one-retry contract as a schema violation. TypeError
-            # covers a non-string/None content that json.loads refuses outright.
-            raise SignalContractError(f"reply is not valid JSON: {exc}") from exc
+            data_date = json.loads(prompt)["rows"][-1]["Date"]
+        except (json.JSONDecodeError, KeyError, IndexError, TypeError):
+            data_date = ""
+        return {
+            "verdict": choice,
+            "confidence": confidence,
+            "rationale": f"Decisions API chose {choice} (probabilities: {probs_desc})",
+            "data_date": data_date,
+        }
