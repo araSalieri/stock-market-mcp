@@ -1,12 +1,17 @@
-"""MCP-surface tests for get_signal: verdict round-trip through a fake classifier."""
+"""MCP-surface tests for get_signal: verdict round-trip through a fake classifier,
+plus the 5-minute TTL cache asserted via classifier call counts (ticket #13)."""
 
 import json
+import time
 
 import pytest
 from test_get_history import fake_history
 from test_get_quote import FakeFetcher, call_tool, text_of
 
 from stock_market_mcp.classifier import classifier_model_id
+
+# Short TTL so tests can cross the expiry window without waiting on real timeouts.
+TEST_SIGNAL_TTL = 0.2
 
 
 class SignalFakeFetcher:
@@ -166,3 +171,47 @@ async def test_other_tools_keep_working_without_openrouter_key(server_url, monke
 
     assert not result.is_error
     assert "190.0" in text_of(result)
+
+
+async def test_second_signal_within_ttl_is_served_from_cache(server_url):
+    classifier = FakeClassifier()
+    fetcher = SignalFakeFetcher()
+    url = server_url(fetcher, classifier=classifier, signal_ttl=TEST_SIGNAL_TTL)
+
+    first = await call_tool(url, "get_signal", {"ticker": "AAPL", "period": "1mo"})
+    second = await call_tool(url, "get_signal", {"ticker": "AAPL", "period": "1mo"})
+
+    assert not first.is_error
+    assert not second.is_error
+    assert text_of(second) == text_of(first)  # identical verdict inside the window
+    assert len(classifier.prompts) == 1  # second call never touched the classifier
+
+
+async def test_signal_after_ttl_expiry_reinvokes_classifier(server_url):
+    classifier = FakeClassifier()
+    fetcher = SignalFakeFetcher()
+    url = server_url(fetcher, classifier=classifier, signal_ttl=TEST_SIGNAL_TTL)
+
+    first = await call_tool(url, "get_signal", {"ticker": "AAPL", "period": "1mo"})
+    time.sleep(TEST_SIGNAL_TTL + 0.1)
+    second = await call_tool(url, "get_signal", {"ticker": "AAPL", "period": "1mo"})
+
+    assert not first.is_error
+    assert not second.is_error
+    assert len(classifier.prompts) == 2  # window expired: classifier ran again
+    assert text_of(second) == text_of(first)
+
+
+async def test_failed_signal_is_never_cached(server_url):
+    classifier = FakeClassifier(error=RuntimeError("openrouter 500"))
+    fetcher = SignalFakeFetcher()
+    url = server_url(fetcher, classifier=classifier, signal_ttl=TEST_SIGNAL_TTL)
+
+    first = await call_tool(url, "get_signal", {"ticker": "AAPL", "period": "1mo"})
+    second = await call_tool(url, "get_signal", {"ticker": "AAPL", "period": "1mo"})
+
+    assert first.is_error
+    assert "openrouter 500" in text_of(first)
+    assert second.is_error  # failure is retried, not pinned to the ticker
+    assert "openrouter 500" in text_of(second)
+    assert len(classifier.prompts) == 2  # the failed call was not cached
