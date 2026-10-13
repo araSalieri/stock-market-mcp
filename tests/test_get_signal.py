@@ -8,7 +8,12 @@ import pytest
 from test_get_history import fake_history
 from test_get_quote import FakeFetcher, call_tool, text_of
 
-from stock_market_mcp.classifier import classifier_model_id
+from stock_market_mcp.classifier import (
+    EnforcingClassifier,
+    OpenRouterClassifier,
+    SignalContractError,
+    classifier_model_id,
+)
 
 # Short TTL so tests can cross the expiry window without waiting on real timeouts.
 TEST_SIGNAL_TTL = 0.2
@@ -200,6 +205,71 @@ async def test_signal_after_ttl_expiry_reinvokes_classifier(server_url):
     assert not second.is_error
     assert len(classifier.prompts) == 2  # window expired: classifier ran again
     assert text_of(second) == text_of(first)
+
+
+class FakeResponse:
+    """Minimal requests.Response stub: raise_for_status no-op, json returns the body."""
+
+    def __init__(self, body):
+        self._body = body
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return self._body
+
+
+def _openrouter_body(content):
+    return {"choices": [{"message": {"content": content}}]}
+
+
+GOOD_VERDICT = {
+    "verdict": "sell",
+    "confidence": 0.9,
+    "rationale": "overbought",
+    "data_date": "2024-01-03",
+}
+
+
+def _real_transport_with_bodies(monkeypatch, bodies):
+    """Real OpenRouterClassifier transport with requests.post serving bodies in order."""
+    posts = []
+
+    def fake_post(*args, **kwargs):
+        posts.append(args)
+        return FakeResponse(bodies.pop(0))
+
+    monkeypatch.setenv("SMM_OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr("stock_market_mcp.classifier.requests.post", fake_post)
+    return EnforcingClassifier(OpenRouterClassifier()), posts
+
+
+def test_none_content_retried_once_then_valid_verdict(monkeypatch):
+    # A non-string message content is a formatting slip like bad JSON: it goes
+    # through the one-retry contract, and the retry's valid verdict succeeds.
+    classifier, posts = _real_transport_with_bodies(
+        monkeypatch,
+        [_openrouter_body(None), _openrouter_body(json.dumps(GOOD_VERDICT))],
+    )
+
+    assert classifier.classify("prompt") == GOOD_VERDICT
+    assert len(posts) == 2  # exactly one retry
+
+
+def test_none_content_twice_is_loud_contract_error(monkeypatch):
+    # Two non-string contents exhaust the retry: a loud SignalContractError
+    # naming the violation, never a fabricated success.
+    classifier, posts = _real_transport_with_bodies(
+        monkeypatch, [_openrouter_body(None), _openrouter_body(None)]
+    )
+
+    with pytest.raises(SignalContractError) as exc_info:
+        classifier.classify("prompt")
+
+    assert "twice" in str(exc_info.value)
+    assert "JSON" in str(exc_info.value)
+    assert len(posts) == 2
 
 
 async def test_failed_signal_is_never_cached(server_url):

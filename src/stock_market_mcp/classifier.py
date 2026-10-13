@@ -154,7 +154,8 @@ class OpenRouterClassifier:
         content = body["choices"][0]["message"]["content"]
         try:
             return json.loads(content)
-        except json.JSONDecodeError as exc:
+        except (json.JSONDecodeError, TypeError) as exc:
             # A chatty/malformed model reply is a formatting slip, so it goes
-            # through the same one-retry contract as a schema violation.
+            # through the same one-retry contract as a schema violation. TypeError
+            # covers a non-string/None content that json.loads refuses outright.
             raise SignalContractError(f"reply is not valid JSON: {exc}") from exc
