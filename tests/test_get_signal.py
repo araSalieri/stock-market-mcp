@@ -2,8 +2,9 @@
 
 import json
 
+import pytest
 from test_get_history import fake_history
-from test_get_quote import call_tool, text_of
+from test_get_quote import FakeFetcher, call_tool, text_of
 
 from stock_market_mcp.classifier import classifier_model_id
 
@@ -26,9 +27,13 @@ class SignalFakeFetcher:
 
 
 class FakeClassifier:
-    """Fake transport below the classifier boundary; no network, records prompts."""
+    """Fake transport below the classifier boundary; no network, records prompts.
 
-    def __init__(self, verdict=None, error=None):
+    replies (optional) is a sequence of verdicts handed out one per classify call;
+    without it every call returns verdict.
+    """
+
+    def __init__(self, verdict=None, error=None, replies=None):
         self.verdict = verdict or {
             "verdict": "buy",
             "confidence": 0.7,
@@ -36,12 +41,15 @@ class FakeClassifier:
             "data_date": "2024-01-03T11:00:00",
         }
         self.error = error
+        self.replies = list(replies) if replies is not None else None
         self.prompts = []
 
     def classify(self, prompt):
         self.prompts.append(prompt)
         if self.error is not None:
             raise self.error
+        if self.replies is not None:
+            return self.replies.pop(0)
         return self.verdict
 
 
@@ -78,3 +86,83 @@ async def test_get_signal_returns_strict_json_verdict(server_url):
     last_row = prompt_payload["rows"][-1]
     assert last_row["Date"].startswith("2024-01-03T11:00:00")
     assert "RSI_14" in last_row  # the computed indicator set is in the prompt
+
+
+async def test_malformed_reply_retried_once_then_loud_error(server_url):
+    # Both attempts violate the contract; exactly one retry, then a loud tool
+    # error naming the violation. Agents never see a fabricated success.
+    bad_verdict = {"verdict": "maybe", "confidence": 0.7,
+                   "rationale": "uptrend", "data_date": "2024-01-03"}
+    missing_key = {"verdict": "hold", "confidence": 0.5, "data_date": "2024-01-03"}
+    classifier = FakeClassifier(replies=[bad_verdict, missing_key])
+    result = await call_tool(
+        server_url(fetcher := SignalFakeFetcher(), classifier=classifier),
+        "get_signal",
+        {"ticker": "AAPL", "period": "1mo"},
+    )
+
+    assert result.is_error
+    message = text_of(result)
+    assert "verdict" in message  # names the violation
+    assert len(classifier.prompts) == 2  # exactly one retry
+    assert fetcher.history_calls == [("AAPL", "1mo")]
+
+
+async def test_single_formatting_slip_recovers_after_one_retry(server_url):
+    # One malformed reply, then a valid one: the call succeeds on the retry.
+    bad = {"verdict": "maybe", "confidence": 0.7,
+           "rationale": "uptrend", "data_date": "2024-01-03"}
+    good = {"verdict": "sell", "confidence": 0.9,
+            "rationale": "overbought", "data_date": "2024-01-03"}
+    classifier = FakeClassifier(replies=[bad, good])
+    result = await call_tool(
+        server_url(SignalFakeFetcher(), classifier=classifier),
+        "get_signal",
+        {"ticker": "AAPL", "period": "1mo"},
+    )
+
+    assert not result.is_error
+    assert json.loads(text_of(result)) == good
+    assert len(classifier.prompts) == 2  # the retry happened, not a third call
+
+
+async def test_provider_failure_is_loud_and_never_retried(server_url):
+    # Transport errors are not formatting slips: loud immediately, no retry call.
+    classifier = FakeClassifier(error=RuntimeError("openrouter timeout"))
+    result = await call_tool(
+        server_url(SignalFakeFetcher(), classifier=classifier),
+        "get_signal",
+        {"ticker": "AAPL", "period": "1mo"},
+    )
+
+    assert result.is_error
+    assert "openrouter timeout" in text_of(result)
+    assert len(classifier.prompts) == 1
+
+
+async def test_missing_openrouter_key_is_a_loud_tool_error(server_url, monkeypatch):
+    # Real transport (no fake): the key is checked at call time, before any HTTP.
+    # The patched requests.post proves the error fires with zero network I/O.
+    monkeypatch.delenv("SMM_OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setattr(
+        "stock_market_mcp.classifier.requests.post",
+        lambda *a, **k: pytest.fail("network I/O attempted despite missing key"),
+    )
+    result = await call_tool(
+        server_url(SignalFakeFetcher()),  # no classifier injected: real transport
+        "get_signal",
+        {"ticker": "AAPL", "period": "1mo"},
+    )
+
+    assert result.is_error
+    assert "SMM_OPENROUTER_API_KEY" in text_of(result)
+
+
+async def test_other_tools_keep_working_without_openrouter_key(server_url, monkeypatch):
+    monkeypatch.delenv("SMM_OPENROUTER_API_KEY", raising=False)
+    fetcher = FakeFetcher(quotes={"AAPL": {"price": 190.0, "currency": "USD"}})
+
+    result = await call_tool(server_url(fetcher), "get_quote", {"ticker": "AAPL"})
+
+    assert not result.is_error
+    assert "190.0" in text_of(result)

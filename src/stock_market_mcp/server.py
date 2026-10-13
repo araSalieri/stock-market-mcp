@@ -16,7 +16,11 @@ from stock_market_mcp.cache import (
     CachingClassifier,
     CachingFetcher,
 )
-from stock_market_mcp.classifier import OpenRouterClassifier, SignalClassifier
+from stock_market_mcp.classifier import (
+    EnforcingClassifier,
+    OpenRouterClassifier,
+    SignalClassifier,
+)
 from stock_market_mcp.data import DataFetcher
 from stock_market_mcp.prompt import build_signal_prompt
 
@@ -100,7 +104,7 @@ def build_server(
         fundamentals_ttl=fundamentals_ttl,
     )
     signal_classifier = CachingClassifier(
-        classifier if classifier is not None else OpenRouterClassifier(),
+        EnforcingClassifier(classifier if classifier is not None else OpenRouterClassifier()),
         signal_ttl=signal_ttl,
     )
     mcp = MCPServer("stock-market-mcp")
