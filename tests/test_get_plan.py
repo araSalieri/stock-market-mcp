@@ -63,11 +63,13 @@ async def test_long_plan_with_defaults(server_url):
         "stop": pytest.approx(96.0),
         "target": pytest.approx(108.0),
         "atr": pytest.approx(2.0),
-        "atr_multiple": 2,
-        "reward_ratio": 2,
+        "atr_multiple": 2.0,
+        "reward_ratio": 2.0,
         # Same string get_signal yields for these rows (its prompt's last Date).
         "data_date": "2024-01-20T00:00:00.000",
     }
+    assert isinstance(plan["atr_multiple"], float)
+    assert isinstance(plan["reward_ratio"], float)
 
 
 async def test_get_plan_is_the_fifth_tool_and_says_advisory(server_url):
@@ -259,3 +261,6 @@ async def test_exactly_ten_is_accepted(server_url):
     plan = json.loads(text_of(result))
     assert plan["stop"] == pytest.approx(80.0)
     assert plan["target"] == pytest.approx(300.0)
+    # JSON ints are accepted and echoed as floats.
+    assert isinstance(plan["atr_multiple"], float)
+    assert isinstance(plan["reward_ratio"], float)

@@ -71,8 +71,9 @@ INDICATOR_ALLOWLIST = frozenset(_INDICATOR_DISPATCH)
 
 # get_plan inputs: a fixed ~3-month window gives ATR(14) headroom without a full year.
 PLAN_PERIOD = "3mo"
-PLAN_ATR_MULTIPLE = 2
-PLAN_REWARD_RATIO = 2
+PLAN_ATR_MULTIPLE = 2.0
+PLAN_REWARD_RATIO = 2.0
+PLAN_ARG_MAX = 10
 
 
 def _indicator_frame(name: str, df: pd.DataFrame) -> pd.DataFrame:
@@ -183,8 +184,8 @@ def build_server(
     ) -> dict:
         """Advisory Trade Plan (Entry, Stop, Target) for a Direction from the last close and ATR(14); input only, never acts on it."""
         for name, value in (("atr_multiple", atr_multiple), ("reward_ratio", reward_ratio)):
-            if not 0 < value <= 10:
-                raise ToolError(f"{name} must be in (0, 10], got {value}")
+            if not 0 < value <= PLAN_ARG_MAX:
+                raise ToolError(f"{name} must be in (0, {PLAN_ARG_MAX}], got {value}")
         if direction not in ("long", "short"):
             raise ToolError(f"unsupported direction: {direction}; allowed: long, short")
         try:
@@ -198,8 +199,8 @@ def build_server(
         entry = float(df["Close"].iloc[-1])
         if not (math.isfinite(entry) and math.isfinite(atr)):
             raise ToolError(f"latest row has a non-finite close or ATR (close={entry}, atr={atr})")
-        side = 1 if direction == "long" else -1
-        stop = entry - side * atr_multiple * atr
+        sign = 1 if direction == "long" else -1
+        stop = entry - sign * atr_multiple * atr
         # Same line for both Directions: short Target = Entry - ratio * (Stop - Entry).
         target = entry + reward_ratio * (entry - stop)
         if stop <= 0 or target <= 0:
