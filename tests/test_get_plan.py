@@ -190,34 +190,23 @@ async def test_non_positive_short_target_is_a_loud_tool_error(server_url):
     assert "non-positive" in text_of(result)
 
 
-async def test_overridden_atr_multiple_and_reward_ratio_change_the_plan_and_are_echoed(server_url):
-    # Entry 100, ATR 2: Stop = 100 - 1.5*2 = 97; Target = 100 + 3*(100-97) = 109.
+# Entry 100, ATR 2, atr_multiple 1.5, reward_ratio 3:
+# long Stop = 100 - 1.5*2 = 97, Target = 100 + 3*(100-97) = 109;
+# short Stop = 100 + 1.5*2 = 103, Target = 100 - 3*(103-100) = 91.
+@pytest.mark.parametrize(("direction", "stop", "target"), [("long", 97.0, 109.0), ("short", 103.0, 91.0)])
+async def test_overridden_atr_multiple_and_reward_ratio_change_the_plan_and_are_echoed(
+    server_url, direction, stop, target
+):
     result = await call_tool(
         server_url(PlanFakeFetcher()),
         "get_plan",
-        {"ticker": "AAPL", "direction": "long", "atr_multiple": 1.5, "reward_ratio": 3},
+        {"ticker": "AAPL", "direction": direction, "atr_multiple": 1.5, "reward_ratio": 3},
     )
 
     assert not result.is_error, text_of(result)
     plan = json.loads(text_of(result))
-    assert plan["stop"] == pytest.approx(97.0)
-    assert plan["target"] == pytest.approx(109.0)
-    assert plan["atr_multiple"] == 1.5
-    assert plan["reward_ratio"] == 3
-
-
-async def test_overridden_arguments_apply_to_a_short_plan(server_url):
-    # Entry 100, ATR 2: Stop = 100 + 1.5*2 = 103; Target = 100 - 3*(103-100) = 91.
-    result = await call_tool(
-        server_url(PlanFakeFetcher()),
-        "get_plan",
-        {"ticker": "AAPL", "direction": "short", "atr_multiple": 1.5, "reward_ratio": 3},
-    )
-
-    assert not result.is_error, text_of(result)
-    plan = json.loads(text_of(result))
-    assert plan["stop"] == pytest.approx(103.0)
-    assert plan["target"] == pytest.approx(91.0)
+    assert plan["stop"] == pytest.approx(stop)
+    assert plan["target"] == pytest.approx(target)
     assert plan["atr_multiple"] == 1.5
     assert plan["reward_ratio"] == 3
 
