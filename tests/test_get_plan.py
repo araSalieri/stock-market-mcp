@@ -234,6 +234,19 @@ async def test_out_of_bounds_argument_is_a_tool_error_naming_the_bound(server_ur
     assert "(0, 10]" in text_of(result)
 
 
+@pytest.mark.parametrize("arg", ["atr_multiple", "reward_ratio"])
+@pytest.mark.parametrize("value", [True, "2"])
+async def test_non_number_argument_is_a_tool_error(server_url, arg, value):
+    result = await call_tool(
+        server_url(PlanFakeFetcher()),
+        "get_plan",
+        {"ticker": "AAPL", "direction": "long", arg: value},
+    )
+
+    assert result.is_error
+    assert arg in text_of(result)
+
+
 async def test_exactly_ten_is_accepted(server_url):
     # Entry 100, ATR 2: Stop = 100 - 10*2 = 80; Target = 100 + 10*(100-80) = 300.
     result = await call_tool(

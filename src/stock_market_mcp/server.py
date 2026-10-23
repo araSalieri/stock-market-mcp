@@ -2,12 +2,13 @@
 
 import json
 import math
-from typing import cast
+from typing import Annotated, cast
 
 import pandas as pd
 import pandas_ta as ta
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
+from pydantic import Strict
 
 from stock_market_mcp.cache import (
     FUNDAMENTALS_TTL_SECONDS,
@@ -176,8 +177,9 @@ def build_server(
     def get_plan(
         ticker: str,
         direction: str,
-        atr_multiple: float = PLAN_ATR_MULTIPLE,
-        reward_ratio: float = PLAN_REWARD_RATIO,
+        # Strict: JSON numbers only; true and "2" are rejected, not coerced.
+        atr_multiple: Annotated[float, Strict()] = PLAN_ATR_MULTIPLE,
+        reward_ratio: Annotated[float, Strict()] = PLAN_REWARD_RATIO,
     ) -> dict:
         """Advisory Trade Plan (Entry, Stop, Target) for a Direction from the last close and ATR(14); input only, never acts on it."""
         for name, value in (("atr_multiple", atr_multiple), ("reward_ratio", reward_ratio)):
