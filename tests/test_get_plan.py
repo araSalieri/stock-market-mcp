@@ -61,7 +61,8 @@ async def test_long_plan_with_defaults(server_url):
         "atr": pytest.approx(2.0),
         "atr_multiple": 2,
         "reward_ratio": 2,
-        "data_date": "2024-01-20",
+        # Same string get_signal yields for these rows (its prompt's last Date).
+        "data_date": "2024-01-20T00:00:00.000",
     }
 
 

@@ -211,7 +211,8 @@ def build_server(
             "atr": atr,
             "atr_multiple": atr_multiple,
             "reward_ratio": reward_ratio,
-            "data_date": cast("pd.Timestamp", df.index[-1]).date().isoformat(),
+            # Same serialization get_signal's prompt uses, so both tools report one data_date.
+            "data_date": _rows(df.tail(1))[0]["Date"],
         }
 
     return mcp
