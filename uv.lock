@@ -1362,6 +1362,7 @@ dependencies = [
     { name = "pandas", version = "2.3.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14'" },
     { name = "pandas", version = "3.0.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14'" },
     { name = "pandas-ta" },
+    { name = "pydantic" },
     { name = "requests" },
     { name = "yfinance" },
 ]
@@ -1378,6 +1379,7 @@ requires-dist = [
     { name = "mcp", specifier = ">=2" },
     { name = "pandas", specifier = ">=2.3.3" },
     { name = "pandas-ta", specifier = ">=0.4.71b0" },
+    { name = "pydantic", specifier = ">=2.14.1" },
     { name = "requests", specifier = ">=2.34.2" },
     { name = "yfinance", specifier = ">=0.2.60" },
 ]
