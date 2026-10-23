@@ -131,3 +131,42 @@ async def test_second_call_within_history_ttl_does_not_refetch(server_url):
     assert not first.is_error and not second.is_error
     assert text_of(first) == text_of(second)
     assert len(fetcher.history_calls) == 1
+
+
+async def test_short_plan_puts_stop_above_and_target_below_entry(server_url):
+    # Entry 100, ATR 2: Stop = 100 + 2*2 = 104, Target = 100 - 2*(104 - 100) = 92.
+    result = await call_tool(
+        server_url(PlanFakeFetcher()), "get_plan", {"ticker": "AAPL", "direction": "short"}
+    )
+
+    assert not result.is_error, text_of(result)
+    plan = json.loads(text_of(result))
+    assert plan["direction"] == "short"
+    assert plan["entry"] == 100.0
+    assert plan["stop"] == pytest.approx(104.0)
+    assert plan["target"] == pytest.approx(92.0)
+
+
+@pytest.mark.parametrize("direction", ["buy", "sell", "LONG"])
+async def test_unknown_direction_is_a_loud_tool_error_naming_allowed_values(
+    server_url, direction
+):
+    result = await call_tool(
+        server_url(PlanFakeFetcher()), "get_plan", {"ticker": "AAPL", "direction": direction}
+    )
+
+    assert result.is_error
+    assert "long" in text_of(result)
+    assert "short" in text_of(result)
+
+
+async def test_non_positive_short_target_is_a_loud_tool_error(server_url):
+    # Entry 1, ATR 2: Stop = 1 + 2*2 = 5, Target = 1 - 2*(5 - 1) = -7.
+    result = await call_tool(
+        server_url(PlanFakeFetcher(close=1.0)),
+        "get_plan",
+        {"ticker": "AAPL", "direction": "short"},
+    )
+
+    assert result.is_error
+    assert "non-positive" in text_of(result)

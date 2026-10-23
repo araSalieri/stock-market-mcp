@@ -174,8 +174,8 @@ def build_server(
     @mcp.tool()
     def get_plan(ticker: str, direction: str) -> dict:
         """Advisory Trade Plan (Entry, Stop, Target) for a Direction from the last close and ATR(14); input only, never acts on it."""
-        if direction != "long":
-            raise ToolError(f"unsupported direction: {direction}; allowed: long")
+        if direction not in ("long", "short"):
+            raise ToolError(f"unsupported direction: {direction}; allowed: long, short")
         try:
             df = fetcher.fetch_history(ticker, PLAN_PERIOD)
         except Exception as exc:
@@ -185,7 +185,9 @@ def build_server(
         if atr != atr:  # None or NaN last value: too few rows for ATR(14)
             raise ToolError("not enough history rows for indicator: atr")
         entry = float(df["Close"].iloc[-1])
-        stop = entry - PLAN_ATR_MULTIPLE * atr
+        side = 1 if direction == "long" else -1
+        stop = entry - side * PLAN_ATR_MULTIPLE * atr
+        # Same line for both Directions: short Target = Entry - ratio * (Stop - Entry).
         target = entry + PLAN_REWARD_RATIO * (entry - stop)
         if stop <= 0 or target <= 0:
             raise ToolError(
