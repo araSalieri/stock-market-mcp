@@ -4,7 +4,7 @@
 
 ### Issue tracker
 
-Issues live in GitHub Issues for `araSalieri/stock-market-mcp` (via `gh`). See `docs/agents/issue-tracker.md`.
+Issues live in GitHub Issues for `araSalieri/stock-market-mcp` (via `gh`). See `docs/agents/issue-tracker-github.md`.
 
 ### Triage labels
 
