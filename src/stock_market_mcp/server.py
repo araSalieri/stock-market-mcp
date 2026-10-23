@@ -67,6 +67,12 @@ _INDICATOR_DISPATCH = {
 INDICATOR_ALLOWLIST = frozenset(_INDICATOR_DISPATCH)
 
 
+# get_plan inputs: a fixed ~3-month window gives ATR(14) headroom without a full year.
+PLAN_PERIOD = "3mo"
+PLAN_ATR_MULTIPLE = 2
+PLAN_REWARD_RATIO = 2
+
+
 def _indicator_frame(name: str, df: pd.DataFrame) -> pd.DataFrame:
     """Indicator values for one allowed name, keyed by pandas-ta's own column names."""
     handler = _INDICATOR_DISPATCH.get(name)
@@ -164,5 +170,38 @@ def build_server(
             return signal_classifier.classify(prompt)
         except Exception as exc:
             raise ToolError(str(exc)) from exc
+
+    @mcp.tool()
+    def get_plan(ticker: str, direction: str) -> dict:
+        """Advisory Trade Plan (Entry, Stop, Target) for a Direction from the last close and ATR(14); input only, never acts on it."""
+        if direction != "long":
+            raise ToolError(f"unsupported direction: {direction}; allowed: long")
+        try:
+            df = fetcher.fetch_history(ticker, PLAN_PERIOD)
+        except Exception as exc:
+            raise ToolError(str(exc)) from exc
+        atr_frame = _indicator_frame("atr", df)
+        atr = float("nan") if atr_frame is None else float(atr_frame.iloc[-1, 0])
+        if atr != atr:  # None or NaN last value: too few rows for ATR(14)
+            raise ToolError("not enough history rows for indicator: atr")
+        entry = float(df["Close"].iloc[-1])
+        stop = entry - PLAN_ATR_MULTIPLE * atr
+        target = entry + PLAN_REWARD_RATIO * (entry - stop)
+        if stop <= 0 or target <= 0:
+            raise ToolError(
+                f"plan has non-positive prices (stop={stop}, target={target}); "
+                "ATR is too large relative to the last close"
+            )
+        return {
+            "ticker": ticker.upper(),
+            "direction": direction,
+            "entry": entry,
+            "stop": stop,
+            "target": target,
+            "atr": atr,
+            "atr_multiple": PLAN_ATR_MULTIPLE,
+            "reward_ratio": PLAN_REWARD_RATIO,
+            "data_date": cast("pd.Timestamp", df.index[-1]).date().isoformat(),
+        }
 
     return mcp
