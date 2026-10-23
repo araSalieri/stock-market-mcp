@@ -172,8 +172,16 @@ def build_server(
             raise ToolError(str(exc)) from exc
 
     @mcp.tool()
-    def get_plan(ticker: str, direction: str) -> dict:
+    def get_plan(
+        ticker: str,
+        direction: str,
+        atr_multiple: float = PLAN_ATR_MULTIPLE,
+        reward_ratio: float = PLAN_REWARD_RATIO,
+    ) -> dict:
         """Advisory Trade Plan (Entry, Stop, Target) for a Direction from the last close and ATR(14); input only, never acts on it."""
+        for name, value in (("atr_multiple", atr_multiple), ("reward_ratio", reward_ratio)):
+            if not 0 < value <= 10:
+                raise ToolError(f"{name} must be in (0, 10], got {value}")
         if direction != "long":
             raise ToolError(f"unsupported direction: {direction}; allowed: long")
         try:
@@ -185,8 +193,8 @@ def build_server(
         if atr != atr:  # None or NaN last value: too few rows for ATR(14)
             raise ToolError("not enough history rows for indicator: atr")
         entry = float(df["Close"].iloc[-1])
-        stop = entry - PLAN_ATR_MULTIPLE * atr
-        target = entry + PLAN_REWARD_RATIO * (entry - stop)
+        stop = entry - atr_multiple * atr
+        target = entry + reward_ratio * (entry - stop)
         if stop <= 0 or target <= 0:
             raise ToolError(
                 f"plan has non-positive prices (stop={stop}, target={target}); "
@@ -199,8 +207,8 @@ def build_server(
             "stop": stop,
             "target": target,
             "atr": atr,
-            "atr_multiple": PLAN_ATR_MULTIPLE,
-            "reward_ratio": PLAN_REWARD_RATIO,
+            "atr_multiple": atr_multiple,
+            "reward_ratio": reward_ratio,
             "data_date": cast("pd.Timestamp", df.index[-1]).date().isoformat(),
         }
 

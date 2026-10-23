@@ -131,3 +131,47 @@ async def test_second_call_within_history_ttl_does_not_refetch(server_url):
     assert not first.is_error and not second.is_error
     assert text_of(first) == text_of(second)
     assert len(fetcher.history_calls) == 1
+
+
+async def test_overridden_atr_multiple_and_reward_ratio_change_the_plan_and_are_echoed(server_url):
+    # Entry 100, ATR 2: Stop = 100 - 1.5*2 = 97; Target = 100 + 3*(100-97) = 109.
+    result = await call_tool(
+        server_url(PlanFakeFetcher()),
+        "get_plan",
+        {"ticker": "AAPL", "direction": "long", "atr_multiple": 1.5, "reward_ratio": 3},
+    )
+
+    assert not result.is_error, text_of(result)
+    plan = json.loads(text_of(result))
+    assert plan["stop"] == pytest.approx(97.0)
+    assert plan["target"] == pytest.approx(109.0)
+    assert plan["atr_multiple"] == 1.5
+    assert plan["reward_ratio"] == 3
+
+
+@pytest.mark.parametrize("arg", ["atr_multiple", "reward_ratio"])
+@pytest.mark.parametrize("value", [0, -1, 10.5])
+async def test_out_of_bounds_argument_is_a_tool_error_naming_the_bound(server_url, arg, value):
+    result = await call_tool(
+        server_url(PlanFakeFetcher()),
+        "get_plan",
+        {"ticker": "AAPL", "direction": "long", arg: value},
+    )
+
+    assert result.is_error
+    assert arg in text_of(result)
+    assert "(0, 10]" in text_of(result)
+
+
+async def test_exactly_ten_is_accepted(server_url):
+    # Entry 100, ATR 2: Stop = 100 - 10*2 = 80; Target = 100 + 10*(100-80) = 300.
+    result = await call_tool(
+        server_url(PlanFakeFetcher()),
+        "get_plan",
+        {"ticker": "AAPL", "direction": "long", "atr_multiple": 10, "reward_ratio": 10},
+    )
+
+    assert not result.is_error, text_of(result)
+    plan = json.loads(text_of(result))
+    assert plan["stop"] == pytest.approx(80.0)
+    assert plan["target"] == pytest.approx(300.0)
