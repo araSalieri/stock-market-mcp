@@ -27,10 +27,11 @@ def flat_history(close: float, rows: int = 20) -> pd.DataFrame:
 
 
 class PlanFakeFetcher(DataFetcher):
-    def __init__(self, close: float = 100.0, rows: int = 20):
+    def __init__(self, close: float = 100.0, rows: int = 20, last_row: dict | None = None):
         self.history_calls = []
         self.close = close
         self.rows = rows
+        self.last_row = last_row or {}
 
     def fetch_quote(self, ticker):
         raise AssertionError("get_plan tests never fetch quotes")
@@ -42,7 +43,10 @@ class PlanFakeFetcher(DataFetcher):
         self.history_calls.append((ticker, period))
         if ticker.upper() != "AAPL":
             raise LookupError(f"no history data for ticker: {ticker}")
-        return flat_history(self.close, self.rows)
+        df = flat_history(self.close, self.rows)
+        for column, value in self.last_row.items():
+            df.loc[df.index[-1], column] = value
+        return df
 
 
 async def test_long_plan_with_defaults(server_url):
@@ -99,6 +103,17 @@ async def test_too_few_rows_for_atr_is_a_loud_tool_error(server_url):
 
     assert result.is_error
     assert "not enough history rows" in text_of(result)
+
+
+async def test_nan_last_close_is_a_loud_tool_error(server_url):
+    result = await call_tool(
+        server_url(PlanFakeFetcher(last_row={"Close": float("nan")})),
+        "get_plan",
+        {"ticker": "AAPL", "direction": "long"},
+    )
+
+    assert result.is_error
+    assert "non-finite close" in text_of(result)
 
 
 async def test_non_positive_stop_is_a_loud_tool_error_not_clamped(server_url):

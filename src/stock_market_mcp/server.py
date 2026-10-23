@@ -1,6 +1,7 @@
 """MCP server assembly: tools registered against an injectable data fetcher."""
 
 import json
+import math
 from typing import cast
 
 import pandas as pd
@@ -189,10 +190,12 @@ def build_server(
         except Exception as exc:
             raise ToolError(str(exc)) from exc
         atr_frame = _indicator_frame("atr", df)
-        atr = float("nan") if atr_frame is None else float(atr_frame.iloc[-1, 0])
-        if atr != atr:  # None or NaN last value: too few rows for ATR(14)
+        if atr_frame is None:
             raise ToolError("not enough history rows for indicator: atr")
+        atr = float(atr_frame.iloc[-1, 0])
         entry = float(df["Close"].iloc[-1])
+        if not (math.isfinite(entry) and math.isfinite(atr)):
+            raise ToolError(f"latest row has a non-finite close or ATR (close={entry}, atr={atr})")
         side = 1 if direction == "long" else -1
         stop = entry - side * atr_multiple * atr
         # Same line for both Directions: short Target = Entry - ratio * (Stop - Entry).
