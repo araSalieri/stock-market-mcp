@@ -51,7 +51,7 @@ async def main():
         await session.initialize()
         tools = await session.list_tools()
         names = sorted(t.name for t in tools.tools)
-        assert names == ["get_fundamentals", "get_history", "get_quote", "get_signal"], names
+        assert names == ["get_fundamentals", "get_history", "get_plan", "get_quote", "get_signal"], names
         print(f"tools: {', '.join(names)}")
 
         quote = json.loads(await call(session, "get_quote", {"ticker": TICKER}))
