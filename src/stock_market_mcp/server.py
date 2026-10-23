@@ -182,8 +182,8 @@ def build_server(
         for name, value in (("atr_multiple", atr_multiple), ("reward_ratio", reward_ratio)):
             if not 0 < value <= 10:
                 raise ToolError(f"{name} must be in (0, 10], got {value}")
-        if direction != "long":
-            raise ToolError(f"unsupported direction: {direction}; allowed: long")
+        if direction not in ("long", "short"):
+            raise ToolError(f"unsupported direction: {direction}; allowed: long, short")
         try:
             df = fetcher.fetch_history(ticker, PLAN_PERIOD)
         except Exception as exc:
@@ -193,7 +193,9 @@ def build_server(
         if atr != atr:  # None or NaN last value: too few rows for ATR(14)
             raise ToolError("not enough history rows for indicator: atr")
         entry = float(df["Close"].iloc[-1])
-        stop = entry - atr_multiple * atr
+        side = 1 if direction == "long" else -1
+        stop = entry - side * atr_multiple * atr
+        # Same line for both Directions: short Target = Entry - ratio * (Stop - Entry).
         target = entry + reward_ratio * (entry - stop)
         if stop <= 0 or target <= 0:
             raise ToolError(
