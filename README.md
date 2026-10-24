@@ -8,9 +8,9 @@ A read-only MCP server that gives coding agents stock market data, indicators, a
 |------|-----------|---------|
 | `get_quote` | `ticker` | Current price and currency |
 | `get_fundamentals` | `ticker` | Name, sector, industry, market cap |
-| `get_history` | `ticker`, `period="1y"`, `indicators=[]` | OHLCV rows, optionally joined with indicators: `sma`, `ema`, `rsi`, `macd`, `bbands`, `atr`, `adx`, `vwap` |
-| `get_signal` | `ticker`, `period="1y"` | Advisory Signal: a buy/sell/hold Verdict with confidence, rationale, and data date. Needs an OpenRouter key. |
-| `get_plan` | `ticker`, `direction` (`long` or `short`), `atr_multiple=2`, `reward_ratio=2` | Advisory Trade Plan: Entry (last close), Stop (`atr_multiple` × ATR(14) away), and Target (`reward_ratio` × the Stop distance) |
+| `get_signal` | `ticker`, `period="1y"`, `atr_multiple=2`, `reward_ratio=2` | Advisory Signal: a buy/sell/hold Verdict with confidence, rationale, `data_date`, and `trade_plan`. Needs an OpenRouter key. |
+
+`get_signal` computes `sma`, `ema`, `rsi`, `macd`, `bbands`, `atr`, `adx` and `vwap` over `period` and sends them to the classifier. `trade_plan` is `null` for hold. For buy (long) or sell (short) it holds `direction`, `entry` (last close), `stop` (`atr_multiple` × ATR(14) away), `target` (`reward_ratio` × the Stop distance), `atr`, `atr_multiple` and `reward_ratio`. `atr_multiple` and `reward_ratio` must be numbers in (0, 10].
 
 Results are cached in memory: quotes for 60 seconds, everything else for 5 minutes. Bad input, unknown tickers, and missing data return a tool error rather than an empty result. Domain terms are defined in [GLOSSARY.md](GLOSSARY.md).
 
@@ -49,7 +49,7 @@ Other clients: point them at the same URL as a streamable HTTP server.
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `SMM_OPENROUTER_API_KEY` | none | Required for `get_signal`. Other tools work without it. |
+| `SMM_OPENROUTER_API_KEY` | none | Required for `get_signal`, so every Trade Plan needs it. Other tools work without it. |
 | `SMM_CLASSIFIER_MODEL` | `typesafe/jev-1.13` | Model used for `get_signal` |
 | `SMM_HOST` | `127.0.0.1` | Listen address (compose sets `0.0.0.0`) |
 | `SMM_PORT` | `8000` | Listen port |

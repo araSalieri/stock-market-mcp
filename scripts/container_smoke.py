@@ -4,9 +4,9 @@ Run against a container started by `docker compose up -d --build`:
 
     uv run python scripts/container_smoke.py
 
-Proves the three data tools end to end, then makes one real `get_signal`
+Proves the two data tools end to end, then makes one real `get_signal`
 call through the real classifier. With `SMM_OPENROUTER_API_KEY` set on the
-host it validates the schema-enforced verdict; when the key is absent the
+host it validates the schema-enforced verdict and its `trade_plan`; when the key is absent the
 missing-key tool error is expected and the smoke stops with the exact
 key-setup step instead of faking success.
 """
@@ -51,7 +51,7 @@ async def main():
         await session.initialize()
         tools = await session.list_tools()
         names = sorted(t.name for t in tools.tools)
-        assert names == ["get_fundamentals", "get_history", "get_plan", "get_quote", "get_signal"], names
+        assert names == ["get_fundamentals", "get_quote", "get_signal"], names
         print(f"tools: {', '.join(names)}")
 
         quote = json.loads(await call(session, "get_quote", {"ticker": TICKER}))
@@ -62,12 +62,6 @@ async def main():
         assert fundamentals, "get_fundamentals returned an empty payload"
         print(f"get_fundamentals: {fundamentals.get('name', fundamentals)}")
 
-        history = json.loads(
-            await call(session, "get_history", {"ticker": TICKER, "indicators": ["sma", "rsi"]})
-        )
-        assert history["rows"], "get_history returned no rows"
-        print(f"get_history: {len(history['rows'])} rows, last {history['rows'][-1]['Date'][:10]}")
-
         # One real classifier call; the missing-key tool error is the pass
         # condition when the host has no key, and we stop and ask instead.
         result = await session.call_tool("get_signal", {"ticker": TICKER})
@@ -76,10 +70,14 @@ async def main():
             if "SMM_OPENROUTER_API_KEY" in text:
                 raise MissingKey(f"{text}\n{KEY_SETUP}")
             raise RuntimeError(f"get_signal failed: {text}")
-        verdict = validate_signal(json.loads(text))
+        payload = json.loads(text)
+        assert "trade_plan" in payload, "get_signal returned no trade_plan key"
+        plan = payload.pop("trade_plan")
+        verdict = validate_signal(payload)
+        assert (plan is None) == (verdict["verdict"] == "hold"), plan
         print(
             f"get_signal: {verdict['verdict']} "
-            f"(confidence {verdict['confidence']}, data {verdict['data_date']})"
+            f"(confidence {verdict['confidence']}, data {verdict['data_date']}, plan {plan})"
         )
         print("smoke passed")
 

@@ -21,8 +21,8 @@ def build_signal_prompt(
     """Serialize OHLCV history plus joined indicator columns for the classifier.
 
     The frame must already carry the indicator columns the tool computed; rows
-    are emitted exactly the way get_history serves them: ISO date strings and
-    null for NaN (warmup rows of later lookbacks).
+    are emitted as ISO date strings, with null for NaN (warmup rows of later
+    lookbacks).
 
     If the serialized payload exceeds the character budget, the oldest rows are
     dropped until it fits: recency is the point of a timing signal, so the most

@@ -1,6 +1,5 @@
 """MCP server assembly: tools registered against an injectable data fetcher."""
 
-import json
 import math
 from typing import Annotated, cast
 
@@ -64,13 +63,11 @@ _INDICATOR_DISPATCH = {
     ),
 }
 
-# Curated allowlist: the only indicator names get_history will compute.
+# Curated allowlist: the indicators get_signal joins for the classifier.
 # Derived from the dispatch table so adding a branch extends the allowlist too.
 INDICATOR_ALLOWLIST = frozenset(_INDICATOR_DISPATCH)
 
 
-# get_plan inputs: a fixed ~3-month window gives ATR(14) headroom without a full year.
-PLAN_PERIOD = "3mo"
 PLAN_ATR_MULTIPLE = 2.0
 PLAN_REWARD_RATIO = 2.0
 PLAN_ARG_MAX = 10
@@ -80,12 +77,6 @@ PlanArg = Annotated[float, Strict()]
 
 # Verdict -> Trade Plan Direction; hold has no plan.
 _VERDICT_DIRECTION = {"buy": "long", "sell": "short"}
-
-
-def _check_plan_args(atr_multiple: float, reward_ratio: float) -> None:
-    for name, value in (("atr_multiple", atr_multiple), ("reward_ratio", reward_ratio)):
-        if not 0 < value <= PLAN_ARG_MAX:
-            raise ToolError(f"{name} must be in (0, {PLAN_ARG_MAX}], got {value}")
 
 
 def _trade_plan(df: pd.DataFrame, direction: str, atr_multiple: float, reward_ratio: float) -> dict:
@@ -123,14 +114,6 @@ def _indicator_frame(name: str, df: pd.DataFrame) -> pd.DataFrame:
     if handler is None:
         raise ToolError(f"unsupported indicator: {name}")
     return handler(df)
-
-
-def _rows(df):
-    """DataFrame rows as JSON-safe dicts; dates become ISO strings, NaN becomes null."""
-    payload = df.reset_index().to_json(orient="records", date_format="iso")
-    if payload is None:
-        raise ValueError("could not serialize history rows")
-    return json.loads(payload)
 
 
 def build_server(
@@ -176,28 +159,6 @@ def build_server(
             raise ToolError(str(exc)) from exc
 
     @mcp.tool()
-    def get_history(
-        ticker: str, period: str = "1y", indicators: list[str] | None = None
-    ) -> dict:
-        """OHLCV history for a stock ticker over a period."""
-        unknown = sorted(set(indicators or []) - INDICATOR_ALLOWLIST)
-        if unknown:
-            raise ToolError(
-                f"unknown indicator(s): {', '.join(unknown)}; "
-                f"allowed: {', '.join(sorted(INDICATOR_ALLOWLIST))}"
-            )
-        try:
-            df = fetcher.fetch_history(ticker, period)
-        except Exception as exc:
-            raise ToolError(str(exc)) from exc
-        for name in indicators or []:
-            ind = _indicator_frame(name, df)
-            if ind is None:
-                raise ToolError(f"not enough history rows for indicator: {name}")
-            df = df.join(ind)
-        return {"ticker": ticker.upper(), "period": period, "rows": _rows(df)}
-
-    @mcp.tool()
     def get_signal(
         ticker: str,
         period: str = "1y",
@@ -205,7 +166,9 @@ def build_server(
         reward_ratio: PlanArg = PLAN_REWARD_RATIO,
     ) -> dict:
         """Advisory buy/sell/hold verdict from history and indicators, with a Trade Plan (Entry, Stop, Target from the last close and ATR(14)) for buy (long) or sell (short), null for hold; input only, never acts on it."""
-        _check_plan_args(atr_multiple, reward_ratio)
+        for name, value in (("atr_multiple", atr_multiple), ("reward_ratio", reward_ratio)):
+            if not 0 < value <= PLAN_ARG_MAX:
+                raise ToolError(f"{name} must be in (0, {PLAN_ARG_MAX}], got {value}")
         try:
             df = fetcher.fetch_history(ticker, period)
         except Exception as exc:
@@ -224,27 +187,5 @@ def build_server(
         direction = _VERDICT_DIRECTION.get(signal["verdict"])
         plan = _trade_plan(df, direction, atr_multiple, reward_ratio) if direction else None
         return {**signal, "trade_plan": plan}
-
-    @mcp.tool()
-    def get_plan(
-        ticker: str,
-        direction: str,
-        atr_multiple: PlanArg = PLAN_ATR_MULTIPLE,
-        reward_ratio: PlanArg = PLAN_REWARD_RATIO,
-    ) -> dict:
-        """Advisory Trade Plan (Entry, Stop, Target) for a Direction from the last close and ATR(14); input only, never acts on it."""
-        _check_plan_args(atr_multiple, reward_ratio)
-        if direction not in ("long", "short"):
-            raise ToolError(f"unsupported direction: {direction}; allowed: long, short")
-        try:
-            df = fetcher.fetch_history(ticker, PLAN_PERIOD)
-        except Exception as exc:
-            raise ToolError(str(exc)) from exc
-        return {
-            "ticker": ticker.upper(),
-            **_trade_plan(df, direction, atr_multiple, reward_ratio),
-            # Same serialization get_signal's prompt uses, so both tools report one data_date.
-            "data_date": _rows(df.tail(1))[0]["Date"],
-        }
 
     return mcp

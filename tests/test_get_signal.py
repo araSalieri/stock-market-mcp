@@ -7,6 +7,8 @@ import time
 import pandas as pd
 import pytest
 from fakes import fake_history
+from mcp import ClientSession
+from mcp.client.streamable_http import streamable_http_client
 from test_get_quote import FakeFetcher, call_tool, text_of
 
 from stock_market_mcp.classifier import (
@@ -425,13 +427,18 @@ def flat_history(close: float = 100.0, rows: int = 60) -> pd.DataFrame:
 
 
 class FlatFakeFetcher(SignalFakeFetcher):
-    def __init__(self, close: float = 100.0):
+    def __init__(self, close: float = 100.0, rows: int = 60, last_close: float | None = None):
         super().__init__()
         self.close = close
+        self.rows = rows
+        self.last_close = last_close
 
     def fetch_history(self, ticker, period):
         self.history_calls.append((ticker, period))
-        return flat_history(self.close)
+        df = flat_history(self.close, self.rows)
+        if self.last_close is not None:
+            df.loc[df.index[-1], "Close"] = self.last_close
+        return df
 
 
 def _verdict(verdict, confidence=0.7):
@@ -583,6 +590,30 @@ async def test_non_positive_plan_price_is_a_loud_tool_error(server_url, verdict)
     assert "non-positive" in text_of(result)
 
 
+async def test_nan_last_close_is_a_loud_tool_error(server_url):
+    result = await call_tool(
+        server_url(FlatFakeFetcher(last_close=float("nan")), classifier=FakeClassifier(_verdict("buy"))),
+        "get_signal",
+        {"ticker": "AAPL"},
+    )
+
+    assert result.is_error
+    assert "non-finite close" in text_of(result)
+
+
+async def test_too_few_rows_for_indicators_is_a_loud_tool_error(server_url):
+    # 5 rows is below pandas-ta's default lookbacks, so indicators come back None.
+    classifier = FakeClassifier()
+    result = await call_tool(
+        server_url(FlatFakeFetcher(rows=5), classifier=classifier),
+        "get_signal",
+        {"ticker": "AAPL"},
+    )
+
+    assert result.is_error
+    assert "not enough history rows" in text_of(result)
+    assert classifier.prompts == []
+
 async def test_cached_verdict_gets_a_recomputed_plan_for_new_arguments(server_url):
     # atr_multiple 1: Stop = 100 - 1*2 = 98, Target = 100 + 2*(100 - 98) = 104.
     classifier = FakeClassifier(_verdict("buy"))
@@ -597,3 +628,26 @@ async def test_cached_verdict_gets_a_recomputed_plan_for_new_arguments(server_ur
     assert plan["stop"] == pytest.approx(98.0)
     assert plan["target"] == pytest.approx(104.0)
     assert len(classifier.prompts) == 1
+
+
+# --- Tool surface (ticket #22) ---
+
+
+async def test_server_lists_exactly_three_tools_and_get_signal_says_advisory(server_url):
+    async with (
+        streamable_http_client(server_url(SignalFakeFetcher())) as (read, write),
+        ClientSession(read, write) as session,
+    ):
+        await session.initialize()
+        tools = {t.name: t for t in (await session.list_tools()).tools}
+
+    assert sorted(tools) == ["get_fundamentals", "get_quote", "get_signal"]
+    assert "advisory" in (tools["get_signal"].description or "").lower()
+
+
+@pytest.mark.parametrize("name", ["get_plan", "get_history"])
+async def test_removed_tools_fail_as_unknown(server_url, name):
+    result = await call_tool(server_url(SignalFakeFetcher()), name, {"ticker": "AAPL"})
+
+    assert result.is_error
+    assert "unknown tool" in text_of(result).lower()
