@@ -1,43 +1,5 @@
 import pytest
-from mcp import ClientSession, types
-from mcp.client.streamable_http import streamable_http_client
-from mcp.types import CallToolResult
-
-from stock_market_mcp.data import DataFetcher
-
-
-class FakeFetcher(DataFetcher):
-    def __init__(self, quotes=None, error=None):
-        self.quotes = quotes or {}
-        self.error = error
-        self.quote_calls = []  # asserted on by the TTL-cache ticket
-
-    def fetch_quote(self, ticker):
-        self.quote_calls.append(ticker)
-        if self.error is not None:
-            raise self.error
-        quote = self.quotes.get(ticker.upper())
-        if quote is None:
-            raise LookupError(f"unknown ticker: {ticker}")
-        return quote
-
-    def fetch_fundamentals(self, ticker):
-        raise AssertionError("get_quote tests never fetch fundamentals")
-    # fetch_history intentionally not overridden: relies on the Protocol default,
-    # which the loud-failure test below exercises end to end.
-
-
-async def call_tool(url: str, name: str, args: dict) -> CallToolResult:
-    async with (
-        streamable_http_client(url) as (read, write),
-        ClientSession(read, write) as session,
-    ):
-        await session.initialize()
-        return await session.call_tool(name, args)
-
-
-def text_of(result: CallToolResult) -> str:
-    return "".join(c.text for c in result.content if isinstance(c, types.TextContent))
+from fakes import FakeFetcher, call_tool, text_of
 
 
 async def test_get_quote_unknown_ticker_is_a_loud_tool_error(server_url):

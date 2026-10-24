@@ -1,15 +1,19 @@
-"""MCP-surface tests for get_signal: verdict round-trip through a fake classifier,
-plus the 5-minute TTL cache asserted via classifier call counts (ticket #13)."""
+"""Tests for get_signal: the Signal and its Trade Plan through the MCP surface, plan argument checks, the TTL cache, the Decisions transport, and the three-tool surface."""
 
 import json
 import time
 
-import pandas as pd
 import pytest
-from fakes import fake_history
+from fakes import (
+    FakeClassifier,
+    FakeFetcher,
+    FlatFakeFetcher,
+    SignalFakeFetcher,
+    call_tool,
+    text_of,
+)
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
-from test_get_quote import FakeFetcher, call_tool, text_of
 
 from stock_market_mcp.classifier import (
     EnforcingClassifier,
@@ -22,50 +26,6 @@ from stock_market_mcp.classifier import (
 TEST_SIGNAL_TTL = 0.2
 
 
-class SignalFakeFetcher:
-    """Fake data layer: history only; quote/fundamentals seams must stay untouched."""
-
-    def __init__(self):
-        self.history_calls = []
-
-    def fetch_quote(self, ticker):
-        raise AssertionError("get_signal tests never fetch quotes")
-
-    def fetch_fundamentals(self, ticker):
-        raise AssertionError("get_signal tests never fetch fundamentals")
-
-    def fetch_history(self, ticker, period):
-        self.history_calls.append((ticker, period))
-        return fake_history(60)
-
-
-class FakeClassifier:
-    """Fake transport below the classifier boundary; no network, records prompts.
-
-    replies (optional) is a sequence of verdicts handed out one per classify call;
-    without it every call returns verdict.
-    """
-
-    def __init__(self, verdict=None, error=None, replies=None):
-        self.verdict = verdict or {
-            "verdict": "buy",
-            "confidence": 0.7,
-            "rationale": "uptrend with rising RSI",
-            "data_date": "2024-01-03T11:00:00",
-        }
-        self.error = error
-        self.replies = list(replies) if replies is not None else None
-        self.prompts = []
-
-    def classify(self, prompt):
-        self.prompts.append(prompt)
-        if self.error is not None:
-            raise self.error
-        if self.replies is not None:
-            return self.replies.pop(0)
-        return self.verdict
-
-
 def test_classifier_model_id_default_and_env_override(monkeypatch):
     monkeypatch.delenv("SMM_CLASSIFIER_MODEL", raising=False)
     assert classifier_model_id() == "typesafe/jev-1.13"
@@ -74,7 +34,7 @@ def test_classifier_model_id_default_and_env_override(monkeypatch):
     assert classifier_model_id() == "acme/other-2"
 
 
-async def test_get_signal_returns_strict_json_verdict(server_url):
+async def test_get_signal_returns_strict_json_signal(server_url):
     classifier = FakeClassifier()
     fetcher = SignalFakeFetcher()
     result = await call_tool(
@@ -100,6 +60,24 @@ async def test_get_signal_returns_strict_json_verdict(server_url):
     last_row = prompt_payload["rows"][-1]
     assert last_row["Date"].startswith("2024-01-03T11:00:00")
     assert "RSI_14" in last_row  # the computed indicator set is in the prompt
+
+
+async def test_unknown_ticker_is_a_loud_tool_error(server_url):
+    # Spec #19 user story 17: no empty data, and nothing reaches the classifier.
+    class UnknownTickerFetcher(SignalFakeFetcher):
+        def fetch_history(self, ticker, period):
+            raise LookupError(f"no history data for ticker: {ticker}")
+
+    classifier = FakeClassifier()
+    result = await call_tool(
+        server_url(UnknownTickerFetcher(), classifier=classifier),
+        "get_signal",
+        {"ticker": "NOPE"},
+    )
+
+    assert result.is_error
+    assert "NOPE" in text_of(result)
+    assert classifier.prompts == []
 
 
 async def test_malformed_reply_retried_once_then_loud_error(server_url):
@@ -269,7 +247,7 @@ def _real_transport_with_bodies(monkeypatch, bodies):
     return EnforcingClassifier(OpenRouterClassifier()), posts
 
 
-def test_decisions_answer_maps_to_strict_verdict(monkeypatch):
+def test_decisions_answer_maps_to_strict_signal(monkeypatch):
     # The Decisions answer becomes the settled verdict dict: confidence straight
     # from the answer, rationale citing the probabilities, data_date from the
     # prompt's last row (the Decisions API returns no date of its own).
@@ -414,34 +392,10 @@ async def test_failed_signal_is_never_cached(server_url):
     assert len(classifier.prompts) == 2  # the failed call was not cached
 
 
-# --- Trade Plan attached to the Verdict (ticket #21) ---
+# --- Trade Plan attached to the Signal (ticket #21) ---
 
 
-def flat_history(close: float = 100.0, rows: int = 60) -> pd.DataFrame:
-    """Flat close with High/Low one unit away: True Range is 2 every row, so ATR(14) is 2."""
-    idx = pd.date_range("2024-01-01", periods=rows, freq="D", name="Date")
-    return pd.DataFrame(
-        {"Open": close, "High": close + 1.0, "Low": close - 1.0, "Close": close, "Volume": 1000},
-        index=idx,
-    )
-
-
-class FlatFakeFetcher(SignalFakeFetcher):
-    def __init__(self, close: float = 100.0, rows: int = 60, last_close: float | None = None):
-        super().__init__()
-        self.close = close
-        self.rows = rows
-        self.last_close = last_close
-
-    def fetch_history(self, ticker, period):
-        self.history_calls.append((ticker, period))
-        df = flat_history(self.close, self.rows)
-        if self.last_close is not None:
-            df.loc[df.index[-1], "Close"] = self.last_close
-        return df
-
-
-def _verdict(verdict, confidence=0.7):
+def _signal(verdict, confidence=0.7):
     return {"verdict": verdict, "confidence": confidence,
             "rationale": "test", "data_date": "2024-02-29T00:00:00"}
 
@@ -449,14 +403,14 @@ def _verdict(verdict, confidence=0.7):
 async def test_buy_carries_a_long_trade_plan(server_url):
     # Entry 100, ATR 2: Stop = 100 - 2*2 = 96, Target = 100 + 2*(100 - 96) = 108.
     result = await call_tool(
-        server_url(FlatFakeFetcher(), classifier=FakeClassifier(_verdict("buy"))),
+        server_url(FlatFakeFetcher(), classifier=FakeClassifier(_signal("buy"))),
         "get_signal",
         {"ticker": "AAPL"},
     )
 
     assert not result.is_error, text_of(result)
     assert json.loads(text_of(result)) == {
-        **_verdict("buy"),
+        **_signal("buy"),
         "trade_plan": {
             "direction": "long",
             "entry": 100.0,
@@ -472,7 +426,7 @@ async def test_buy_carries_a_long_trade_plan(server_url):
 async def test_sell_carries_a_short_trade_plan(server_url):
     # Entry 100, ATR 2: Stop = 100 + 2*2 = 104, Target = 100 - 2*(104 - 100) = 92.
     result = await call_tool(
-        server_url(FlatFakeFetcher(), classifier=FakeClassifier(_verdict("sell"))),
+        server_url(FlatFakeFetcher(), classifier=FakeClassifier(_signal("sell"))),
         "get_signal",
         {"ticker": "AAPL"},
     )
@@ -487,18 +441,18 @@ async def test_sell_carries_a_short_trade_plan(server_url):
 
 async def test_hold_has_no_trade_plan(server_url):
     result = await call_tool(
-        server_url(FlatFakeFetcher(), classifier=FakeClassifier(_verdict("hold"))),
+        server_url(FlatFakeFetcher(), classifier=FakeClassifier(_signal("hold"))),
         "get_signal",
         {"ticker": "AAPL"},
     )
 
     assert not result.is_error, text_of(result)
-    assert json.loads(text_of(result)) == {**_verdict("hold"), "trade_plan": None}
+    assert json.loads(text_of(result)) == {**_signal("hold"), "trade_plan": None}
 
 
 async def test_plan_is_attached_even_at_very_low_confidence(server_url):
     result = await call_tool(
-        server_url(FlatFakeFetcher(), classifier=FakeClassifier(_verdict("buy", 0.01))),
+        server_url(FlatFakeFetcher(), classifier=FakeClassifier(_signal("buy", 0.01))),
         "get_signal",
         {"ticker": "AAPL"},
     )
@@ -517,7 +471,7 @@ async def test_custom_atr_multiple_and_reward_ratio_change_the_plan_and_are_echo
     server_url, verdict, stop, target
 ):
     result = await call_tool(
-        server_url(FlatFakeFetcher(), classifier=FakeClassifier(_verdict(verdict))),
+        server_url(FlatFakeFetcher(), classifier=FakeClassifier(_signal(verdict))),
         "get_signal",
         {"ticker": "AAPL", "atr_multiple": 1.5, "reward_ratio": 3},
     )
@@ -533,7 +487,7 @@ async def test_custom_atr_multiple_and_reward_ratio_change_the_plan_and_are_echo
 async def test_exactly_ten_is_accepted_and_ints_echo_as_floats(server_url):
     # Entry 100, ATR 2: Stop = 100 - 10*2 = 80; Target = 100 + 10*(100-80) = 300.
     result = await call_tool(
-        server_url(FlatFakeFetcher(), classifier=FakeClassifier(_verdict("buy"))),
+        server_url(FlatFakeFetcher(), classifier=FakeClassifier(_signal("buy"))),
         "get_signal",
         {"ticker": "AAPL", "atr_multiple": 10, "reward_ratio": 10},
     )
@@ -581,7 +535,7 @@ async def test_non_number_plan_argument_fails_before_the_classifier(server_url, 
 @pytest.mark.parametrize("verdict", ["buy", "sell"])
 async def test_non_positive_plan_price_is_a_loud_tool_error(server_url, verdict):
     result = await call_tool(
-        server_url(FlatFakeFetcher(close=1.0), classifier=FakeClassifier(_verdict(verdict))),
+        server_url(FlatFakeFetcher(close=1.0), classifier=FakeClassifier(_signal(verdict))),
         "get_signal",
         {"ticker": "AAPL"},
     )
@@ -592,7 +546,7 @@ async def test_non_positive_plan_price_is_a_loud_tool_error(server_url, verdict)
 
 async def test_nan_last_close_is_a_loud_tool_error(server_url):
     result = await call_tool(
-        server_url(FlatFakeFetcher(last_close=float("nan")), classifier=FakeClassifier(_verdict("buy"))),
+        server_url(FlatFakeFetcher(last_close=float("nan")), classifier=FakeClassifier(_signal("buy"))),
         "get_signal",
         {"ticker": "AAPL"},
     )
@@ -614,9 +568,10 @@ async def test_too_few_rows_for_indicators_is_a_loud_tool_error(server_url):
     assert "not enough history rows" in text_of(result)
     assert classifier.prompts == []
 
-async def test_cached_verdict_gets_a_recomputed_plan_for_new_arguments(server_url):
+
+async def test_cached_signal_gets_a_recomputed_plan_for_new_arguments(server_url):
     # atr_multiple 1: Stop = 100 - 1*2 = 98, Target = 100 + 2*(100 - 98) = 104.
-    classifier = FakeClassifier(_verdict("buy"))
+    classifier = FakeClassifier(_signal("buy"))
     url = server_url(FlatFakeFetcher(), classifier=classifier, signal_ttl=TEST_SIGNAL_TTL)
 
     first = await call_tool(url, "get_signal", {"ticker": "AAPL"})

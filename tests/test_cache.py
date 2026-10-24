@@ -2,9 +2,7 @@
 
 import time
 
-from fakes import fake_history
-from test_get_quote import call_tool, text_of
-from test_get_signal import FakeClassifier
+from fakes import FakeClassifier, call_tool, fake_history, text_of
 
 from stock_market_mcp.data import DataFetcher
 

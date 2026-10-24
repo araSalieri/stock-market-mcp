@@ -1,7 +1,7 @@
 """MCP server assembly: tools registered against an injectable data fetcher."""
 
 import math
-from typing import Annotated, cast
+from typing import Annotated, Literal, cast
 
 import pandas as pd
 import pandas_ta as ta
@@ -75,16 +75,15 @@ PLAN_ARG_MAX = 10
 # Strict: JSON numbers only; true and "2" are rejected, not coerced.
 PlanArg = Annotated[float, Strict()]
 
+Direction = Literal["long", "short"]
+
 # Verdict -> Trade Plan Direction; hold has no plan.
-_VERDICT_DIRECTION = {"buy": "long", "sell": "short"}
+_VERDICT_DIRECTION: dict[str, Direction] = {"buy": "long", "sell": "short"}
 
 
-def _trade_plan(df: pd.DataFrame, direction: str, atr_multiple: float, reward_ratio: float) -> dict:
+def _trade_plan(df: pd.DataFrame, direction: Direction, atr_multiple: float, reward_ratio: float) -> dict:
     """Entry, Stop and Target from the last close and the last ATR(14) of df."""
-    atr_frame = _indicator_frame("atr", df)
-    if atr_frame is None:
-        raise ToolError("not enough history rows for indicator: atr")
-    atr = float(atr_frame.iloc[-1, 0])
+    atr = float(_indicator_frame("atr", df).iloc[-1, 0])
     entry = float(df["Close"].iloc[-1])
     if not (math.isfinite(entry) and math.isfinite(atr)):
         raise ToolError(f"latest row has a non-finite close or ATR (close={entry}, atr={atr})")
@@ -165,7 +164,7 @@ def build_server(
         atr_multiple: PlanArg = PLAN_ATR_MULTIPLE,
         reward_ratio: PlanArg = PLAN_REWARD_RATIO,
     ) -> dict:
-        """Advisory buy/sell/hold verdict from history and indicators, with a Trade Plan (Entry, Stop, Target from the last close and ATR(14)) for buy (long) or sell (short), null for hold; input only, never acts on it."""
+        """Advisory buy/sell/hold Signal from price history and indicators, with a Trade Plan (Entry, Stop, Target) for buy or sell; input only, never acts on it."""
         for name, value in (("atr_multiple", atr_multiple), ("reward_ratio", reward_ratio)):
             if not 0 < value <= PLAN_ARG_MAX:
                 raise ToolError(f"{name} must be in (0, {PLAN_ARG_MAX}], got {value}")
@@ -183,7 +182,7 @@ def build_server(
             signal = signal_classifier.classify(prompt)
         except Exception as exc:
             raise ToolError(str(exc)) from exc
-        # Built outside the classifier cache, so cached Verdicts get fresh plan prices.
+        # Built outside the classifier cache, so cached Signals get fresh plan prices.
         direction = _VERDICT_DIRECTION.get(signal["verdict"])
         plan = _trade_plan(df, direction, atr_multiple, reward_ratio) if direction else None
         return {**signal, "trade_plan": plan}
