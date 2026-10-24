@@ -7,7 +7,7 @@ A read-only server that gives coding agents market data, indicators, and advisor
 ### Signal
 
 **Signal**:
-An advisory answer to "is now the time to buy, sell, or hold this stock?", made of a Verdict, a confidence, a rationale, and the data date.
+An advisory answer to "is now the time to buy, sell, or hold this stock?", made of a Verdict, a confidence, a rationale, the data date, and a Trade Plan when the Verdict is buy or sell.
 _Avoid_: Recommendation, call, alert
 
 **Verdict**:
@@ -17,11 +17,11 @@ _Avoid_: Decision, action
 ### Trade Plan
 
 **Trade Plan**:
-The three prices for one Direction: Entry, Stop, and Target. Advisory only.
+The three prices for one Direction: Entry, Stop, and Target. Part of a Signal; a hold Verdict has none. Advisory only.
 _Avoid_: Setup, strategy, levels
 
 **Direction**:
-Long (profit if price rises) or short (profit if price falls).
+Long (profit if price rises) or short (profit if price falls). Set by the Verdict: buy is long, sell is short.
 _Avoid_: Side, bias
 
 **Entry**:
