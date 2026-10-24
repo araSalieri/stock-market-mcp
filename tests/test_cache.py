@@ -2,8 +2,7 @@
 
 import time
 
-import pandas as pd
-from test_get_quote import call_tool, text_of
+from fakes import FakeClassifier, call_tool, fake_history, text_of
 
 from stock_market_mcp.data import DataFetcher
 
@@ -31,17 +30,7 @@ class CountingFakeFetcher(DataFetcher):
 
     def fetch_history(self, ticker, period):
         self.history_calls.append((ticker, period))
-        idx = pd.date_range("2024-01-01", periods=5, freq="h", name="Date")
-        close = pd.Series([10.0, 11.0, 12.0, 13.0, 14.0], index=idx)
-        return pd.DataFrame(
-            {
-                "Open": close - 0.1,
-                "High": close + 0.1,
-                "Low": close - 0.2,
-                "Close": close,
-                "Volume": [1000] * 5,
-            }
-        )
+        return fake_history(60)
 
 
 async def test_second_quote_within_ttl_is_served_from_cache(server_url):
@@ -80,15 +69,11 @@ async def test_quote_after_ttl_expiry_refetches(server_url):
 
 async def test_second_history_within_ttl_is_served_from_cache(server_url):
     fetcher = CountingFakeFetcher()
-    url = server_url(
-        fetcher,
-        quote_ttl=TEST_QUOTE_TTL,
-        history_ttl=TEST_HISTORY_TTL,
-        fundamentals_ttl=TEST_FUNDAMENTALS_TTL,
-    )
+    # Default history TTL: two get_signal calls can outlast the short test TTL.
+    url = server_url(fetcher, classifier=FakeClassifier())
 
-    first = await call_tool(url, "get_history", {"ticker": "AAPL", "period": "1mo"})
-    second = await call_tool(url, "get_history", {"ticker": "AAPL", "period": "1mo"})
+    first = await call_tool(url, "get_signal", {"ticker": "AAPL", "period": "1mo"})
+    second = await call_tool(url, "get_signal", {"ticker": "AAPL", "period": "1mo"})
 
     assert not first.is_error
     assert not second.is_error
@@ -99,14 +84,15 @@ async def test_history_after_ttl_expiry_refetches(server_url):
     fetcher = CountingFakeFetcher()
     url = server_url(
         fetcher,
+        classifier=FakeClassifier(),
         quote_ttl=TEST_QUOTE_TTL,
         history_ttl=TEST_HISTORY_TTL,
         fundamentals_ttl=TEST_FUNDAMENTALS_TTL,
     )
 
-    await call_tool(url, "get_history", {"ticker": "AAPL", "period": "1mo"})
+    await call_tool(url, "get_signal", {"ticker": "AAPL", "period": "1mo"})
     time.sleep(TEST_HISTORY_TTL + 0.1)
-    await call_tool(url, "get_history", {"ticker": "AAPL", "period": "1mo"})
+    await call_tool(url, "get_signal", {"ticker": "AAPL", "period": "1mo"})
 
     assert fetcher.history_calls == [("AAPL", "1mo"), ("AAPL", "1mo")]
 

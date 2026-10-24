@@ -1,4 +1,4 @@
-from test_get_quote import call_tool, text_of
+from fakes import call_tool, text_of
 
 
 class FundamentalsFakeFetcher:
