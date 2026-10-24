@@ -5,7 +5,7 @@ import json
 import time
 
 import pytest
-from test_get_history import fake_history
+from fakes import fake_history
 from test_get_quote import FakeFetcher, call_tool, text_of
 
 from stock_market_mcp.classifier import (
