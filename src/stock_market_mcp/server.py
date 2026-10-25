@@ -1,6 +1,8 @@
 """MCP server assembly: tools registered against an injectable data fetcher."""
 
 import math
+import os
+import re
 from typing import Annotated, Literal, cast
 
 import pandas as pd
@@ -24,6 +26,11 @@ from stock_market_mcp.classifier import (
 )
 from stock_market_mcp.data import DataFetcher
 from stock_market_mcp.prompt import build_signal_prompt
+from stock_market_mcp.watchlists import (
+    DEFAULT_WATCHLIST_PATH,
+    WATCHLIST_MAX_TICKERS,
+    WatchlistStore,
+)
 
 
 def _suffixed_frame(ind: pd.Series | None) -> pd.DataFrame | None:
@@ -138,6 +145,7 @@ def build_server(
     history_ttl: float = HISTORY_TTL_SECONDS,
     fundamentals_ttl: float = FUNDAMENTALS_TTL_SECONDS,
     signal_ttl: float = SIGNAL_TTL_SECONDS,
+    watchlist_path: str | os.PathLike | None = None,
 ) -> MCPServer:
     """Assemble the MCP server over an injectable fetcher and classifier.
 
@@ -153,6 +161,9 @@ def build_server(
     signal_classifier = CachingClassifier(
         EnforcingClassifier(classifier if classifier is not None else OpenRouterClassifier()),
         signal_ttl=signal_ttl,
+    )
+    watchlists = WatchlistStore(
+        watchlist_path or os.environ.get("SMM_WATCHLIST_PATH", DEFAULT_WATCHLIST_PATH)
     )
     mcp = MCPServer("stock-market-mcp")
 
@@ -214,5 +225,35 @@ def build_server(
         direction = _VERDICT_DIRECTION.get(signal["verdict"])
         plan = _trade_plan(df, price, direction, atr_multiple, reward_ratio) if direction else None
         return {**signal, "price": price, "trade_plan": plan}
+
+    @mcp.tool()
+    def set_watchlist(name: str, tickers: list[str]) -> dict:
+        """Save a named Watchlist (up to 15 tickers, each checked with a quote), replacing its tickers; an empty list deletes it."""
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,32}", name):
+            raise ToolError("Watchlist name must be 1-32 letters, digits, '-' or '_'")
+        tickers = list(dict.fromkeys(t.upper() for t in tickers))
+        if len(tickers) > WATCHLIST_MAX_TICKERS:
+            raise ToolError(f"a Watchlist holds at most {WATCHLIST_MAX_TICKERS} tickers")
+        bad = []
+        for ticker in tickers:
+            try:
+                fetcher.fetch_quote(ticker)
+            except Exception:
+                bad.append(ticker)
+        if bad:
+            raise ToolError(f"unknown tickers, nothing saved: {', '.join(bad)}")
+        try:
+            watchlists.set(name, tickers)
+        except Exception as exc:
+            raise ToolError(str(exc)) from exc
+        return {"name": name, "tickers": tickers}
+
+    @mcp.tool()
+    def get_watchlists() -> dict:
+        """Every saved Watchlist as {name: [tickers]}."""
+        try:
+            return watchlists.load()
+        except Exception as exc:
+            raise ToolError(str(exc)) from exc
 
     return mcp
