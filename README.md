@@ -8,7 +8,7 @@ A read-only MCP server that gives coding agents stock market data, indicators, a
 |------|-----------|---------|
 | `get_quote` | `ticker` | Current price and currency |
 | `get_fundamentals` | `ticker` | Name, sector, industry, market cap |
-| `get_signal` | `ticker`, `period="1y"`, `atr_multiple=2`, `reward_ratio=2` | Advisory Signal: a buy/sell/hold Verdict with confidence, rationale, `data_date`, and `trade_plan`. Needs an OpenRouter key. |
+| `get_signal` | `ticker`, `period="1y"`, `atr_multiple=2`, `reward_ratio=2` | Advisory Signal: a buy/sell/hold Verdict with confidence, rationale, `data_date`, `price` (last close), and `trade_plan`. Needs an OpenRouter key. |
 
 `get_signal` computes `sma`, `ema`, `rsi`, `macd`, `bbands`, `atr`, `adx` and `vwap` over `period` and sends them to the classifier. `trade_plan` is `null` for hold. For buy (long) or sell (short) it holds `direction`, `entry` (last close), `stop` (`atr_multiple` × ATR(14) away), `target` (`reward_ratio` × the Stop distance), `atr`, `atr_multiple` and `reward_ratio`. `atr_multiple` and `reward_ratio` must be numbers in (0, 10].
 
