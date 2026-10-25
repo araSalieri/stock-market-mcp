@@ -293,7 +293,7 @@ def build_server(
     @mcp.tool()
     def get_signal(
         ticker: str,
-        interval: Interval = "1d",
+        interval: Interval = "5m",
         period: str | None = None,
         atr_multiple: PlanArg = PLAN_ATR_MULTIPLE,
         reward_ratio: PlanArg = PLAN_REWARD_RATIO,

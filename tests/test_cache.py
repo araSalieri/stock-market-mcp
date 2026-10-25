@@ -77,7 +77,7 @@ async def test_second_history_within_ttl_is_served_from_cache(server_url):
 
     assert not first.is_error
     assert not second.is_error
-    assert fetcher.history_calls == [("AAPL", "1mo", "1d", False)]  # second call hit the cache
+    assert fetcher.history_calls == [("AAPL", "1mo", "5m", False)]  # second call hit the cache
 
 
 async def test_history_after_ttl_expiry_refetches(server_url):
@@ -94,7 +94,7 @@ async def test_history_after_ttl_expiry_refetches(server_url):
     time.sleep(TEST_HISTORY_TTL + 0.1)
     await call_tool(url, "get_signal", {"ticker": "AAPL", "period": "1mo"})
 
-    assert fetcher.history_calls == [("AAPL", "1mo", "1d", False), ("AAPL", "1mo", "1d", False)]
+    assert fetcher.history_calls == [("AAPL", "1mo", "5m", False), ("AAPL", "1mo", "5m", False)]
 
 
 async def test_second_fundamentals_within_ttl_is_served_from_cache(server_url):

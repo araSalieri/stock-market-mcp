@@ -8,7 +8,7 @@ An MCP server that gives coding agents stock market data, indicators, and adviso
 |------|-----------|---------|
 | `get_quote` | `ticker` | Current price and currency |
 | `get_fundamentals` | `ticker` | Name, sector, industry, market cap |
-| `get_signal` | `ticker`, `interval="1d"`, `period` (default per Interval), `atr_multiple=2`, `reward_ratio=2` | Advisory Signal: a buy/sell/hold Verdict with confidence, rationale, `data_date`, `price` (last close), and `trade_plan`. Needs an OpenRouter key. |
+| `get_signal` | `ticker`, `interval="5m"`, `period` (default per Interval), `atr_multiple=2`, `reward_ratio=2` | Advisory Signal: a buy/sell/hold Verdict with confidence, rationale, `data_date`, `price` (last close), and `trade_plan`. Needs an OpenRouter key. |
 | `set_watchlist` | `name`, `tickers` | Saves the Watchlist, replacing its tickers. An empty list deletes it. |
 | `get_watchlists` | none | Every Watchlist as `{name: [tickers]}` |
 | `scan` | `watchlist` or `tickers` | One Scan entry per ticker, in input order. No Verdict, no OpenRouter key. |
