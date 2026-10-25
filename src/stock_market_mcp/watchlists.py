@@ -44,6 +44,9 @@ class WatchlistStore:
             try:
                 with os.fdopen(fd, "w") as f:
                     json.dump(lists, f, indent=2)
+                    # On disk before the rename, so a crash can't leave an empty file in place.
+                    f.flush()
+                    os.fsync(f.fileno())
                 os.replace(tmp, self.path)
             except BaseException:
                 os.unlink(tmp)
