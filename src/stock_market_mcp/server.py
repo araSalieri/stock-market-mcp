@@ -237,7 +237,7 @@ def _scan_intraday(df: pd.DataFrame, now: datetime, price: float, prev_close: fl
     vwap = float((typical * volume)[in_session].sum()) / session_volume if session_volume else None
     return {
         "gap_pct": _finite(_pct(float(df["Open"].to_numpy(dtype=float)[in_session][0]), prev_close)),
-        "relative_volume": session_volume / average if average else None,
+        "relative_volume": _finite(session_volume / average) if average else None,
         "vwap_distance_pct": _finite(_pct(price, vwap)) if vwap else None,
     }
 
