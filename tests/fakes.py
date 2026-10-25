@@ -153,8 +153,26 @@ def daily_bars(
     )
 
 
+def five_minute_bars(
+    bars: dict[str, tuple[float, float]], regular: list[tuple[str, str]], tz: str = "America/New_York"
+) -> pd.DataFrame:
+    """5m bars as Yahoo returns them with prepost=True: `Datetime` index in the exchange timezone.
+
+    `bars` maps a local time to (close, volume), with Open/High/Low at the close. `regular` is the
+    regular trading periods as (start, end) local times, carried in attrs as YfinanceFetcher does.
+    """
+    idx = pd.DatetimeIndex([pd.Timestamp(t, tz=tz) for t in bars], name="Datetime")
+    close = [c for c, _ in bars.values()]
+    df = pd.DataFrame(
+        {"Open": close, "High": close, "Low": close, "Close": close, "Volume": [v for _, v in bars.values()]},
+        index=idx,
+    )
+    df.attrs["regular_periods"] = [(pd.Timestamp(s, tz=tz), pd.Timestamp(e, tz=tz)) for s, e in regular]
+    return df
+
+
 class ScanFakeFetcher:
-    """History by ticker; a value that is an exception is raised for that ticker."""
+    """History by ticker, then by Interval ("1d" or "5m"); a value that is an exception is raised."""
 
     def __init__(self, frames: dict):
         self.frames = frames
@@ -168,7 +186,7 @@ class ScanFakeFetcher:
 
     def fetch_history(self, ticker, period, interval="1d", prepost=False):
         self.history_calls.append((ticker, period, interval, prepost))
-        frame = self.frames.get(ticker)
+        frame = self.frames.get(ticker, {}).get(interval)
         if frame is None:
             raise LookupError(f"no history data for ticker: {ticker}")
         if isinstance(frame, Exception):
