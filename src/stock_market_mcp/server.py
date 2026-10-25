@@ -1,6 +1,8 @@
 """MCP server assembly: tools registered against an injectable data fetcher."""
 
 import math
+from collections.abc import Callable
+from datetime import UTC, datetime
 from typing import Annotated, Literal, cast
 
 import pandas as pd
@@ -116,6 +118,36 @@ def _indicator_frame(name: str, df: pd.DataFrame) -> pd.DataFrame:
     return handler(df)
 
 
+SCAN_MAX_TICKERS = 15
+
+
+def _finite(value: float) -> float | None:
+    """JSON has no NaN; an indicator without a value is null."""
+    return value if math.isfinite(value) else None
+
+
+def _scan_daily(df: pd.DataFrame, now: datetime) -> dict:
+    """Daily Scan numbers; the previous day is the last bar dated before today in the exchange timezone."""
+    index = cast("pd.DatetimeIndex", df.index)
+    session_start = now.astimezone(index.tz).replace(hour=0, minute=0, second=0, microsecond=0)
+    before = df[index < session_start]
+    if before.empty:
+        raise LookupError("no daily bar before the current session")
+    prev = before.iloc[-1]
+    prev_close = float(prev["Close"])
+    atr = float(_indicator_frame("atr", df).iloc[-1, 0])
+    rsi = float(_indicator_frame("rsi", df).iloc[-1, 0])
+    return {
+        "price": float(df["Close"].iloc[-1]),
+        "data_date": cast("pd.Timestamp", index[-1]).isoformat(),
+        "prev_high": float(prev["High"]),
+        "prev_low": float(prev["Low"]),
+        "prev_close": prev_close,
+        "atr_pct": _finite(atr / prev_close * 100),
+        "rsi": _finite(rsi),
+    }
+
+
 def build_server(
     fetcher: DataFetcher,
     classifier: SignalClassifier | None = None,
@@ -124,11 +156,13 @@ def build_server(
     history_ttl: float = HISTORY_TTL_SECONDS,
     fundamentals_ttl: float = FUNDAMENTALS_TTL_SECONDS,
     signal_ttl: float = SIGNAL_TTL_SECONDS,
+    now: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> MCPServer:
     """Assemble the MCP server over an injectable fetcher and classifier.
 
     The TTL parameters exist so tests can shrink the cache windows; production
-    callers use the module-level defaults (60s quotes, 300s the rest).
+    callers use the module-level defaults (60s quotes, 300s the rest). `now` is
+    the clock the Scan uses to tell which session is current.
     """
     fetcher = CachingFetcher(
         fetcher,
@@ -190,5 +224,23 @@ def build_server(
         direction = _VERDICT_DIRECTION.get(signal["verdict"])
         plan = _trade_plan(df, price, direction, atr_multiple, reward_ratio) if direction else None
         return {**signal, "price": price, "trade_plan": plan}
+
+    @mcp.tool()
+    def scan(watchlist: str | None = None, tickers: list[str] | None = None) -> list[dict]:
+        """Scan a Watchlist or an ad-hoc ticker list: per ticker the Price and its time, the previous day's high, low and close, daily ATR % and RSI. No Verdict, no classifier call; a failing ticker gets its own error entry."""
+        if (watchlist is None) == (tickers is None):
+            raise ToolError("give exactly one of watchlist or tickers")
+        if watchlist is not None:
+            raise ToolError("scan by watchlist is not supported yet; pass tickers")
+        names = list(dict.fromkeys(t.upper() for t in cast("list[str]", tickers)))
+        if len(names) > SCAN_MAX_TICKERS:
+            raise ToolError(f"scan takes at most {SCAN_MAX_TICKERS} tickers, got {len(names)}")
+        results = []
+        for ticker in names:
+            try:
+                results.append({"ticker": ticker, **_scan_daily(fetcher.fetch_history(ticker, "3mo"), now())})
+            except Exception as exc:
+                results.append({"ticker": ticker, "error": str(exc)})
+        return results
 
     return mcp

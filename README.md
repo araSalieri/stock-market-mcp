@@ -9,8 +9,11 @@ A read-only MCP server that gives coding agents stock market data, indicators, a
 | `get_quote` | `ticker` | Current price and currency |
 | `get_fundamentals` | `ticker` | Name, sector, industry, market cap |
 | `get_signal` | `ticker`, `period="1y"`, `atr_multiple=2`, `reward_ratio=2` | Advisory Signal: a buy/sell/hold Verdict with confidence, rationale, `data_date`, `price` (last close), and `trade_plan`. Needs an OpenRouter key. |
+| `scan` | `tickers` (or `watchlist`, not supported yet) | One Scan entry per ticker, in input order. No Verdict, no OpenRouter key. |
 
 `get_signal` computes `sma`, `ema`, `rsi`, `macd`, `bbands`, `atr`, `adx` and `vwap` over `period` and sends them to the classifier. `trade_plan` is `null` for hold. For buy (long) or sell (short) it holds `direction`, `entry` (last close), `stop` (`atr_multiple` × ATR(14) away), `target` (`reward_ratio` × the Stop distance), `atr`, `atr_multiple` and `reward_ratio`. `atr_multiple` and `reward_ratio` must be numbers in (0, 10].
+
+`scan` takes exactly one of `watchlist` or `tickers`. Tickers are upper-cased and de-duplicated, up to 15. Each entry is built from 3 months of daily bars and holds `ticker`, `price` (latest close), `data_date` (latest bar's timestamp), `prev_high`, `prev_low` and `prev_close` (the last daily bar before today in the exchange's timezone, so during the session today's forming bar is left out), `atr_pct` (ATR(14) as a percent of `prev_close`) and `rsi` (RSI(14)). A ticker that fails gets `{ticker, error}` instead, and the others still return. Results aren't ranked or filtered.
 
 Results are cached in memory: quotes for 60 seconds, everything else for 5 minutes. Bad input, unknown tickers, and missing data return a tool error rather than an empty result. Domain terms are defined in [GLOSSARY.md](GLOSSARY.md).
 
