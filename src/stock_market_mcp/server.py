@@ -266,7 +266,13 @@ def build_server(
         if (watchlist is None) == (tickers is None):
             raise ToolError("give exactly one of watchlist or tickers")
         if watchlist is not None:
-            raise ToolError("scan by watchlist is not supported yet; pass tickers")
+            try:
+                lists = watchlists.load()
+            except Exception as exc:
+                raise ToolError(str(exc)) from exc
+            if watchlist not in lists:
+                raise ToolError(f"no Watchlist named {watchlist!r}")
+            tickers = lists[watchlist]
         names = list(dict.fromkeys(t.upper() for t in cast("list[str]", tickers)))
         if len(names) > SCAN_MAX_TICKERS:
             raise ToolError(f"scan takes at most {SCAN_MAX_TICKERS} tickers, got {len(names)}")
