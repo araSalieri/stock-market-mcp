@@ -6,8 +6,11 @@ services:
     restart: unless-stopped
     environment:
       # Listen on all interfaces inside the container so the published port
-      # is LAN-visible on the host (accepted risk: read-only data, no auth).
+      # is LAN-visible on the host (accepted risk: no auth, so anyone on the
+      # LAN can read and replace your Watchlists; see ADR-0002).
       SMM_HOST: 0.0.0.0
+      # Watchlists live on the named volume, so they survive restarts and image updates.
+      SMM_WATCHLIST_PATH: /home/appuser/data/watchlists.json
       # Passthrough only: values resolve from the host environment (or .env,
       # which compose reads automatically). Empty defaults keep the classifier's
       # loud missing-key error when the host has nothing to pass; no secret is
@@ -16,3 +19,8 @@ services:
       SMM_CLASSIFIER_MODEL: ${SMM_CLASSIFIER_MODEL:-}
     ports:
       - "8000:8000"
+    volumes:
+      - watchlists:/home/appuser/data
+
+volumes:
+  watchlists:

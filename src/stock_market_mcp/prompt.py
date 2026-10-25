@@ -16,7 +16,12 @@ DEFAULT_MAX_STATE_CHARS = 32_000
 
 
 def build_signal_prompt(
-    ticker: str, period: str, df: pd.DataFrame, *, max_chars: int | None = None
+    ticker: str,
+    period: str,
+    df: pd.DataFrame,
+    *,
+    interval: str = "1d",
+    max_chars: int | None = None,
 ) -> str:
     """Serialize OHLCV history plus joined indicator columns for the classifier.
 
@@ -31,12 +36,15 @@ def build_signal_prompt(
     if max_chars is None:
         # Read at call time; empty counts as unset (compose passthrough pattern).
         max_chars = int(os.environ.get("SMM_CLASSIFIER_MAX_STATE_CHARS") or DEFAULT_MAX_STATE_CHARS)
-    payload = df.reset_index().to_json(orient="records", date_format="iso")
+    # Yahoo names the index Date on daily bars and Datetime on intraday; every row
+    # carries Date so data_date reads the same key on both.
+    payload = df.rename_axis("Date").reset_index().to_json(orient="records", date_format="iso")
     if payload is None:
         raise ValueError("could not serialize history rows")
     rows = json.loads(payload)
-    prompt = json.dumps({"ticker": ticker, "period": period, "rows": rows})
+    head = {"ticker": ticker, "period": period, "interval": interval}
+    prompt = json.dumps({**head, "rows": rows})
     while len(prompt) > max_chars and len(rows) > 1:
         rows = rows[1:]
-        prompt = json.dumps({"ticker": ticker, "period": period, "rows": rows})
+        prompt = json.dumps({**head, "rows": rows})
     return prompt

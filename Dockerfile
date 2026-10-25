@@ -30,6 +30,8 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
 RUN useradd --create-home appuser
 USER appuser
 WORKDIR /home/appuser
+# Owned by appuser, so a fresh named volume mounted here starts writable.
+RUN mkdir /home/appuser/data
 
 COPY --from=builder --chown=appuser:appuser /app/.venv /app/.venv
 

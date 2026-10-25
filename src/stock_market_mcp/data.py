@@ -6,7 +6,7 @@ import pandas as pd
 
 
 def _unimplemented_fetch_history(
-    self: "DataFetcher", ticker: str, period: str
+    self: "DataFetcher", ticker: str, period: str, interval: str = "1d", prepost: bool = False
 ) -> pd.DataFrame:
     """Loud default: the spec forbids empty data, so a quote-only fake must fail loudly."""
     raise NotImplementedError(f"{type(self).__name__} does not implement fetch_history")
@@ -39,10 +39,12 @@ class YfinanceFetcher:
             raise LookupError(f"no quote data for ticker: {ticker}")
         return {"price": price, "currency": info["currency"], "ticker": ticker.upper()}
 
-    def fetch_history(self, ticker: str, period: str) -> pd.DataFrame:
+    def fetch_history(
+        self, ticker: str, period: str, interval: str = "1d", prepost: bool = False
+    ) -> pd.DataFrame:
         import yfinance as yf
 
-        df = yf.Ticker(ticker).history(period=period)
+        df = yf.Ticker(ticker).history(period=period, interval=interval, prepost=prepost)
         if df.empty:
             raise LookupError(f"no history data for ticker: {ticker}")
         return df

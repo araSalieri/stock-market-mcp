@@ -1,6 +1,8 @@
 """MCP server assembly: tools registered against an injectable data fetcher."""
 
 import math
+import os
+import re
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Annotated, Literal, cast
@@ -26,6 +28,11 @@ from stock_market_mcp.classifier import (
 )
 from stock_market_mcp.data import DataFetcher
 from stock_market_mcp.prompt import build_signal_prompt
+from stock_market_mcp.watchlists import (
+    DEFAULT_WATCHLIST_PATH,
+    WATCHLIST_MAX_TICKERS,
+    WatchlistStore,
+)
 
 
 def _suffixed_frame(ind: pd.Series | None) -> pd.DataFrame | None:
@@ -78,6 +85,20 @@ PLAN_ARG_MAX = 10
 PlanArg = Annotated[float, Strict()]
 
 Direction = Literal["long", "short"]
+
+Interval = Literal["1m", "5m", "15m", "1h", "1d"]
+
+# Period when the caller gives none, per Interval.
+_DEFAULT_PERIOD: dict[str, str] = {"1m": "5d", "5m": "1mo", "15m": "1mo", "1h": "6mo", "1d": "1y"}
+
+# Intraday Intervals: Yahoo's history limit and the periods that fit inside it.
+# Daily bars have no limit worth checking, so 1d is absent.
+_PERIOD_LIMITS: dict[str, tuple[str, frozenset[str]]] = {
+    "1m": ("7 days", frozenset({"1d", "5d"})),
+    "5m": ("60 days", frozenset({"1d", "5d", "1mo"})),
+    "15m": ("60 days", frozenset({"1d", "5d", "1mo"})),
+    "1h": ("730 days", frozenset({"1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "ytd"})),
+}
 
 # Verdict -> Trade Plan Direction; hold has no plan.
 _VERDICT_DIRECTION: dict[str, Direction] = {"buy": "long", "sell": "short"}
@@ -156,13 +177,14 @@ def build_server(
     history_ttl: float = HISTORY_TTL_SECONDS,
     fundamentals_ttl: float = FUNDAMENTALS_TTL_SECONDS,
     signal_ttl: float = SIGNAL_TTL_SECONDS,
+    watchlist_path: str | os.PathLike | None = None,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> MCPServer:
     """Assemble the MCP server over an injectable fetcher and classifier.
 
     The TTL parameters exist so tests can shrink the cache windows; production
-    callers use the module-level defaults (60s quotes, 300s the rest). `now` is
-    the clock the Scan uses to tell which session is current.
+    callers use the module-level defaults (60s quotes and history, 300s the rest).
+    `now` is the clock the Scan uses to tell which session is current.
     """
     fetcher = CachingFetcher(
         fetcher,
@@ -173,6 +195,9 @@ def build_server(
     signal_classifier = CachingClassifier(
         EnforcingClassifier(classifier if classifier is not None else OpenRouterClassifier()),
         signal_ttl=signal_ttl,
+    )
+    watchlists = WatchlistStore(
+        watchlist_path or os.environ.get("SMM_WATCHLIST_PATH", DEFAULT_WATCHLIST_PATH)
     )
     mcp = MCPServer("stock-market-mcp")
 
@@ -195,16 +220,26 @@ def build_server(
     @mcp.tool()
     def get_signal(
         ticker: str,
-        period: str = "1y",
+        interval: Interval = "1d",
+        period: str | None = None,
         atr_multiple: PlanArg = PLAN_ATR_MULTIPLE,
         reward_ratio: PlanArg = PLAN_REWARD_RATIO,
     ) -> dict:
-        """Advisory buy/sell/hold Signal from price history and indicators, with the Price (last close) and, for buy or sell, a Trade Plan (Entry, Stop, Target); input only, never acts on it."""
+        """Advisory buy/sell/hold Signal from price history and indicators on bars of one Interval (1m, 5m, 15m, 1h, 1d), with the Price (last close) and, for buy or sell, a Trade Plan (Entry, Stop, Target); input only, never acts on it."""
         for name, value in (("atr_multiple", atr_multiple), ("reward_ratio", reward_ratio)):
             if not 0 < value <= PLAN_ARG_MAX:
                 raise ToolError(f"{name} must be in (0, {PLAN_ARG_MAX}], got {value}")
+        if period is None:
+            period = _DEFAULT_PERIOD[interval]
+        elif interval in _PERIOD_LIMITS:
+            limit, allowed = _PERIOD_LIMITS[interval]
+            if period not in allowed:
+                raise ToolError(
+                    f"period {period!r} is longer than Yahoo keeps for {interval} bars "
+                    f"({limit}); use one of {', '.join(sorted(allowed))}"
+                )
         try:
-            df = fetcher.fetch_history(ticker, period)
+            df = fetcher.fetch_history(ticker, period, interval)
         except Exception as exc:
             raise ToolError(str(exc)) from exc
         for name in sorted(INDICATOR_ALLOWLIST):
@@ -216,7 +251,7 @@ def build_server(
         price = float(df["Close"].iloc[-1])
         if not math.isfinite(price):
             raise ToolError(f"latest row has a non-finite close (close={price})")
-        prompt = build_signal_prompt(ticker.upper(), period, df)
+        prompt = build_signal_prompt(ticker.upper(), period, df, interval=interval)
         try:
             signal = signal_classifier.classify(prompt)
         except Exception as exc:
@@ -238,9 +273,40 @@ def build_server(
         results = []
         for ticker in names:
             try:
-                results.append({"ticker": ticker, **_scan_daily(fetcher.fetch_history(ticker, "3mo"), now())})
+                daily = fetcher.fetch_history(ticker, "3mo", interval="1d")
+                results.append({"ticker": ticker, **_scan_daily(daily, now())})
             except Exception as exc:
                 results.append({"ticker": ticker, "error": str(exc)})
         return results
+
+    @mcp.tool()
+    def set_watchlist(name: str, tickers: list[str]) -> dict:
+        """Save a named Watchlist (up to 15 tickers, each checked with a quote), replacing its tickers; an empty list deletes it."""
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,32}", name):
+            raise ToolError("Watchlist name must be 1-32 letters, digits, '-' or '_'")
+        tickers = list(dict.fromkeys(t.upper() for t in tickers))
+        if len(tickers) > WATCHLIST_MAX_TICKERS:
+            raise ToolError(f"a Watchlist holds at most {WATCHLIST_MAX_TICKERS} tickers")
+        bad = []
+        for ticker in tickers:
+            try:
+                fetcher.fetch_quote(ticker)
+            except Exception:
+                bad.append(ticker)
+        if bad:
+            raise ToolError(f"unknown tickers, nothing saved: {', '.join(bad)}")
+        try:
+            watchlists.set(name, tickers)
+        except Exception as exc:
+            raise ToolError(str(exc)) from exc
+        return {"name": name, "tickers": tickers}
+
+    @mcp.tool()
+    def get_watchlists() -> dict:
+        """Every saved Watchlist as {name: [tickers]}."""
+        try:
+            return watchlists.load()
+        except Exception as exc:
+            raise ToolError(str(exc)) from exc
 
     return mcp

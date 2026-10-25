@@ -55,7 +55,7 @@ async def test_scan_upper_cases_and_dedupes_tickers_keeping_order(server_url):
     assert not result.is_error
     expected = ["AAPL", "BBCA.JK"] + [f"T{i}" for i in range(13)]
     assert [entry["ticker"] for entry in entries(result)] == expected
-    assert fetcher.history_calls == [(t, "3mo") for t in expected]
+    assert fetcher.history_calls == [(t, "3mo", "1d", False) for t in expected]
 
 
 def rising(n: int = 30, start: float = 100.0) -> list[float]:
