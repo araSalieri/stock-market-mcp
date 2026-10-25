@@ -81,12 +81,13 @@ Direction = Literal["long", "short"]
 _VERDICT_DIRECTION: dict[str, Direction] = {"buy": "long", "sell": "short"}
 
 
-def _trade_plan(df: pd.DataFrame, direction: Direction, atr_multiple: float, reward_ratio: float) -> dict:
-    """Entry, Stop and Target from the last close and the last ATR(14) of df."""
+def _trade_plan(
+    df: pd.DataFrame, entry: float, direction: Direction, atr_multiple: float, reward_ratio: float
+) -> dict:
+    """Stop and Target around entry (the Price) from the last ATR(14) of df."""
     atr = float(_indicator_frame("atr", df).iloc[-1, 0])
-    entry = float(df["Close"].iloc[-1])
-    if not (math.isfinite(entry) and math.isfinite(atr)):
-        raise ToolError(f"latest row has a non-finite close or ATR (close={entry}, atr={atr})")
+    if not math.isfinite(atr):
+        raise ToolError(f"latest row has a non-finite ATR (atr={atr})")
     sign = 1 if direction == "long" else -1
     stop = entry - sign * atr_multiple * atr
     # Same line for both Directions: short Target = Entry - ratio * (Stop - Entry).
@@ -164,7 +165,7 @@ def build_server(
         atr_multiple: PlanArg = PLAN_ATR_MULTIPLE,
         reward_ratio: PlanArg = PLAN_REWARD_RATIO,
     ) -> dict:
-        """Advisory buy/sell/hold Signal from price history and indicators, with a Trade Plan (Entry, Stop, Target) for buy or sell; input only, never acts on it."""
+        """Advisory buy/sell/hold Signal from price history and indicators, with the Price (last close) and, for buy or sell, a Trade Plan (Entry, Stop, Target); input only, never acts on it."""
         for name, value in (("atr_multiple", atr_multiple), ("reward_ratio", reward_ratio)):
             if not 0 < value <= PLAN_ARG_MAX:
                 raise ToolError(f"{name} must be in (0, {PLAN_ARG_MAX}], got {value}")
@@ -177,14 +178,17 @@ def build_server(
             if ind is None:
                 raise ToolError(f"not enough history rows for indicator: {name}")
             df = df.join(ind)
+        # Read outside the classifier cache, so cached Signals get a fresh Price and plan.
+        price = float(df["Close"].iloc[-1])
+        if not math.isfinite(price):
+            raise ToolError(f"latest row has a non-finite close (close={price})")
         prompt = build_signal_prompt(ticker.upper(), period, df)
         try:
             signal = signal_classifier.classify(prompt)
         except Exception as exc:
             raise ToolError(str(exc)) from exc
-        # Built outside the classifier cache, so cached Signals get fresh plan prices.
         direction = _VERDICT_DIRECTION.get(signal["verdict"])
-        plan = _trade_plan(df, direction, atr_multiple, reward_ratio) if direction else None
-        return {**signal, "trade_plan": plan}
+        plan = _trade_plan(df, price, direction, atr_multiple, reward_ratio) if direction else None
+        return {**signal, "price": price, "trade_plan": plan}
 
     return mcp

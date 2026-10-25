@@ -45,7 +45,9 @@ async def test_get_signal_returns_strict_json_signal(server_url):
 
     assert not result.is_error
     payload = json.loads(text_of(result))
-    assert payload.pop("trade_plan")["direction"] == "long"
+    plan = payload.pop("trade_plan")
+    assert plan["direction"] == "long"
+    assert payload.pop("price") == plan["entry"]
     assert payload == {
         "verdict": "buy",
         "confidence": 0.7,
@@ -115,7 +117,9 @@ async def test_single_formatting_slip_recovers_after_one_retry(server_url):
 
     assert not result.is_error
     payload = json.loads(text_of(result))
-    assert payload.pop("trade_plan")["direction"] == "short"
+    plan = payload.pop("trade_plan")
+    assert plan["direction"] == "short"
+    assert payload.pop("price") == plan["entry"]
     assert payload == good
     assert len(classifier.prompts) == 2  # the retry happened, not a third call
 
@@ -411,6 +415,7 @@ async def test_buy_carries_a_long_trade_plan(server_url):
     assert not result.is_error, text_of(result)
     assert json.loads(text_of(result)) == {
         **_signal("buy"),
+        "price": 100.0,
         "trade_plan": {
             "direction": "long",
             "entry": 100.0,
@@ -432,22 +437,24 @@ async def test_sell_carries_a_short_trade_plan(server_url):
     )
 
     assert not result.is_error, text_of(result)
-    plan = json.loads(text_of(result))["trade_plan"]
+    payload = json.loads(text_of(result))
+    plan = payload["trade_plan"]
     assert plan["direction"] == "short"
     assert plan["entry"] == 100.0
+    assert payload["price"] == 100.0
     assert plan["stop"] == pytest.approx(104.0)
     assert plan["target"] == pytest.approx(92.0)
 
 
-async def test_hold_has_no_trade_plan(server_url):
+async def test_hold_has_no_trade_plan_but_carries_the_price(server_url):
     result = await call_tool(
-        server_url(FlatFakeFetcher(), classifier=FakeClassifier(_signal("hold"))),
+        server_url(FlatFakeFetcher(last_close=123.5), classifier=FakeClassifier(_signal("hold"))),
         "get_signal",
         {"ticker": "AAPL"},
     )
 
     assert not result.is_error, text_of(result)
-    assert json.loads(text_of(result)) == {**_signal("hold"), "trade_plan": None}
+    assert json.loads(text_of(result)) == {**_signal("hold"), "price": 123.5, "trade_plan": None}
 
 
 async def test_plan_is_attached_even_at_very_low_confidence(server_url):
@@ -544,15 +551,18 @@ async def test_non_positive_plan_price_is_a_loud_tool_error(server_url, verdict)
     assert "non-positive" in text_of(result)
 
 
-async def test_nan_last_close_is_a_loud_tool_error(server_url):
+@pytest.mark.parametrize("verdict", ["buy", "sell", "hold"])
+async def test_nan_last_close_is_a_loud_tool_error(server_url, verdict):
+    classifier = FakeClassifier(_signal(verdict))
     result = await call_tool(
-        server_url(FlatFakeFetcher(last_close=float("nan")), classifier=FakeClassifier(_signal("buy"))),
+        server_url(FlatFakeFetcher(last_close=float("nan")), classifier=classifier),
         "get_signal",
         {"ticker": "AAPL"},
     )
 
     assert result.is_error
     assert "non-finite close" in text_of(result)
+    assert classifier.prompts == []
 
 
 async def test_too_few_rows_for_indicators_is_a_loud_tool_error(server_url):
@@ -569,7 +579,7 @@ async def test_too_few_rows_for_indicators_is_a_loud_tool_error(server_url):
     assert classifier.prompts == []
 
 
-async def test_cached_signal_gets_a_recomputed_plan_for_new_arguments(server_url):
+async def test_cached_signal_carries_the_price_and_a_recomputed_plan(server_url):
     # atr_multiple 1: Stop = 100 - 1*2 = 98, Target = 100 + 2*(100 - 98) = 104.
     classifier = FakeClassifier(_signal("buy"))
     url = server_url(FlatFakeFetcher(), classifier=classifier, signal_ttl=TEST_SIGNAL_TTL)
@@ -579,7 +589,9 @@ async def test_cached_signal_gets_a_recomputed_plan_for_new_arguments(server_url
 
     assert not first.is_error and not second.is_error
     assert json.loads(text_of(first))["trade_plan"]["stop"] == pytest.approx(96.0)
-    plan = json.loads(text_of(second))["trade_plan"]
+    payload = json.loads(text_of(second))
+    assert payload["price"] == 100.0
+    plan = payload["trade_plan"]
     assert plan["stop"] == pytest.approx(98.0)
     assert plan["target"] == pytest.approx(104.0)
     assert len(classifier.prompts) == 1
@@ -588,7 +600,7 @@ async def test_cached_signal_gets_a_recomputed_plan_for_new_arguments(server_url
 # --- Tool surface (ticket #22) ---
 
 
-async def test_server_lists_exactly_three_tools_and_get_signal_says_advisory(server_url):
+async def test_server_lists_exactly_three_tools_and_get_signal_says_advisory_and_price(server_url):
     async with (
         streamable_http_client(server_url(SignalFakeFetcher())) as (read, write),
         ClientSession(read, write) as session,
@@ -597,7 +609,9 @@ async def test_server_lists_exactly_three_tools_and_get_signal_says_advisory(ser
         tools = {t.name: t for t in (await session.list_tools()).tools}
 
     assert sorted(tools) == ["get_fundamentals", "get_quote", "get_signal"]
-    assert "advisory" in (tools["get_signal"].description or "").lower()
+    description = (tools["get_signal"].description or "").lower()
+    assert "advisory" in description
+    assert "price (last close)" in description
 
 
 @pytest.mark.parametrize("name", ["get_plan", "get_history"])
