@@ -68,8 +68,8 @@ class SignalFakeFetcher:
     def fetch_fundamentals(self, ticker):
         raise AssertionError("get_signal tests never fetch fundamentals")
 
-    def fetch_history(self, ticker, period):
-        self.history_calls.append((ticker, period))
+    def fetch_history(self, ticker, period, interval="1d", prepost=False):
+        self.history_calls.append((ticker, period, interval, prepost))
         return fake_history(60)
 
 
@@ -82,6 +82,24 @@ def flat_history(close: float = 100.0, rows: int = 60) -> pd.DataFrame:
     )
 
 
+def intraday_history(
+    close: float = 100.0, rows: int = 60, spread: float = 0.25, tz: str = "Asia/Jakarta"
+) -> pd.DataFrame:
+    """5m bars in an exchange timezone, Yahoo's `Datetime` index, flat close with High/Low
+    `spread` away: True Range is 2 * spread every row, so ATR(14) is 2 * spread."""
+    idx = pd.date_range("2024-03-01 09:00", periods=rows, freq="5min", tz=tz, name="Datetime")
+    return pd.DataFrame(
+        {"Open": close, "High": close + spread, "Low": close - spread, "Close": close, "Volume": 1000},
+        index=idx,
+    )
+
+
+class IntradayFakeFetcher(SignalFakeFetcher):
+    def fetch_history(self, ticker, period, interval="1d", prepost=False):
+        self.history_calls.append((ticker, period, interval, prepost))
+        return intraday_history()
+
+
 class FlatFakeFetcher(SignalFakeFetcher):
     def __init__(self, close: float = 100.0, rows: int = 60, last_close: float | None = None):
         super().__init__()
@@ -89,8 +107,8 @@ class FlatFakeFetcher(SignalFakeFetcher):
         self.rows = rows
         self.last_close = last_close
 
-    def fetch_history(self, ticker, period):
-        self.history_calls.append((ticker, period))
+    def fetch_history(self, ticker, period, interval="1d", prepost=False):
+        self.history_calls.append((ticker, period, interval, prepost))
         df = flat_history(self.close, self.rows)
         if self.last_close is not None:
             df.loc[df.index[-1], "Close"] = self.last_close

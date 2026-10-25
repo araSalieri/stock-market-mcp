@@ -4,6 +4,7 @@ import time
 
 from fakes import FakeClassifier, call_tool, fake_history, text_of
 
+from stock_market_mcp.cache import CachingFetcher
 from stock_market_mcp.data import DataFetcher
 
 # Short TTLs so tests can cross the expiry window without waiting on real timeouts.
@@ -28,8 +29,8 @@ class CountingFakeFetcher(DataFetcher):
         self.fundamentals_calls.append(ticker)
         return {"ticker": ticker.upper(), "long_name": "Apple Inc."}
 
-    def fetch_history(self, ticker, period):
-        self.history_calls.append((ticker, period))
+    def fetch_history(self, ticker, period, interval="1d", prepost=False):
+        self.history_calls.append((ticker, period, interval, prepost))
         return fake_history(60)
 
 
@@ -77,7 +78,7 @@ async def test_second_history_within_ttl_is_served_from_cache(server_url):
 
     assert not first.is_error
     assert not second.is_error
-    assert fetcher.history_calls == [("AAPL", "1mo")]  # second call hit the cache
+    assert fetcher.history_calls == [("AAPL", "1mo", "1d", False)]  # second call hit the cache
 
 
 async def test_history_after_ttl_expiry_refetches(server_url):
@@ -94,7 +95,7 @@ async def test_history_after_ttl_expiry_refetches(server_url):
     time.sleep(TEST_HISTORY_TTL + 0.1)
     await call_tool(url, "get_signal", {"ticker": "AAPL", "period": "1mo"})
 
-    assert fetcher.history_calls == [("AAPL", "1mo"), ("AAPL", "1mo")]
+    assert fetcher.history_calls == [("AAPL", "1mo", "1d", False), ("AAPL", "1mo", "1d", False)]
 
 
 async def test_second_fundamentals_within_ttl_is_served_from_cache(server_url):
@@ -128,3 +129,51 @@ async def test_fundamentals_after_ttl_expiry_refetches(server_url):
     await call_tool(url, "get_fundamentals", {"ticker": "AAPL"})
 
     assert fetcher.fundamentals_calls == ["AAPL", "AAPL"]
+
+
+class FakeClock:
+    """Stands in for the cache module's time; tests move it forward by hand."""
+
+    def __init__(self):
+        self.now = 1000.0
+
+    def monotonic(self):
+        return self.now
+
+
+async def test_history_is_cached_for_60_seconds_by_default(server_url, monkeypatch):
+    clock = FakeClock()
+    monkeypatch.setattr("stock_market_mcp.cache.time", clock)
+    fetcher = CountingFakeFetcher()
+    url = server_url(fetcher, classifier=FakeClassifier())
+    args = {"ticker": "AAPL", "period": "1mo"}
+
+    await call_tool(url, "get_signal", args)
+    clock.now += 59
+    await call_tool(url, "get_signal", args)
+    assert len(fetcher.history_calls) == 1
+    clock.now += 2
+    await call_tool(url, "get_signal", args)
+    assert len(fetcher.history_calls) == 2
+
+
+async def test_history_cache_keeps_intervals_apart(server_url):
+    fetcher = CountingFakeFetcher()
+    url = server_url(fetcher, classifier=FakeClassifier())
+
+    await call_tool(url, "get_signal", {"ticker": "AAPL", "interval": "5m", "period": "1mo"})
+    await call_tool(url, "get_signal", {"ticker": "AAPL", "interval": "15m", "period": "1mo"})
+
+    assert fetcher.history_calls == [("AAPL", "1mo", "5m", False), ("AAPL", "1mo", "15m", False)]
+
+
+def test_history_cache_keeps_prepost_apart():
+    # No tool sets prepost yet (the Scan will), so this one goes through the fetcher seam.
+    fetcher = CountingFakeFetcher()
+    cached = CachingFetcher(fetcher)
+
+    cached.fetch_history("AAPL", "1mo", "5m", prepost=False)
+    cached.fetch_history("AAPL", "1mo", "5m", prepost=True)
+    cached.fetch_history("AAPL", "1mo", "5m", prepost=True)
+
+    assert fetcher.history_calls == [("AAPL", "1mo", "5m", False), ("AAPL", "1mo", "5m", True)]
