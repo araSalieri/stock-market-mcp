@@ -13,3 +13,6 @@ Default five-role vocabulary (`needs-triage`, `needs-info`, `ready-for-agent`, `
 ### Domain docs
 
 Single-context: root `GLOSSARY.md` + `docs/adr/`. See `docs/agents/domain.md`.
+### Code review
+
+Reviews check the diff against `CODING_STANDARDS.md`.
