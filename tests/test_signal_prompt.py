@@ -58,7 +58,7 @@ def wide_frame(rows: int) -> pd.DataFrame:
 def test_prompt_truncates_oldest_rows_to_the_budget():
     # typesafe/jev-1.13 rejects states over ~32k input tokens with a 400
     # max_tokens_exceeded, so the builder bounds the payload: the MOST RECENT
-    # rows are kept and the oldest are dropped — recency is the point of a
+    # rows are kept and the oldest are dropped – recency is the point of a
     # timing signal.
     prompt = build_signal_prompt("AAPL", "1y", wide_frame(500), max_chars=8000)
 

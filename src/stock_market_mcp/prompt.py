@@ -1,6 +1,6 @@
 """Pure prompt builder for get_signal: history + indicators to a compact classifier prompt.
 
-No model, no I/O — serialization only, so NaN handling and date formats are
+No model, no I/O – serialization only, so NaN handling and date formats are
 unit-tested with literals as truth.
 """
 
@@ -11,7 +11,7 @@ import pandas as pd
 
 # typesafe/jev-1.13 rejects states over ~32k input tokens with a 400
 # max_tokens_exceeded (verified live); this payload tokenizes at ~1.2 chars per
-# token, so a 32k-char budget lands near 27k tokens — under the cap with headroom.
+# token, so a 32k-char budget lands near 27k tokens – under the cap with headroom.
 DEFAULT_MAX_STATE_CHARS = 32_000
 
 

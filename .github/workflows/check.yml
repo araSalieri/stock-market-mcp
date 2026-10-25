@@ -20,3 +20,5 @@ jobs:
       - run: uv sync --locked
       - run: uv run pytest
       - run: uv run pyright
+      - name: en dashes only
+        run: if git grep -n '—' -- '*.py' '*.md'; then echo 'use en dashes (–), not em dashes'; exit 1; fi
