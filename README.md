@@ -76,4 +76,4 @@ uv run pyright
 
 CI runs both on every push and pull request. Pushing a `v*` tag runs them, then publishes the image to `ghcr.io/arasalieri/stock-market-mcp`.
 
-To smoke-test a running container end to end: `uv run python scripts/container_smoke.py`.
+Before pushing a `v*` tag, start the container from this checkout with `docker compose up -d --build` and run the smoke: `uv run python scripts/container_smoke.py`. It checks every tool against real Yahoo data, restarts the container to check Watchlists persist, and prints each Scan entry to compare against a chart. Run it once during an IDX or US session as well as outside one, since the Gap, Relative Volume and VWAP Distance take different paths.
