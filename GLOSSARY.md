@@ -65,3 +65,7 @@ _Avoid_: Opening move, overnight change
 **Relative Volume**:
 This session's volume so far divided by the average volume up to the same time of day over the last 10 sessions.
 _Avoid_: RVOL, volume ratio
+
+**VWAP Distance**:
+How far the Price is from this session's VWAP (volume-weighted average price), as a percent. Positive when the Price is above it.
+_Avoid_: VWAP gap, VWAP deviation

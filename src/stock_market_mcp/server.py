@@ -5,7 +5,7 @@ import os
 import re
 from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import Annotated, Literal, cast
+from typing import Annotated, Literal, NamedTuple, cast
 
 import numpy as np
 import pandas as pd
@@ -89,17 +89,47 @@ Direction = Literal["long", "short"]
 
 Interval = Literal["1m", "5m", "15m", "1h", "1d"]
 
-# Period when the caller gives none, per Interval.
-_DEFAULT_PERIOD: dict[str, str] = {"1m": "5d", "5m": "1mo", "15m": "1mo", "1h": "6mo", "1d": "1y"}
+# Every period Yahoo knows, as yfinance lists them.
+_YAHOO_PERIODS = ("1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "5y", "10y", "ytd", "max")
 
-# Intraday Intervals: Yahoo's history limit and the periods that fit inside it.
-# Daily bars have no limit worth checking, so 1d is absent.
-_PERIOD_LIMITS: dict[str, tuple[str, frozenset[str]]] = {
-    "1m": ("7 days", frozenset({"1d", "5d"})),
-    "5m": ("60 days", frozenset({"1d", "5d", "1mo"})),
-    "15m": ("60 days", frozenset({"1d", "5d", "1mo"})),
-    "1h": ("730 days", frozenset({"1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "ytd"})),
+
+class _Periods(NamedTuple):
+    default: str
+    # Yahoo's history limit and the periods that fit inside it; daily bars have none and pass any period on.
+    limit: str | None
+    allowed: tuple[str, ...]
+
+
+_PERIODS: dict[Interval, _Periods] = {
+    "1m": _Periods("5d", "7 days", ("1d", "5d")),
+    "5m": _Periods("1mo", "60 days", ("1d", "5d", "1mo")),
+    "15m": _Periods("1mo", "60 days", ("1d", "5d", "1mo")),
+    "1h": _Periods("6mo", "730 days", ("1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "ytd")),
+    "1d": _Periods("1y", None, ()),
 }
+
+
+def _period(interval: Interval, period: str | None) -> str:
+    """The period to fetch: the Interval's default, or the caller's once it fits the Interval."""
+    periods = _PERIODS[interval]
+    if period is None:
+        return periods.default
+    if periods.limit is None or period in periods.allowed:
+        return period
+    if period in _YAHOO_PERIODS:
+        reason = f"is longer than Yahoo keeps for {interval} bars ({periods.limit})"
+    else:
+        reason = f"is not a valid period for {interval} bars"
+    raise ToolError(f"period {period!r} {reason}; use one of {', '.join(periods.allowed)}")
+
+
+def _tickers(tickers: list[str]) -> list[str]:
+    """Upper-cased and de-duplicated in order; one Scan or Watchlist takes at most WATCHLIST_MAX_TICKERS."""
+    names = list(dict.fromkeys(t.upper() for t in tickers))
+    if len(names) > WATCHLIST_MAX_TICKERS:
+        raise ToolError(f"at most {WATCHLIST_MAX_TICKERS} tickers, got {len(names)}")
+    return names
+
 
 # Verdict -> Trade Plan Direction; hold has no plan.
 _VERDICT_DIRECTION: dict[str, Direction] = {"buy": "long", "sell": "short"}
@@ -140,8 +170,6 @@ def _indicator_frame(name: str, df: pd.DataFrame) -> pd.DataFrame:
     return handler(df)
 
 
-SCAN_MAX_TICKERS = 15
-
 
 def _finite(value: float) -> float | None:
     """JSON has no NaN; an indicator without a value is null."""
@@ -152,13 +180,14 @@ def _scan_daily(df: pd.DataFrame, now: datetime) -> dict:
     """Daily Scan numbers; the previous day is the last bar dated before today in the exchange timezone."""
     index = cast("pd.DatetimeIndex", df.index)
     session_start = now.astimezone(index.tz).replace(hour=0, minute=0, second=0, microsecond=0)
-    before = df[index < session_start]
+    before = df.loc[index < session_start]
     if before.empty:
         raise LookupError("no daily bar before the current session")
     prev = before.iloc[-1]
     prev_close = float(prev["Close"])
-    atr = float(_indicator_frame("atr", df).iloc[-1, 0])
-    rsi = float(_indicator_frame("rsi", df).iloc[-1, 0])
+    # Completed bars only, so today's forming bar can't move ATR or RSI.
+    atr = float(_indicator_frame("atr", before).iloc[-1, 0])
+    rsi = float(_indicator_frame("rsi", before).iloc[-1, 0])
     return {
         "price": float(df["Close"].iloc[-1]),
         "data_date": cast("pd.Timestamp", index[-1]).isoformat(),
@@ -196,7 +225,7 @@ def _scan_intraday(df: pd.DataFrame, now: datetime, price: float, prev_close: fl
     volume = df["Volume"].to_numpy(dtype=float)
     if not in_session.any():
         pre_market = close[(days == today) & ~regular]
-        gap = _pct(float(pre_market[-1]), prev_close) if len(pre_market) else None
+        gap = _finite(_pct(float(pre_market[-1]), prev_close)) if len(pre_market) else None
         return {"gap_pct": gap, "relative_volume": None, "vwap_distance_pct": None}
 
     session_volume = float(volume[in_session].sum())
@@ -207,9 +236,9 @@ def _scan_intraday(df: pd.DataFrame, now: datetime, price: float, prev_close: fl
     typical = (df["High"].to_numpy(dtype=float) + df["Low"].to_numpy(dtype=float) + close) / 3
     vwap = float((typical * volume)[in_session].sum()) / session_volume if session_volume else None
     return {
-        "gap_pct": _pct(float(df["Open"].to_numpy(dtype=float)[in_session][0]), prev_close),
+        "gap_pct": _finite(_pct(float(df["Open"].to_numpy(dtype=float)[in_session][0]), prev_close)),
         "relative_volume": session_volume / average if average else None,
-        "vwap_distance_pct": _pct(price, vwap) if vwap else None,
+        "vwap_distance_pct": _finite(_pct(price, vwap)) if vwap else None,
     }
 
 
@@ -269,19 +298,11 @@ def build_server(
         atr_multiple: PlanArg = PLAN_ATR_MULTIPLE,
         reward_ratio: PlanArg = PLAN_REWARD_RATIO,
     ) -> dict:
-        """Advisory buy/sell/hold Signal from price history and indicators on bars of one Interval (1m, 5m, 15m, 1h, 1d), with the Price (last close) and, for buy or sell, a Trade Plan (Entry, Stop, Target); input only, never acts on it."""
+        """Advisory buy/sell/hold Signal from price history and indicators on bars of one Interval, with the Price (last close) and, for buy or sell, a Trade Plan (Entry, Stop, Target); input only, never acts on it."""
         for name, value in (("atr_multiple", atr_multiple), ("reward_ratio", reward_ratio)):
             if not 0 < value <= PLAN_ARG_MAX:
                 raise ToolError(f"{name} must be in (0, {PLAN_ARG_MAX}], got {value}")
-        if period is None:
-            period = _DEFAULT_PERIOD[interval]
-        elif interval in _PERIOD_LIMITS:
-            limit, allowed = _PERIOD_LIMITS[interval]
-            if period not in allowed:
-                raise ToolError(
-                    f"period {period!r} is longer than Yahoo keeps for {interval} bars "
-                    f"({limit}); use one of {', '.join(sorted(allowed))}"
-                )
+        period = _period(interval, period)
         try:
             df = fetcher.fetch_history(ticker, period, interval)
         except Exception as exc:
@@ -317,9 +338,7 @@ def build_server(
             if watchlist not in lists:
                 raise ToolError(f"no Watchlist named {watchlist!r}")
             tickers = lists[watchlist]
-        names = list(dict.fromkeys(t.upper() for t in cast("list[str]", tickers)))
-        if len(names) > SCAN_MAX_TICKERS:
-            raise ToolError(f"scan takes at most {SCAN_MAX_TICKERS} tickers, got {len(names)}")
+        names = _tickers(cast("list[str]", tickers))
         results = []
         for ticker in names:
             try:
@@ -339,12 +358,10 @@ def build_server(
 
     @mcp.tool()
     def set_watchlist(name: str, tickers: list[str]) -> dict:
-        """Save a named Watchlist (up to 15 tickers, each checked with a quote), replacing its tickers; an empty list deletes it."""
+        """Save a named Watchlist (each ticker checked with a quote), replacing its tickers; an empty list deletes it."""
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,32}", name):
             raise ToolError("Watchlist name must be 1-32 letters, digits, '-' or '_'")
-        tickers = list(dict.fromkeys(t.upper() for t in tickers))
-        if len(tickers) > WATCHLIST_MAX_TICKERS:
-            raise ToolError(f"a Watchlist holds at most {WATCHLIST_MAX_TICKERS} tickers")
+        tickers = _tickers(tickers)
         bad = []
         for ticker in tickers:
             try:

@@ -3,7 +3,6 @@
 import json
 import time
 
-import pandas as pd
 import pytest
 from fakes import (
     FakeClassifier,
@@ -677,7 +676,23 @@ async def test_period_past_yahoos_limit_is_a_tool_error_naming_it(server_url, in
     )
 
     assert result.is_error
+    assert "longer than Yahoo keeps" in text_of(result)
     assert limit in text_of(result)
+    assert fetcher.history_calls == []
+
+
+@pytest.mark.parametrize(("interval", "period"), [("5m", "banana"), ("1h", "1week")])
+async def test_unknown_period_is_a_tool_error_saying_it_is_not_valid(server_url, interval, period):
+    fetcher = IntradayFakeFetcher()
+    result = await call_tool(
+        server_url(fetcher, classifier=FakeClassifier()),
+        "get_signal",
+        {"ticker": "AAPL", "interval": interval, "period": period},
+    )
+
+    assert result.is_error
+    assert f"not a valid period for {interval}" in text_of(result)
+    assert "longer than" not in text_of(result)
     assert fetcher.history_calls == []
 
 
@@ -708,7 +723,7 @@ async def test_prompt_carries_the_interval(server_url):
 
 async def test_intraday_data_date_is_the_latest_bars_timestamp(server_url, monkeypatch):
     # Real transport: data_date comes from the prompt's last row. The fake's 60th
-    # 5m bar opens 2024-03-01 13:55 WIB, which is 06:55 UTC.
+    # 5m bar opens 2024-03-01 13:55 WIB, given in the exchange's offset as scan does.
     posts = []
 
     def fake_post(url, **kwargs):
@@ -725,7 +740,7 @@ async def test_intraday_data_date_is_the_latest_bars_timestamp(server_url, monke
 
     assert not result.is_error, text_of(result)
     data_date = json.loads(text_of(result))["data_date"]
-    assert pd.Timestamp(data_date) == pd.Timestamp("2024-03-01 13:55", tz="Asia/Jakarta")
+    assert data_date == "2024-03-01T13:55:00+07:00"
 
 
 async def test_intraday_trade_plan_uses_the_intraday_atr(server_url):
