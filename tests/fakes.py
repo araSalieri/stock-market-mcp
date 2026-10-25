@@ -68,8 +68,8 @@ class SignalFakeFetcher:
     def fetch_fundamentals(self, ticker):
         raise AssertionError("get_signal tests never fetch fundamentals")
 
-    def fetch_history(self, ticker, period):
-        self.history_calls.append((ticker, period))
+    def fetch_history(self, ticker, period, interval="1d", prepost=False):
+        self.history_calls.append((ticker, period, interval, prepost))
         return fake_history(60)
 
 
@@ -82,6 +82,24 @@ def flat_history(close: float = 100.0, rows: int = 60) -> pd.DataFrame:
     )
 
 
+def intraday_history(
+    close: float = 100.0, rows: int = 60, spread: float = 0.25, tz: str = "Asia/Jakarta"
+) -> pd.DataFrame:
+    """5m bars in an exchange timezone, Yahoo's `Datetime` index, flat close with High/Low
+    `spread` away: True Range is 2 * spread every row, so ATR(14) is 2 * spread."""
+    idx = pd.date_range("2024-03-01 09:00", periods=rows, freq="5min", tz=tz, name="Datetime")
+    return pd.DataFrame(
+        {"Open": close, "High": close + spread, "Low": close - spread, "Close": close, "Volume": 1000},
+        index=idx,
+    )
+
+
+class IntradayFakeFetcher(SignalFakeFetcher):
+    def fetch_history(self, ticker, period, interval="1d", prepost=False):
+        self.history_calls.append((ticker, period, interval, prepost))
+        return intraday_history()
+
+
 class FlatFakeFetcher(SignalFakeFetcher):
     def __init__(self, close: float = 100.0, rows: int = 60, last_close: float | None = None):
         super().__init__()
@@ -89,8 +107,8 @@ class FlatFakeFetcher(SignalFakeFetcher):
         self.rows = rows
         self.last_close = last_close
 
-    def fetch_history(self, ticker, period):
-        self.history_calls.append((ticker, period))
+    def fetch_history(self, ticker, period, interval="1d", prepost=False):
+        self.history_calls.append((ticker, period, interval, prepost))
         df = flat_history(self.close, self.rows)
         if self.last_close is not None:
             df.loc[df.index[-1], "Close"] = self.last_close
@@ -122,3 +140,55 @@ class FakeClassifier:
         if self.replies is not None:
             return self.replies.pop(0)
         return self.verdict
+
+
+def daily_bars(
+    closes: list[float], last: str = "2024-03-15", tz: str = "Asia/Jakarta"
+) -> pd.DataFrame:
+    """Daily bars at local midnight in the exchange timezone, as Yahoo returns them; High/Low one unit from Close."""
+    idx = pd.date_range(end=last, periods=len(closes), freq="D", tz=tz, name="Date")
+    close = pd.Series(closes, index=idx)
+    return pd.DataFrame(
+        {"Open": close, "High": close + 1.0, "Low": close - 1.0, "Close": close, "Volume": 1000}
+    )
+
+
+def five_minute_bars(
+    bars: dict[str, tuple[float, float]], regular: list[tuple[str, str]], tz: str = "America/New_York"
+) -> pd.DataFrame:
+    """5m bars as Yahoo returns them with prepost=True: `Datetime` index in the exchange timezone.
+
+    `bars` maps a local time to (close, volume), with Open/High/Low at the close. `regular` is the
+    regular trading periods as (start, end) local times, carried in attrs as YfinanceFetcher does.
+    """
+    idx = pd.DatetimeIndex([pd.Timestamp(t, tz=tz) for t in bars], name="Datetime")
+    close = [c for c, _ in bars.values()]
+    df = pd.DataFrame(
+        {"Open": close, "High": close, "Low": close, "Close": close, "Volume": [v for _, v in bars.values()]},
+        index=idx,
+    )
+    df.attrs["regular_periods"] = [(pd.Timestamp(s, tz=tz), pd.Timestamp(e, tz=tz)) for s, e in regular]
+    return df
+
+
+class ScanFakeFetcher:
+    """History by ticker, then by Interval ("1d" or "5m"); a value that is an exception is raised."""
+
+    def __init__(self, frames: dict):
+        self.frames = frames
+        self.history_calls = []
+
+    def fetch_quote(self, ticker):
+        raise AssertionError("scan never fetches quotes")
+
+    def fetch_fundamentals(self, ticker):
+        raise AssertionError("scan never fetches fundamentals")
+
+    def fetch_history(self, ticker, period, interval="1d", prepost=False):
+        self.history_calls.append((ticker, period, interval, prepost))
+        frame = self.frames.get(ticker, {}).get(interval)
+        if frame is None:
+            raise LookupError(f"no history data for ticker: {ticker}")
+        if isinstance(frame, Exception):
+            raise frame
+        return frame

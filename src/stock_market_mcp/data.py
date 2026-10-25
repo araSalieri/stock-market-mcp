@@ -6,7 +6,7 @@ import pandas as pd
 
 
 def _unimplemented_fetch_history(
-    self: "DataFetcher", ticker: str, period: str
+    self: "DataFetcher", ticker: str, period: str, interval: str = "1d", prepost: bool = False
 ) -> pd.DataFrame:
     """Loud default: the spec forbids empty data, so a quote-only fake must fail loudly."""
     raise NotImplementedError(f"{type(self).__name__} does not implement fetch_history")
@@ -21,7 +21,8 @@ class DataFetcher(Protocol):
     # treats it as concrete) so quote-only fakes stay structurally valid; real
     # fetchers override this. Raising keeps the "never empty data" rule: a
     # quote-only fake leaking into history surfaces as a loud failure instead
-    # of an empty frame.
+    # of an empty frame. The frame's attrs["regular_periods"] holds the regular trading
+    # periods as (start, end) timestamps; the Scan needs it to tell pre-market bars apart.
     fetch_history = _unimplemented_fetch_history
 
 
@@ -39,12 +40,19 @@ class YfinanceFetcher:
             raise LookupError(f"no quote data for ticker: {ticker}")
         return {"price": price, "currency": info["currency"], "ticker": ticker.upper()}
 
-    def fetch_history(self, ticker: str, period: str) -> pd.DataFrame:
+    def fetch_history(
+        self, ticker: str, period: str, interval: str = "1d", prepost: bool = False
+    ) -> pd.DataFrame:
         import yfinance as yf
 
-        df = yf.Ticker(ticker).history(period=period)
+        t = yf.Ticker(ticker)
+        df = t.history(period=period, interval=interval, prepost=prepost)
         if df.empty:
             raise LookupError(f"no history data for ticker: {ticker}")
+        periods = t.history_metadata.get("tradingPeriods")
+        if isinstance(periods, pd.DataFrame):
+            # Only start/end are reliable; yfinance's pre_*/post_* columns are a day off.
+            df.attrs["regular_periods"] = list(zip(periods["start"], periods["end"], strict=True))
         return df
 
     def fetch_fundamentals(self, ticker: str) -> dict:

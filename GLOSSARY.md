@@ -1,6 +1,6 @@
 # Stock Market MCP
 
-A read-only server that gives coding agents market data, indicators, and advisory trading guidance. It never places orders.
+A server that gives coding agents market data, indicators, and advisory trading guidance. It never places orders.
 
 ## Language
 
@@ -15,8 +15,12 @@ One of buy, sell, or hold – the direction the Signal leans.
 _Avoid_: Decision, action
 
 **Price**:
-The last close in the data the Signal was made from. Every Signal has one; on buy or sell it equals the Entry.
+The last close in the data the Signal was made from; during the session that is the close of the bar still forming. Every Signal has one; on buy or sell it equals the Entry.
 _Avoid_: Current price, last price, quote
+
+**Interval**:
+The length of one bar in the price history a Signal is made from: 1m, 5m, 15m, 1h, or 1d.
+_Avoid_: Timeframe, resolution, granularity
 
 ### Trade Plan
 
@@ -43,3 +47,25 @@ _Avoid_: Take-profit, objective, goal
 **Reward Ratio**:
 The distance from Entry to Target divided by the distance from Entry to Stop.
 _Avoid_: Risk/reward, R-multiple, R:R
+
+### Watchlist
+
+**Watchlist**:
+A named list of tickers the user saves to scan together, usually one market per list.
+_Avoid_: Portfolio, universe, list
+
+**Scan**:
+A quick set of numbers for each ticker in a Watchlist or ad-hoc list, used to pick which ones deserve a Signal. Has no Verdict.
+_Avoid_: Screen, screener, filter
+
+**Gap**:
+The percent move from the previous session's close to this session's open. Before the open, it uses the latest pre-market price where the market has one.
+_Avoid_: Opening move, overnight change
+
+**Relative Volume**:
+This session's volume so far divided by the average volume up to the same time of day over the last 10 sessions.
+_Avoid_: RVOL, volume ratio
+
+**VWAP Distance**:
+How far the Price is from this session's VWAP (volume-weighted average price), as a percent. Positive when the Price is above it.
+_Avoid_: VWAP gap, VWAP deviation
