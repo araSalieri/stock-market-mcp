@@ -7,6 +7,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Annotated, Literal, cast
 
+import numpy as np
 import pandas as pd
 import pandas_ta as ta
 from mcp.server.mcpserver import MCPServer
@@ -169,6 +170,49 @@ def _scan_daily(df: pd.DataFrame, now: datetime) -> dict:
     }
 
 
+RELATIVE_VOLUME_SESSIONS = 10
+
+
+def _pct(value: float, base: float) -> float:
+    return (value / base - 1) * 100
+
+
+def _scan_intraday(df: pd.DataFrame, now: datetime, price: float, prev_close: float) -> dict:
+    """Gap, Relative Volume and VWAP distance from 5m bars with pre-market.
+
+    A bar is regular-session when it falls inside one of Yahoo's regular trading periods;
+    everything else is pre- or post-market.
+    """
+    periods = df.attrs.get("regular_periods")
+    if periods is None:
+        raise LookupError("5m history has no regular trading periods")
+    index = cast("pd.DatetimeIndex", df.index)
+    today = now.astimezone(index.tz).date()
+    days = np.array([t.date() for t in index])
+    times = np.array([t.time() for t in index])
+    regular = np.array([any(start <= t < end for start, end in periods) for t in index], dtype=bool)
+    in_session = (days == today) & regular
+    close = df["Close"].to_numpy(dtype=float)
+    volume = df["Volume"].to_numpy(dtype=float)
+    if not in_session.any():
+        pre_market = close[(days == today) & ~regular]
+        gap = _pct(float(pre_market[-1]), prev_close) if len(pre_market) else None
+        return {"gap_pct": gap, "relative_volume": None, "vwap_distance_pct": None}
+
+    session_volume = float(volume[in_session].sum())
+    so_far = times <= times[in_session][-1]
+    prior_days = set(sorted(set(days[regular & (days < today)]))[-RELATIVE_VOLUME_SESSIONS:])
+    prior = regular & so_far & np.array([d in prior_days for d in days], dtype=bool)
+    average = float(volume[prior].sum()) / len(prior_days) if prior_days else 0.0
+    typical = (df["High"].to_numpy(dtype=float) + df["Low"].to_numpy(dtype=float) + close) / 3
+    vwap = float((typical * volume)[in_session].sum()) / session_volume if session_volume else None
+    return {
+        "gap_pct": _pct(float(df["Open"].to_numpy(dtype=float)[in_session][0]), prev_close),
+        "relative_volume": session_volume / average if average else None,
+        "vwap_distance_pct": _pct(price, vwap) if vwap else None,
+    }
+
+
 def build_server(
     fetcher: DataFetcher,
     classifier: SignalClassifier | None = None,
@@ -262,7 +306,7 @@ def build_server(
 
     @mcp.tool()
     def scan(watchlist: str | None = None, tickers: list[str] | None = None) -> list[dict]:
-        """Scan a Watchlist or an ad-hoc ticker list: per ticker the Price and its time, the previous day's high, low and close, daily ATR % and RSI. No Verdict, no classifier call; a failing ticker gets its own error entry."""
+        """Scan a Watchlist or an ad-hoc ticker list: per ticker the Price and its time, the previous day's high, low and close, daily ATR % and RSI, the Gap, Relative Volume and distance from this session's VWAP. No Verdict, no classifier call; a failing ticker gets its own error entry."""
         if (watchlist is None) == (tickers is None):
             raise ToolError("give exactly one of watchlist or tickers")
         if watchlist is not None:
@@ -280,7 +324,15 @@ def build_server(
         for ticker in names:
             try:
                 daily = fetcher.fetch_history(ticker, "3mo", interval="1d")
-                results.append({"ticker": ticker, **_scan_daily(daily, now())})
+                intraday = fetcher.fetch_history(ticker, "1mo", interval="5m", prepost=True)
+                clock = now()
+                entry = _scan_daily(daily, clock)
+                # Pre-market or intraday bars give the Price when they're newer than the daily bar.
+                if len(intraday) and intraday.index[-1] >= daily.index[-1]:
+                    entry["price"] = float(intraday["Close"].iloc[-1])
+                    entry["data_date"] = cast("pd.Timestamp", intraday.index[-1]).isoformat()
+                entry |= _scan_intraday(intraday, clock, entry["price"], entry["prev_close"])
+                results.append({"ticker": ticker, **entry})
             except Exception as exc:
                 results.append({"ticker": ticker, "error": str(exc)})
         return results
