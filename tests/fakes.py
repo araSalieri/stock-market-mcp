@@ -140,3 +140,37 @@ class FakeClassifier:
         if self.replies is not None:
             return self.replies.pop(0)
         return self.verdict
+
+
+def daily_bars(
+    closes: list[float], last: str = "2024-03-15", tz: str = "Asia/Jakarta"
+) -> pd.DataFrame:
+    """Daily bars at local midnight in the exchange timezone, as Yahoo returns them; High/Low one unit from Close."""
+    idx = pd.date_range(end=last, periods=len(closes), freq="D", tz=tz, name="Date")
+    close = pd.Series(closes, index=idx)
+    return pd.DataFrame(
+        {"Open": close, "High": close + 1.0, "Low": close - 1.0, "Close": close, "Volume": 1000}
+    )
+
+
+class ScanFakeFetcher:
+    """History by ticker; a value that is an exception is raised for that ticker."""
+
+    def __init__(self, frames: dict):
+        self.frames = frames
+        self.history_calls = []
+
+    def fetch_quote(self, ticker):
+        raise AssertionError("scan never fetches quotes")
+
+    def fetch_fundamentals(self, ticker):
+        raise AssertionError("scan never fetches fundamentals")
+
+    def fetch_history(self, ticker, period, interval="1d", prepost=False):
+        self.history_calls.append((ticker, period, interval, prepost))
+        frame = self.frames.get(ticker)
+        if frame is None:
+            raise LookupError(f"no history data for ticker: {ticker}")
+        if isinstance(frame, Exception):
+            raise frame
+        return frame
