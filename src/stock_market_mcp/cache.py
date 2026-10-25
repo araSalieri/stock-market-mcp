@@ -9,9 +9,9 @@ import pandas as pd
 from stock_market_mcp.classifier import SignalClassifier
 from stock_market_mcp.data import DataFetcher
 
-# Production TTLs: quotes move fast, history and fundamentals are stable.
+# Production TTLs: quotes and history (intraday bars) move fast, fundamentals are stable.
 QUOTE_TTL_SECONDS = 60.0
-HISTORY_TTL_SECONDS = 300.0
+HISTORY_TTL_SECONDS = 60.0
 FUNDAMENTALS_TTL_SECONDS = 300.0
 SIGNAL_TTL_SECONDS = 300.0
 
@@ -40,7 +40,7 @@ class CachingFetcher:
     """DataFetcher decorator that serves repeated calls from a TTL cache.
 
     Quotes are cached per ticker for QUOTE_TTL_SECONDS; history per
-    (ticker, period) and fundamentals per ticker for the 5-minute TTLs.
+    (ticker, period, interval, prepost) and fundamentals per ticker for their TTLs.
     Failures are never cached: the delegate raises, the cache stays empty.
     """
 
@@ -75,12 +75,14 @@ class CachingFetcher:
         self._fundamentals.put(ticker, result)
         return result
 
-    def fetch_history(self, ticker: str, period: str) -> pd.DataFrame:
-        key = (ticker, period)
+    def fetch_history(
+        self, ticker: str, period: str, interval: str = "1d", prepost: bool = False
+    ) -> pd.DataFrame:
+        key = (ticker, period, interval, prepost)
         cached = self._histories.get(key, self._history_ttl)
         if cached is not None:
             return cached
-        result = self._fetcher.fetch_history(ticker, period)
+        result = self._fetcher.fetch_history(ticker, period, interval, prepost)
         self._histories.put(key, result)
         return result
 

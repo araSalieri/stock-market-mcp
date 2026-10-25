@@ -3,11 +3,13 @@
 import json
 import time
 
+import pandas as pd
 import pytest
 from fakes import (
     FakeClassifier,
     FakeFetcher,
     FlatFakeFetcher,
+    IntradayFakeFetcher,
     SignalFakeFetcher,
     call_tool,
     text_of,
@@ -54,7 +56,7 @@ async def test_get_signal_returns_strict_json_signal(server_url):
         "rationale": "uptrend with rising RSI",
         "data_date": "2024-01-03T11:00:00",
     }
-    assert fetcher.history_calls == [("AAPL", "1mo")]
+    assert fetcher.history_calls == [("AAPL", "1mo", "1d", False)]
     assert len(classifier.prompts) == 1
     prompt_payload = json.loads(classifier.prompts[0])
     assert prompt_payload["ticker"] == "AAPL"
@@ -67,7 +69,7 @@ async def test_get_signal_returns_strict_json_signal(server_url):
 async def test_unknown_ticker_is_a_loud_tool_error(server_url):
     # Spec #19 user story 17: no empty data, and nothing reaches the classifier.
     class UnknownTickerFetcher(SignalFakeFetcher):
-        def fetch_history(self, ticker, period):
+        def fetch_history(self, ticker, period, interval="1d", prepost=False):
             raise LookupError(f"no history data for ticker: {ticker}")
 
     classifier = FakeClassifier()
@@ -99,7 +101,7 @@ async def test_malformed_reply_retried_once_then_loud_error(server_url):
     message = text_of(result)
     assert "verdict" in message  # names the violation
     assert len(classifier.prompts) == 2  # exactly one retry
-    assert fetcher.history_calls == [("AAPL", "1mo")]
+    assert fetcher.history_calls == [("AAPL", "1mo", "1d", False)]
 
 
 async def test_single_formatting_slip_recovers_after_one_retry(server_url):
@@ -620,3 +622,128 @@ async def test_removed_tools_fail_as_unknown(server_url, name):
 
     assert result.is_error
     assert "unknown tool" in text_of(result).lower()
+
+
+# --- Intervals (ticket #28) ---
+
+
+@pytest.mark.parametrize(
+    ("interval", "period"), [("1m", "5d"), ("5m", "1mo"), ("15m", "1mo"), ("1h", "6mo"), ("1d", "1y")]
+)
+async def test_interval_and_its_default_period_reach_the_fetcher(server_url, interval, period):
+    fetcher = IntradayFakeFetcher()
+    result = await call_tool(
+        server_url(fetcher, classifier=FakeClassifier(_signal("hold"))),
+        "get_signal",
+        {"ticker": "BBCA.JK", "interval": interval},
+    )
+
+    assert not result.is_error, text_of(result)
+    assert fetcher.history_calls == [("BBCA.JK", period, interval, False)]
+
+
+async def test_interval_outside_the_allowlist_is_a_tool_error(server_url):
+    classifier = FakeClassifier()
+    fetcher = IntradayFakeFetcher()
+    result = await call_tool(
+        server_url(fetcher, classifier=classifier),
+        "get_signal",
+        {"ticker": "AAPL", "interval": "30m"},
+    )
+
+    assert result.is_error
+    assert "interval" in text_of(result)
+    assert fetcher.history_calls == []
+    assert classifier.prompts == []
+
+
+@pytest.mark.parametrize(
+    ("interval", "period", "limit"),
+    [("1m", "1mo", "7 days"), ("5m", "3mo", "60 days"), ("15m", "1y", "60 days"), ("1h", "5y", "730 days")],
+)
+async def test_period_past_yahoos_limit_is_a_tool_error_naming_it(server_url, interval, period, limit):
+    fetcher = IntradayFakeFetcher()
+    result = await call_tool(
+        server_url(fetcher, classifier=FakeClassifier()),
+        "get_signal",
+        {"ticker": "AAPL", "interval": interval, "period": period},
+    )
+
+    assert result.is_error
+    assert limit in text_of(result)
+    assert fetcher.history_calls == []
+
+
+async def test_explicit_period_within_the_limit_reaches_the_fetcher(server_url):
+    fetcher = IntradayFakeFetcher()
+    result = await call_tool(
+        server_url(fetcher, classifier=FakeClassifier(_signal("hold"))),
+        "get_signal",
+        {"ticker": "AAPL", "interval": "5m", "period": "5d"},
+    )
+
+    assert not result.is_error, text_of(result)
+    assert fetcher.history_calls == [("AAPL", "5d", "5m", False)]
+
+
+async def test_prompt_carries_the_interval(server_url):
+    classifier = FakeClassifier(_signal("hold"))
+    await call_tool(
+        server_url(IntradayFakeFetcher(), classifier=classifier),
+        "get_signal",
+        {"ticker": "AAPL", "interval": "5m"},
+    )
+
+    payload = json.loads(classifier.prompts[0])
+    assert payload["interval"] == "5m"
+    assert payload["period"] == "1mo"
+
+
+async def test_intraday_data_date_is_the_latest_bars_timestamp(server_url, monkeypatch):
+    # Real transport: data_date comes from the prompt's last row. The fake's 60th
+    # 5m bar opens 2024-03-01 13:55 WIB, which is 06:55 UTC.
+    posts = []
+
+    def fake_post(url, **kwargs):
+        posts.append(kwargs)
+        return FakeResponse(_decisions_body(_choice_answer(choice="hold")))
+
+    monkeypatch.setenv("SMM_OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr("stock_market_mcp.classifier.requests.post", fake_post)
+    result = await call_tool(
+        server_url(IntradayFakeFetcher()),
+        "get_signal",
+        {"ticker": "BBCA.JK", "interval": "5m"},
+    )
+
+    assert not result.is_error, text_of(result)
+    data_date = json.loads(text_of(result))["data_date"]
+    assert pd.Timestamp(data_date) == pd.Timestamp("2024-03-01 13:55", tz="Asia/Jakarta")
+
+
+async def test_intraday_trade_plan_uses_the_intraday_atr(server_url):
+    # 5m bars with High/Low 0.25 from a flat 100 close: ATR(14) is 0.5.
+    # Stop = 100 - 2*0.5 = 99, Target = 100 + 2*(100 - 99) = 102.
+    result = await call_tool(
+        server_url(IntradayFakeFetcher(), classifier=FakeClassifier(_signal("buy"))),
+        "get_signal",
+        {"ticker": "BBCA.JK", "interval": "5m"},
+    )
+
+    assert not result.is_error, text_of(result)
+    plan = json.loads(text_of(result))["trade_plan"]
+    assert plan["atr"] == pytest.approx(0.5)
+    assert plan["stop"] == pytest.approx(99.0)
+    assert plan["target"] == pytest.approx(102.0)
+
+
+async def test_default_call_uses_daily_bars_over_a_year(server_url):
+    fetcher = FlatFakeFetcher()
+    classifier = FakeClassifier(_signal("buy"))
+    result = await call_tool(server_url(fetcher, classifier=classifier), "get_signal", {"ticker": "AAPL"})
+
+    assert not result.is_error, text_of(result)
+    assert fetcher.history_calls == [("AAPL", "1y", "1d", False)]
+    payload = json.loads(classifier.prompts[0])
+    assert (payload["period"], payload["interval"]) == ("1y", "1d")
+    assert payload["rows"][-1]["Date"].startswith("2024-02-29")

@@ -8,11 +8,13 @@ A read-only MCP server that gives coding agents stock market data, indicators, a
 |------|-----------|---------|
 | `get_quote` | `ticker` | Current price and currency |
 | `get_fundamentals` | `ticker` | Name, sector, industry, market cap |
-| `get_signal` | `ticker`, `period="1y"`, `atr_multiple=2`, `reward_ratio=2` | Advisory Signal: a buy/sell/hold Verdict with confidence, rationale, `data_date`, `price` (last close), and `trade_plan`. Needs an OpenRouter key. |
+| `get_signal` | `ticker`, `interval="1d"`, `period` (default per Interval), `atr_multiple=2`, `reward_ratio=2` | Advisory Signal: a buy/sell/hold Verdict with confidence, rationale, `data_date`, `price` (last close), and `trade_plan`. Needs an OpenRouter key. |
 
-`get_signal` computes `sma`, `ema`, `rsi`, `macd`, `bbands`, `atr`, `adx` and `vwap` over `period` and sends them to the classifier. `trade_plan` is `null` for hold. For buy (long) or sell (short) it holds `direction`, `entry` (last close), `stop` (`atr_multiple` × ATR(14) away), `target` (`reward_ratio` × the Stop distance), `atr`, `atr_multiple` and `reward_ratio`. `atr_multiple` and `reward_ratio` must be numbers in (0, 10].
+`get_signal` computes `sma`, `ema`, `rsi`, `macd`, `bbands`, `atr`, `adx` and `vwap` over `period` on bars of the given `interval` and sends them to the classifier. `trade_plan` is `null` for hold. For buy (long) or sell (short) it holds `direction`, `entry` (last close), `stop` (`atr_multiple` × ATR(14) away), `target` (`reward_ratio` × the Stop distance), `atr`, `atr_multiple` and `reward_ratio`. `atr_multiple` and `reward_ratio` must be numbers in (0, 10].
 
-Results are cached in memory: quotes for 60 seconds, everything else for 5 minutes. Bad input, unknown tickers, and missing data return a tool error rather than an empty result. Domain terms are defined in [GLOSSARY.md](GLOSSARY.md).
+`interval` is one of `1m`, `5m`, `15m`, `1h` or `1d`. Without `period` it defaults to `5d` for 1m, `1mo` for 5m and 15m, `6mo` for 1h, and `1y` for 1d. Yahoo keeps 7 days of 1m bars, 60 days of 5m and 15m bars, and 730 days of 1h bars, so a longer `period` is a tool error. On intraday Intervals the last bar may still be forming: `price` is its close, `data_date` is its timestamp, and the ATR comes from those bars, so the Stop and Target are intraday-sized.
+
+Results are cached in memory: quotes and history for 60 seconds, fundamentals and Signals for 5 minutes. Bad input, unknown tickers, and missing data return a tool error rather than an empty result. Domain terms are defined in [GLOSSARY.md](GLOSSARY.md).
 
 Free Yahoo data is delayed, so check `data_date` before acting on a Signal or Trade Plan.
 
