@@ -36,11 +36,45 @@ async def test_scan_needs_exactly_one_of_watchlist_or_tickers(server_url, args):
     assert "exactly one" in text_of(result)
 
 
-async def test_scan_by_watchlist_is_not_supported_yet(server_url):
-    result = await call_tool(server_url(ScanFakeFetcher({})), "scan", {"watchlist": "idx"})
+async def test_scan_by_watchlist_scans_its_tickers_like_an_ad_hoc_list(server_url, tmp_path):
+    path = tmp_path / "watchlists.json"
+    path.write_text('{"idx": ["BBCA.JK", "NOPE"]}')
+    fetcher = ScanFakeFetcher(
+        {"BBCA.JK": {"1d": daily_bars(rising(), last="2024-03-14"), "5m": five_minute_bars({}, [])}}
+    )
+    url = server_url(fetcher, watchlist_path=path, now=lambda: IN_SESSION)
+
+    by_name = entries(await call_tool(url, "scan", {"watchlist": "idx"}))
+    ad_hoc = entries(await call_tool(url, "scan", {"tickers": ["BBCA.JK", "NOPE"]}))
+
+    assert [entry["ticker"] for entry in by_name] == ["BBCA.JK", "NOPE"]
+    assert "error" not in by_name[0]
+    assert by_name == ad_hoc
+
+
+async def test_scan_of_an_unknown_watchlist_names_it(server_url, tmp_path):
+    path = tmp_path / "watchlists.json"
+    path.write_text('{"idx": ["BBCA.JK"]}')
+    fetcher = ScanFakeFetcher({})
+    result = await call_tool(server_url(fetcher, watchlist_path=path), "scan", {"watchlist": "swing"})
 
     assert result.is_error
-    assert "not supported yet" in text_of(result)
+    assert "swing" in text_of(result)
+    assert fetcher.history_calls == []
+
+
+async def test_scan_of_a_corrupt_watchlist_file_errors_like_get_watchlists(server_url, tmp_path):
+    path = tmp_path / "watchlists.json"
+    path.write_text("{not json")
+    url = server_url(ScanFakeFetcher({}), watchlist_path=path)
+
+    scanned = await call_tool(url, "scan", {"watchlist": "idx"})
+    listed = await call_tool(url, "get_watchlists", {})
+
+    assert scanned.is_error
+    # Same message after the "Error executing tool <name>:" prefix.
+    assert text_of(scanned).split(": ", 1)[1] == text_of(listed).split(": ", 1)[1]
+    assert path.read_text() == "{not json"
 
 
 async def test_scan_caps_tickers_at_15(server_url):
