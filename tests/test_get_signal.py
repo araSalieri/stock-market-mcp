@@ -55,7 +55,7 @@ async def test_get_signal_returns_strict_json_signal(server_url):
         "rationale": "uptrend with rising RSI",
         "data_date": "2024-01-03T11:00:00",
     }
-    assert fetcher.history_calls == [("AAPL", "1mo", "1d", False)]
+    assert fetcher.history_calls == [("AAPL", "1mo", "5m", False)]
     assert len(classifier.prompts) == 1
     prompt_payload = json.loads(classifier.prompts[0])
     assert prompt_payload["ticker"] == "AAPL"
@@ -100,7 +100,7 @@ async def test_malformed_reply_retried_once_then_loud_error(server_url):
     message = text_of(result)
     assert "verdict" in message  # names the violation
     assert len(classifier.prompts) == 2  # exactly one retry
-    assert fetcher.history_calls == [("AAPL", "1mo", "1d", False)]
+    assert fetcher.history_calls == [("AAPL", "1mo", "5m", False)]
 
 
 async def test_single_formatting_slip_recovers_after_one_retry(server_url):
@@ -759,13 +759,13 @@ async def test_intraday_trade_plan_uses_the_intraday_atr(server_url):
     assert plan["target"] == pytest.approx(102.0)
 
 
-async def test_default_call_uses_daily_bars_over_a_year(server_url):
+async def test_default_call_uses_5m_bars_over_a_month(server_url):
     fetcher = FlatFakeFetcher()
     classifier = FakeClassifier(_signal("buy"))
     result = await call_tool(server_url(fetcher, classifier=classifier), "get_signal", {"ticker": "AAPL"})
 
     assert not result.is_error, text_of(result)
-    assert fetcher.history_calls == [("AAPL", "1y", "1d", False)]
+    assert fetcher.history_calls == [("AAPL", "1mo", "5m", False)]
     payload = json.loads(classifier.prompts[0])
-    assert (payload["period"], payload["interval"]) == ("1y", "1d")
+    assert (payload["period"], payload["interval"]) == ("1mo", "5m")
     assert payload["rows"][-1]["Date"].startswith("2024-02-29")
