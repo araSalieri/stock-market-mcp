@@ -600,7 +600,7 @@ async def test_cached_signal_carries_the_price_and_a_recomputed_plan(server_url)
 # --- Tool surface (ticket #22) ---
 
 
-async def test_server_lists_exactly_three_tools_and_get_signal_says_advisory_and_price(server_url):
+async def test_server_lists_its_tools_and_get_signal_says_advisory_and_price(server_url):
     async with (
         streamable_http_client(server_url(SignalFakeFetcher())) as (read, write),
         ClientSession(read, write) as session,
@@ -608,7 +608,13 @@ async def test_server_lists_exactly_three_tools_and_get_signal_says_advisory_and
         await session.initialize()
         tools = {t.name: t for t in (await session.list_tools()).tools}
 
-    assert sorted(tools) == ["get_fundamentals", "get_quote", "get_signal"]
+    assert sorted(tools) == [
+        "get_fundamentals",
+        "get_quote",
+        "get_signal",
+        "get_watchlists",
+        "set_watchlist",
+    ]
     description = (tools["get_signal"].description or "").lower()
     assert "advisory" in description
     assert "price (last close)" in description
