@@ -247,3 +247,30 @@ async def test_scan_relative_volume_compares_10_prior_sessions_at_the_same_time_
 
     [entry] = entries(result)
     assert entry["relative_volume"] == pytest.approx(300 / 200)
+
+
+async def test_scan_atr_and_rsi_ignore_the_forming_bar(server_url):
+    # Today's forming bar crashes to 50; on the completed bars ATR is still 2 (2/128 = 1.5625%) and RSI 100.
+    daily = daily_bars(rising()[:-1] + [50.0], last="2024-03-15")
+    fetcher = ScanFakeFetcher({"BBCA.JK": {"1d": daily, "5m": five_minute_bars({}, [])}})
+    result = await call_tool(server_url(fetcher, now=lambda: IN_SESSION), "scan", {"tickers": ["BBCA.JK"]})
+
+    [entry] = entries(result)
+    assert entry["price"] == 50.0
+    assert entry["atr_pct"] == pytest.approx(1.5625)
+    assert entry["rsi"] == pytest.approx(100.0)
+
+
+async def test_scan_gap_and_vwap_distance_are_null_when_not_finite(server_url):
+    # The 09:30 bar has no open or high, so neither the Gap nor the VWAP has a value.
+    intraday = five_minute_bars({"2024-03-15 09:30": (130.0, 100), "2024-03-15 09:35": (140.0, 300)}, US_DAYS)
+    intraday.loc[intraday.index[0], ["Open", "High"]] = float("nan")
+    daily = daily_bars(rising(), last="2024-03-15", tz="America/New_York")
+    fetcher = ScanFakeFetcher({"AAPL": {"1d": daily, "5m": intraday}})
+    result = await call_tool(server_url(fetcher, now=lambda: US_IN_SESSION), "scan", {"tickers": ["AAPL"]})
+
+    [entry] = entries(result)
+    assert entry["gap_pct"] is None
+    assert entry["vwap_distance_pct"] is None
+    # The text content must be valid JSON too, which has no NaN.
+    assert "NaN" not in text_of(result)

@@ -38,7 +38,11 @@ def build_signal_prompt(
         max_chars = int(os.environ.get("SMM_CLASSIFIER_MAX_STATE_CHARS") or DEFAULT_MAX_STATE_CHARS)
     # Yahoo names the index Date on daily bars and Datetime on intraday; every row
     # carries Date so data_date reads the same key on both.
-    payload = df.rename_axis("Date").reset_index().to_json(orient="records", date_format="iso")
+    frame = df.rename_axis("Date").reset_index()
+    if interval != "1d":
+        # Intraday times keep the exchange's offset, as scan gives them; to_json would turn them into UTC.
+        frame["Date"] = [t.isoformat() for t in frame["Date"]]
+    payload = frame.to_json(orient="records", date_format="iso")
     if payload is None:
         raise ValueError("could not serialize history rows")
     rows = json.loads(payload)
