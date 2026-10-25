@@ -553,14 +553,16 @@ async def test_non_positive_plan_price_is_a_loud_tool_error(server_url, verdict)
 
 @pytest.mark.parametrize("verdict", ["buy", "sell", "hold"])
 async def test_nan_last_close_is_a_loud_tool_error(server_url, verdict):
+    classifier = FakeClassifier(_signal(verdict))
     result = await call_tool(
-        server_url(FlatFakeFetcher(last_close=float("nan")), classifier=FakeClassifier(_signal(verdict))),
+        server_url(FlatFakeFetcher(last_close=float("nan")), classifier=classifier),
         "get_signal",
         {"ticker": "AAPL"},
     )
 
     assert result.is_error
     assert "non-finite close" in text_of(result)
+    assert classifier.prompts == []
 
 
 async def test_too_few_rows_for_indicators_is_a_loud_tool_error(server_url):

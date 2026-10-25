@@ -178,15 +178,15 @@ def build_server(
             if ind is None:
                 raise ToolError(f"not enough history rows for indicator: {name}")
             df = df.join(ind)
+        # Read outside the classifier cache, so cached Signals get a fresh Price and plan.
+        price = float(df["Close"].iloc[-1])
+        if not math.isfinite(price):
+            raise ToolError(f"latest row has a non-finite close (close={price})")
         prompt = build_signal_prompt(ticker.upper(), period, df)
         try:
             signal = signal_classifier.classify(prompt)
         except Exception as exc:
             raise ToolError(str(exc)) from exc
-        # Built outside the classifier cache, so cached Signals get a fresh Price and plan.
-        price = float(df["Close"].iloc[-1])
-        if not math.isfinite(price):
-            raise ToolError(f"latest row has a non-finite close (close={price})")
         direction = _VERDICT_DIRECTION.get(signal["verdict"])
         plan = _trade_plan(df, price, direction, atr_multiple, reward_ratio) if direction else None
         return {**signal, "price": price, "trade_plan": plan}
