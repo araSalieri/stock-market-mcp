@@ -81,6 +81,7 @@ INDICATOR_ALLOWLIST = frozenset(_INDICATOR_DISPATCH)
 PLAN_ATR_MULTIPLE = 2.0
 PLAN_REWARD_RATIO = 2.0
 PLAN_ARG_MAX = 10
+MIN_CONFIDENCE = 0.6
 
 # Strict: JSON numbers only; true and "2" are rejected, not coerced.
 PlanArg = Annotated[float, Strict()]
@@ -297,11 +298,14 @@ def build_server(
         period: str | None = None,
         atr_multiple: PlanArg = PLAN_ATR_MULTIPLE,
         reward_ratio: PlanArg = PLAN_REWARD_RATIO,
+        min_confidence: PlanArg = MIN_CONFIDENCE,
     ) -> dict:
         """Advisory buy/sell/hold Signal from price history and indicators on bars of one Interval, with the Price (last close) and, for buy or sell, a Trade Plan (Entry, Stop, Target); input only, never acts on it."""
         for name, value in (("atr_multiple", atr_multiple), ("reward_ratio", reward_ratio)):
             if not 0 < value <= PLAN_ARG_MAX:
                 raise ToolError(f"{name} must be in (0, {PLAN_ARG_MAX}], got {value}")
+        if not 0 <= min_confidence <= 1:
+            raise ToolError(f"min_confidence must be in [0, 1], got {min_confidence}")
         period = _period(interval, period)
         try:
             df = fetcher.fetch_history(ticker, period, interval)

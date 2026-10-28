@@ -539,6 +539,31 @@ async def test_non_number_plan_argument_fails_before_the_classifier(server_url, 
     assert classifier.prompts == []
 
 
+@pytest.mark.parametrize("value", [0, 0.6, 1])
+async def test_min_confidence_in_bounds_is_accepted(server_url, value):
+    result = await call_tool(
+        server_url(FlatFakeFetcher(), classifier=FakeClassifier(_signal("buy"))),
+        "get_signal",
+        {"ticker": "AAPL", "min_confidence": value},
+    )
+
+    assert not result.is_error, text_of(result)
+
+
+@pytest.mark.parametrize("value", [-0.1, 1.1, True, "0.6"])
+async def test_invalid_min_confidence_fails_before_the_classifier(server_url, value):
+    classifier = FakeClassifier()
+    result = await call_tool(
+        server_url(FlatFakeFetcher(), classifier=classifier),
+        "get_signal",
+        {"ticker": "AAPL", "min_confidence": value},
+    )
+
+    assert result.is_error
+    assert "min_confidence" in text_of(result)
+    assert classifier.prompts == []
+
+
 # Entry 1, ATR 2: long Stop = 1 - 2*2 = -3; short Stop = 5, Target = 1 - 2*(5 - 1) = -7.
 @pytest.mark.parametrize("verdict", ["buy", "sell"])
 async def test_non_positive_plan_price_is_a_loud_tool_error(server_url, verdict):
