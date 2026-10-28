@@ -8,12 +8,12 @@ An MCP server that gives coding agents stock market data, indicators, and adviso
 |------|-----------|---------|
 | `get_quote` | `ticker` | Current price and currency |
 | `get_fundamentals` | `ticker` | Name, sector, industry, market cap |
-| `get_signal` | `ticker`, `interval="5m"`, `period` (default per Interval), `atr_multiple=2`, `reward_ratio=2` | Advisory Signal: a buy/sell/hold Verdict with confidence, rationale, `data_date`, `price` (last close), and `trade_plan`. Needs an OpenRouter key. |
+| `get_signal` | `ticker`, `interval="5m"`, `period` (default per Interval), `atr_multiple=2`, `reward_ratio=2`, `min_confidence=0.6` | Advisory Signal: a buy/sell/hold Verdict with confidence, rationale, `data_date`, `price` (last close), and `trade_plan`. Needs an OpenRouter key. |
 | `set_watchlist` | `name`, `tickers` | Saves the Watchlist, replacing its tickers. An empty list deletes it. |
 | `get_watchlists` | none | Every Watchlist as `{name: [tickers]}` |
 | `scan` | `watchlist` or `tickers` | One Scan entry per ticker, in input order. No Verdict, no OpenRouter key. |
 
-`get_signal` computes `sma`, `ema`, `rsi`, `macd`, `bbands`, `atr`, `adx` and `vwap` over `period` on bars of the given `interval` and sends them to the classifier. `trade_plan` is `null` for hold. For buy (long) or sell (short) it holds `direction`, `entry` (last close), `stop` (`atr_multiple` × ATR(14) away), `target` (`reward_ratio` × the Stop distance), `atr`, `atr_multiple` and `reward_ratio`. `atr_multiple` and `reward_ratio` must be numbers in (0, 10].
+`get_signal` computes `sma`, `ema`, `rsi`, `macd`, `bbands`, `atr`, `adx` and `vwap` over `period` on bars of the given `interval` and sends them to the classifier. `trade_plan` is `null` for hold, and for buy or sell with `confidence` below `min_confidence`. For buy (long) or sell (short) it holds `direction`, `entry` (last close), `stop` (`atr_multiple` × ATR(14) away), `target` (`reward_ratio` × the Stop distance), `atr`, `atr_multiple` and `reward_ratio`. `atr_multiple` and `reward_ratio` must be numbers in (0, 10]; `min_confidence` must be a number in [0, 1].
 
 `interval` is one of `1m`, `5m`, `15m`, `1h` or `1d`. Without `period` it defaults to `5d` for 1m, `1mo` for 5m and 15m, `6mo` for 1h, and `1y` for 1d. Yahoo keeps 7 days of 1m bars, 60 days of 5m and 15m bars, and 730 days of 1h bars, so a longer `period` is a tool error. On intraday Intervals the last bar may still be forming: `price` is its close, `data_date` is its timestamp, and the ATR comes from those bars, so the Stop and Target are intraday-sized.
 
