@@ -300,7 +300,7 @@ def build_server(
         reward_ratio: PlanArg = PLAN_REWARD_RATIO,
         min_confidence: PlanArg = MIN_CONFIDENCE,
     ) -> dict:
-        """Advisory buy/sell/hold Signal from price history and indicators on bars of one Interval, with the Price (last close) and, for buy or sell, a Trade Plan (Entry, Stop, Target); input only, never acts on it."""
+        """Advisory buy/sell/hold Signal from price history and indicators on bars of one Interval, with the Price (last close) and, for buy or sell, a Trade Plan (Entry, Stop, Target); buy or sell below min_confidence gets no Trade Plan (null); input only, never acts on it."""
         for name, value in (("atr_multiple", atr_multiple), ("reward_ratio", reward_ratio)):
             if not 0 < value <= PLAN_ARG_MAX:
                 raise ToolError(f"{name} must be in (0, {PLAN_ARG_MAX}], got {value}")
@@ -325,7 +325,8 @@ def build_server(
             signal = signal_classifier.classify(prompt)
         except Exception as exc:
             raise ToolError(str(exc)) from exc
-        direction = _VERDICT_DIRECTION.get(signal["verdict"])
+        # After the cache, so each call's own min_confidence applies to a cached Signal.
+        direction = _VERDICT_DIRECTION.get(signal["verdict"]) if signal["confidence"] >= min_confidence else None
         plan = _trade_plan(df, price, direction, atr_multiple, reward_ratio) if direction else None
         return {**signal, "price": price, "trade_plan": plan}
 

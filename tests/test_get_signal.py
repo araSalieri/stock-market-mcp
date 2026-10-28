@@ -458,11 +458,53 @@ async def test_hold_has_no_trade_plan_but_carries_the_price(server_url):
     assert json.loads(text_of(result)) == {**_signal("hold"), "price": 123.5, "trade_plan": None}
 
 
-async def test_plan_is_attached_even_at_very_low_confidence(server_url):
+@pytest.mark.parametrize("verdict", ["buy", "sell"])
+async def test_buy_or_sell_below_default_min_confidence_has_no_trade_plan(server_url, verdict):
+    result = await call_tool(
+        server_url(FlatFakeFetcher(), classifier=FakeClassifier(_signal(verdict, 0.59))),
+        "get_signal",
+        {"ticker": "AAPL"},
+    )
+
+    assert not result.is_error, text_of(result)
+    assert json.loads(text_of(result)) == {
+        **_signal(verdict, 0.59), "price": 100.0, "trade_plan": None,
+    }
+
+
+@pytest.mark.parametrize(
+    ("confidence", "min_confidence", "has_plan"),
+    [
+        (0.6, None, True),  # exactly at the default keeps the plan
+        (0.8, 0.8, True),  # exactly at a custom minimum
+        (0.7, 0.8, False),  # custom cut raised above the default
+        (0.5, 0.4, True),  # custom cut lowered below the default
+    ],
+)
+async def test_min_confidence_sets_the_cut_for_the_trade_plan(
+    server_url, confidence, min_confidence, has_plan
+):
+    args = {"ticker": "AAPL"}
+    if min_confidence is not None:
+        args["min_confidence"] = min_confidence
+    result = await call_tool(
+        server_url(FlatFakeFetcher(), classifier=FakeClassifier(_signal("buy", confidence))),
+        "get_signal",
+        args,
+    )
+
+    assert not result.is_error, text_of(result)
+    payload = json.loads(text_of(result))
+    assert payload["confidence"] == confidence
+    assert payload["price"] == 100.0
+    assert (payload["trade_plan"] is not None) == has_plan
+
+
+async def test_min_confidence_zero_attaches_a_plan_at_very_low_confidence(server_url):
     result = await call_tool(
         server_url(FlatFakeFetcher(), classifier=FakeClassifier(_signal("buy", 0.01))),
         "get_signal",
-        {"ticker": "AAPL"},
+        {"ticker": "AAPL", "min_confidence": 0},
     )
 
     assert not result.is_error, text_of(result)
@@ -623,6 +665,21 @@ async def test_cached_signal_carries_the_price_and_a_recomputed_plan(server_url)
     assert len(classifier.prompts) == 1
 
 
+async def test_cached_signal_gets_or_loses_its_plan_by_each_calls_min_confidence(server_url):
+    classifier = FakeClassifier(_signal("buy", 0.7))
+    url = server_url(FlatFakeFetcher(), classifier=classifier, signal_ttl=TEST_SIGNAL_TTL)
+
+    first = await call_tool(url, "get_signal", {"ticker": "AAPL", "min_confidence": 0.8})
+    second = await call_tool(url, "get_signal", {"ticker": "AAPL", "min_confidence": 0.5})
+    third = await call_tool(url, "get_signal", {"ticker": "AAPL", "min_confidence": 0.8})
+
+    assert not first.is_error and not second.is_error and not third.is_error
+    assert json.loads(text_of(first))["trade_plan"] is None
+    assert json.loads(text_of(second))["trade_plan"]["direction"] == "long"
+    assert json.loads(text_of(third))["trade_plan"] is None
+    assert len(classifier.prompts) == 1
+
+
 # --- Tool surface (ticket #22) ---
 
 
@@ -645,6 +702,7 @@ async def test_server_lists_its_tools_and_get_signal_says_advisory_and_price(ser
     description = (tools["get_signal"].description or "").lower()
     assert "advisory" in description
     assert "price (last close)" in description
+    assert "below min_confidence" in description
 
 
 @pytest.mark.parametrize("name", ["get_plan", "get_history"])
