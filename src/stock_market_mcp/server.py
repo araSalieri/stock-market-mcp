@@ -84,7 +84,7 @@ PLAN_ARG_MAX = 10
 MIN_CONFIDENCE = 0.6
 
 # Strict: JSON numbers only; true and "2" are rejected, not coerced.
-PlanArg = Annotated[float, Strict()]
+StrictNumber = Annotated[float, Strict()]
 
 Direction = Literal["long", "short"]
 
@@ -296,9 +296,9 @@ def build_server(
         ticker: str,
         interval: Interval = "5m",
         period: str | None = None,
-        atr_multiple: PlanArg = PLAN_ATR_MULTIPLE,
-        reward_ratio: PlanArg = PLAN_REWARD_RATIO,
-        min_confidence: PlanArg = MIN_CONFIDENCE,
+        atr_multiple: StrictNumber = PLAN_ATR_MULTIPLE,
+        reward_ratio: StrictNumber = PLAN_REWARD_RATIO,
+        min_confidence: StrictNumber = MIN_CONFIDENCE,
     ) -> dict:
         """Advisory buy/sell/hold Signal from price history and indicators on bars of one Interval, with the Price (last close) and, for buy or sell, a Trade Plan (Entry, Stop, Target); buy or sell below min_confidence gets no Trade Plan (null); input only, never acts on it."""
         for name, value in (("atr_multiple", atr_multiple), ("reward_ratio", reward_ratio)):
