@@ -1,5 +1,6 @@
 """Shared MCP-surface harness: streamable-HTTP server over uvicorn, port 0."""
 
+import logging
 import threading
 import time
 
@@ -29,3 +30,10 @@ def server_url():
 
     yield start
     assert started  # harness sanity: server was started
+
+
+@pytest.fixture
+def app_log(caplog):
+    """caplog capturing our own INFO lines and up."""
+    caplog.set_level(logging.INFO, logger="stock_market_mcp")
+    return caplog

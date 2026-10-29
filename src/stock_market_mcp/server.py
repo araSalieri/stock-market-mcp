@@ -42,6 +42,10 @@ from stock_market_mcp.watchlists import (
 log = logging.getLogger(__name__)
 
 
+def _error_line(tool: str, exc: BaseException) -> str:
+    return f"tool={tool} error={exc}"
+
+
 def _audited[**P, R](tool: Callable[P, R]) -> Callable[P, R]:
     """Log one audit line per call: tool name, arguments, ms and outcome, even when the tool raises."""
     signature = inspect.signature(tool)
@@ -60,9 +64,12 @@ def _audited[**P, R](tool: Callable[P, R]) -> Callable[P, R]:
         except ToolError as exc:
             # A __cause__ means the tool wrapped a dependency failure; without one it rejected the input or data itself.
             if exc.__cause__ is not None:
-                log.error(f"tool={tool.__name__} error={exc}", exc_info=exc.__cause__)
+                log.error(_error_line(tool.__name__, exc), exc_info=exc.__cause__)
             else:
-                log.warning(f"tool={tool.__name__} error={exc}")
+                log.warning(_error_line(tool.__name__, exc))
+            raise
+        except Exception as exc:
+            log.exception(_error_line(tool.__name__, exc))
             raise
         finally:
             ms = round((time.perf_counter() - start) * 1000)
@@ -310,12 +317,11 @@ def build_server(
     )
     mcp = MCPServer("stock-market-mcp")
 
-    def tool[F: Callable](fn: F) -> F:
-        """Register fn as an MCP tool behind the audit wrapper."""
+    def audited_tool[F: Callable](fn: F) -> F:
         mcp.tool()(_audited(fn))
         return fn
 
-    @tool
+    @audited_tool
     def get_quote(ticker: str) -> dict:
         """Current quote for a stock ticker (price and currency)."""
         try:
@@ -323,7 +329,7 @@ def build_server(
         except Exception as exc:
             raise ToolError(str(exc)) from exc
 
-    @tool
+    @audited_tool
     def get_fundamentals(ticker: str) -> dict:
         """Key company fundamentals (name, sector, industry, market cap)."""
         try:
@@ -331,7 +337,7 @@ def build_server(
         except Exception as exc:
             raise ToolError(str(exc)) from exc
 
-    @tool
+    @audited_tool
     def get_signal(
         ticker: str,
         interval: Interval = "5m",
@@ -370,7 +376,7 @@ def build_server(
         plan = _trade_plan(df, price, direction, atr_multiple, reward_ratio) if direction else None
         return {**signal, "price": price, "trade_plan": plan}
 
-    @tool
+    @audited_tool
     def scan(watchlist: str | None = None, tickers: list[str] | None = None) -> list[dict]:
         """Scan a Watchlist or an ad-hoc ticker list: per ticker the Price and its time, the previous day's high, low and close, daily ATR % and RSI, the Gap, Relative Volume and distance from this session's VWAP. No Verdict, no classifier call; a failing ticker gets its own error entry."""
         if (watchlist is None) == (tickers is None):
@@ -398,11 +404,11 @@ def build_server(
                 entry |= _scan_intraday(intraday, clock, entry["price"], entry["prev_close"])
                 results.append({"ticker": ticker, **entry})
             except Exception as exc:
-                log.exception(f"tool=scan ticker={ticker} error={exc}")
+                log.exception(_error_line(f"scan ticker={ticker}", exc))
                 results.append({"ticker": ticker, "error": str(exc)})
         return results
 
-    @tool
+    @audited_tool
     def set_watchlist(name: str, tickers: list[str]) -> dict:
         """Save a named Watchlist (each ticker checked with a quote), replacing its tickers; an empty list deletes it."""
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,32}", name):
@@ -422,7 +428,7 @@ def build_server(
             raise ToolError(str(exc)) from exc
         return {"name": name, "tickers": tickers}
 
-    @tool
+    @audited_tool
     def get_watchlists() -> dict:
         """Every saved Watchlist as {name: [tickers]}."""
         try:

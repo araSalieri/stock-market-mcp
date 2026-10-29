@@ -1,33 +1,27 @@
 import logging
 import re
 
-from fakes import FakeFetcher, call_tool, text_of
+from fakes import FakeFetcher, audit_lines, call_tool, text_of
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
 
-def audit_lines(caplog):
-    return [r for r in caplog.records if " outcome=" in r.getMessage()]
-
-
-async def test_ok_call_writes_one_info_audit_line(server_url, caplog):
-    caplog.set_level(logging.INFO, logger="stock_market_mcp")
+async def test_ok_call_writes_one_info_audit_line(server_url, app_log):
     fetcher = FakeFetcher(quotes={"AAPL": {"price": 190.0, "currency": "USD"}})
     await call_tool(server_url(fetcher), "get_quote", {"ticker": "AAPL"})
 
-    [line] = audit_lines(caplog)
+    [line] = audit_lines(app_log)
     assert line.levelno == logging.INFO
     assert re.fullmatch(r"tool=get_quote ticker=AAPL ms=\d+ outcome=ok", line.getMessage())
 
 
-async def test_failing_call_writes_error_audit_line_and_keeps_tool_error_text(server_url, caplog):
-    caplog.set_level(logging.INFO, logger="stock_market_mcp")
+async def test_failing_call_writes_error_audit_line_and_keeps_tool_error_text(server_url, app_log):
     fetcher = FakeFetcher(error=RuntimeError("yahoo is down"))
     result = await call_tool(server_url(fetcher), "get_quote", {"ticker": "AAPL"})
 
     assert result.is_error
     assert text_of(result) == "Error executing tool get_quote: yahoo is down"
-    [line] = audit_lines(caplog)
+    [line] = audit_lines(app_log)
     assert re.fullmatch(r"tool=get_quote ticker=AAPL ms=\d+ outcome=error", line.getMessage())
 
 
@@ -42,8 +36,7 @@ EVERY_TOOL_ARGS = {
 }
 
 
-async def test_every_registered_tool_writes_an_audit_line(server_url, caplog, tmp_path):
-    caplog.set_level(logging.INFO, logger="stock_market_mcp")
+async def test_every_registered_tool_writes_an_audit_line(server_url, app_log, tmp_path):
     url = server_url(FakeFetcher(), watchlist_path=tmp_path / "watchlists.json")
     async with streamable_http_client(url) as (read, write), ClientSession(read, write) as session:
         await session.initialize()
@@ -52,15 +45,14 @@ async def test_every_registered_tool_writes_an_audit_line(server_url, caplog, tm
         for name, args in EVERY_TOOL_ARGS.items():
             await session.call_tool(name, args)
 
-    audited = [r.getMessage().split()[0] for r in audit_lines(caplog)]
+    audited = [r.getMessage().split()[0] for r in audit_lines(app_log)]
     assert audited == [f"tool={name}" for name in EVERY_TOOL_ARGS]
 
 
-async def test_audit_line_includes_defaulted_arguments(server_url, caplog):
-    caplog.set_level(logging.INFO, logger="stock_market_mcp")
+async def test_audit_line_includes_defaulted_arguments(server_url, app_log):
     await call_tool(server_url(FakeFetcher()), "get_signal", {"ticker": "AAPL"})
 
-    [line] = audit_lines(caplog)
+    [line] = audit_lines(app_log)
     assert line.getMessage().startswith(
         "tool=get_signal ticker=AAPL interval=5m period=None atr_multiple=2.0 reward_ratio=2.0 min_confidence=0.6 ms="
     )
