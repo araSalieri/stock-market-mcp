@@ -14,6 +14,8 @@ from stock_market_mcp.server import build_server
 _DEFAULT_HOST = "127.0.0.1"
 _DEFAULT_PORT = 8000
 _LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR")
+# The library's per-tool lines; our audit and error lines already cover them.
+_LIBRARY_TOOL_LINES = ("Tool %r failed: %r", "Tool %r raised an unexpected exception")
 
 
 def setup_logging() -> None:
@@ -27,6 +29,7 @@ def setup_logging() -> None:
     root.setLevel(level)
     # A filter, not a level: uvicorn's dictConfig at run() resets the level but keeps filters.
     logging.getLogger("uvicorn.access").addFilter(lambda _: False)
+    logging.getLogger("mcp.server.mcpserver.server").addFilter(lambda r: r.msg not in _LIBRARY_TOOL_LINES)
 
 
 def main() -> None:

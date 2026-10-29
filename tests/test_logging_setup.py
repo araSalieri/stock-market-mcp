@@ -12,12 +12,13 @@ from stock_market_mcp.__main__ import setup_logging
 @pytest.fixture(autouse=True)
 def restore_logging():
     root = logging.getLogger()
-    access = logging.getLogger("uvicorn.access")
-    handlers, level, filters = root.handlers[:], root.level, access.filters[:]
+    loggers = [logging.getLogger(n) for n in ("uvicorn.access", "mcp.server.mcpserver.server")]
+    handlers, level, filters = root.handlers[:], root.level, [lg.filters[:] for lg in loggers]
     yield
     root.handlers[:] = handlers
     root.setLevel(level)
-    access.filters[:] = filters
+    for lg, f in zip(loggers, filters):
+        lg.filters[:] = f
 
 
 def test_default_level_is_info(monkeypatch):
@@ -72,3 +73,21 @@ def test_uvicorn_access_log_is_silenced_but_error_log_is_kept(monkeypatch, capsy
     err = capsys.readouterr().err
     assert "POST /mcp 200" not in err
     assert "Uvicorn running" in err
+
+
+def test_library_per_tool_lines_are_silenced_but_its_other_lines_are_kept(monkeypatch, capsys):
+    monkeypatch.delenv("SMM_LOG_LEVEL", raising=False)
+
+    setup_logging()
+    library = logging.getLogger("mcp.server.mcpserver.server")
+    library.info("Tool %r failed: %r", "get_quote", "yahoo is down")
+    try:
+        raise KeyError("Close")
+    except KeyError:
+        library.exception("Tool %r raised an unexpected exception", "get_signal")
+    library.info("Tool %r rejected arguments: %r", "get_signal", ["period"])
+
+    err = capsys.readouterr().err
+    assert "failed" not in err
+    assert "unexpected exception" not in err
+    assert "Tool 'get_signal' rejected arguments: ['period']" in err
