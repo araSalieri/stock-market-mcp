@@ -64,8 +64,9 @@ Other clients: point them at the same URL as a streamable HTTP server.
 | `SMM_PORT` | `8000` | Listen port |
 | `SMM_CLASSIFIER_MAX_STATE_CHARS` | `32000` | Max size of the market data sent to the classifier |
 | `SMM_WATCHLIST_PATH` | `watchlists.json` in the working directory | Watchlist file (compose sets a path on its volume) |
+| `SMM_LOG_LEVEL` | `INFO` | Log level for stderr logs: `DEBUG`, `INFO`, `WARNING` or `ERROR` |
 
-compose passes only the first two from `.env`. When running from source, export variables in your shell.
+compose passes `SMM_OPENROUTER_API_KEY`, `SMM_CLASSIFIER_MODEL` and `SMM_LOG_LEVEL` from `.env`. When running from source, export variables in your shell.
 
 ## Development
 

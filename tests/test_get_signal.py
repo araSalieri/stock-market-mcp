@@ -170,7 +170,7 @@ async def test_other_tools_keep_working_without_openrouter_key(server_url, monke
 async def test_second_signal_within_ttl_is_served_from_cache(server_url):
     classifier = FakeClassifier()
     fetcher = SignalFakeFetcher()
-    url = server_url(fetcher, classifier=classifier, signal_ttl=TEST_SIGNAL_TTL)
+    url = server_url(fetcher, classifier=classifier)
 
     first = await call_tool(url, "get_signal", {"ticker": "AAPL", "period": "1mo"})
     second = await call_tool(url, "get_signal", {"ticker": "AAPL", "period": "1mo"})
@@ -385,7 +385,7 @@ def test_provider_http_error_is_loud_and_never_retried(monkeypatch):
 async def test_failed_signal_is_never_cached(server_url):
     classifier = FakeClassifier(error=RuntimeError("openrouter 500"))
     fetcher = SignalFakeFetcher()
-    url = server_url(fetcher, classifier=classifier, signal_ttl=TEST_SIGNAL_TTL)
+    url = server_url(fetcher, classifier=classifier)
 
     first = await call_tool(url, "get_signal", {"ticker": "AAPL", "period": "1mo"})
     second = await call_tool(url, "get_signal", {"ticker": "AAPL", "period": "1mo"})
@@ -650,7 +650,7 @@ async def test_too_few_rows_for_indicators_is_a_loud_tool_error(server_url):
 async def test_cached_signal_carries_the_price_and_a_recomputed_plan(server_url):
     # atr_multiple 1: Stop = 100 - 1*2 = 98, Target = 100 + 2*(100 - 98) = 104.
     classifier = FakeClassifier(_signal("buy"))
-    url = server_url(FlatFakeFetcher(), classifier=classifier, signal_ttl=TEST_SIGNAL_TTL)
+    url = server_url(FlatFakeFetcher(), classifier=classifier)
 
     first = await call_tool(url, "get_signal", {"ticker": "AAPL"})
     second = await call_tool(url, "get_signal", {"ticker": "AAPL", "atr_multiple": 1})
@@ -667,7 +667,7 @@ async def test_cached_signal_carries_the_price_and_a_recomputed_plan(server_url)
 
 async def test_cached_signal_gets_or_loses_its_plan_by_each_calls_min_confidence(server_url):
     classifier = FakeClassifier(_signal("buy", 0.7))
-    url = server_url(FlatFakeFetcher(), classifier=classifier, signal_ttl=TEST_SIGNAL_TTL)
+    url = server_url(FlatFakeFetcher(), classifier=classifier)
 
     first = await call_tool(url, "get_signal", {"ticker": "AAPL", "min_confidence": 0.8})
     second = await call_tool(url, "get_signal", {"ticker": "AAPL", "min_confidence": 0.5})

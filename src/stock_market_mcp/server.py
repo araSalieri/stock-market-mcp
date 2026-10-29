@@ -1,8 +1,12 @@
 """MCP server assembly: tools registered against an injectable data fetcher."""
 
+import functools
+import inspect
+import logging
 import math
 import os
 import re
+import time
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Annotated, Literal, NamedTuple, cast
@@ -34,6 +38,44 @@ from stock_market_mcp.watchlists import (
     WATCHLIST_MAX_TICKERS,
     WatchlistStore,
 )
+
+log = logging.getLogger(__name__)
+
+
+def _error_line(tool: str, exc: BaseException) -> str:
+    return f"tool={tool} error={exc}"
+
+
+def _audited[**P, R](tool: Callable[P, R]) -> Callable[P, R]:
+    """Log one audit line per call: tool name, arguments, ms and outcome, even when the tool raises."""
+    signature = inspect.signature(tool)
+
+    @functools.wraps(tool)
+    def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+        bound = signature.bind(*args, **kwargs)
+        bound.apply_defaults()
+        fields = " ".join(f"{k}={v}" for k, v in bound.arguments.items())
+        start = time.perf_counter()
+        outcome = "error"
+        try:
+            result = tool(*args, **kwargs)
+            outcome = "ok"
+            return result
+        except ToolError as exc:
+            # A __cause__ means the tool wrapped a dependency failure; without one it rejected the input or data itself.
+            if exc.__cause__ is not None:
+                log.error(_error_line(tool.__name__, exc), exc_info=exc.__cause__)
+            else:
+                log.warning(_error_line(tool.__name__, exc))
+            raise
+        except Exception as exc:
+            log.exception(_error_line(tool.__name__, exc))
+            raise
+        finally:
+            ms = round((time.perf_counter() - start) * 1000)
+            log.info(" ".join(filter(None, (f"tool={tool.__name__}", fields, f"ms={ms}", f"outcome={outcome}"))))
+
+    return wrapper
 
 
 def _suffixed_frame(ind: pd.Series | None) -> pd.DataFrame | None:
@@ -275,7 +317,11 @@ def build_server(
     )
     mcp = MCPServer("stock-market-mcp")
 
-    @mcp.tool()
+    def audited_tool[F: Callable](fn: F) -> F:
+        mcp.tool()(_audited(fn))
+        return fn
+
+    @audited_tool
     def get_quote(ticker: str) -> dict:
         """Current quote for a stock ticker (price and currency)."""
         try:
@@ -283,7 +329,7 @@ def build_server(
         except Exception as exc:
             raise ToolError(str(exc)) from exc
 
-    @mcp.tool()
+    @audited_tool
     def get_fundamentals(ticker: str) -> dict:
         """Key company fundamentals (name, sector, industry, market cap)."""
         try:
@@ -291,7 +337,7 @@ def build_server(
         except Exception as exc:
             raise ToolError(str(exc)) from exc
 
-    @mcp.tool()
+    @audited_tool
     def get_signal(
         ticker: str,
         interval: Interval = "5m",
@@ -330,7 +376,7 @@ def build_server(
         plan = _trade_plan(df, price, direction, atr_multiple, reward_ratio) if direction else None
         return {**signal, "price": price, "trade_plan": plan}
 
-    @mcp.tool()
+    @audited_tool
     def scan(watchlist: str | None = None, tickers: list[str] | None = None) -> list[dict]:
         """Scan a Watchlist or an ad-hoc ticker list: per ticker the Price and its time, the previous day's high, low and close, daily ATR % and RSI, the Gap, Relative Volume and distance from this session's VWAP. No Verdict, no classifier call; a failing ticker gets its own error entry."""
         if (watchlist is None) == (tickers is None):
@@ -358,10 +404,11 @@ def build_server(
                 entry |= _scan_intraday(intraday, clock, entry["price"], entry["prev_close"])
                 results.append({"ticker": ticker, **entry})
             except Exception as exc:
+                log.exception(_error_line(f"scan ticker={ticker}", exc))
                 results.append({"ticker": ticker, "error": str(exc)})
         return results
 
-    @mcp.tool()
+    @audited_tool
     def set_watchlist(name: str, tickers: list[str]) -> dict:
         """Save a named Watchlist (each ticker checked with a quote), replacing its tickers; an empty list deletes it."""
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,32}", name):
@@ -381,7 +428,7 @@ def build_server(
             raise ToolError(str(exc)) from exc
         return {"name": name, "tickers": tickers}
 
-    @mcp.tool()
+    @audited_tool
     def get_watchlists() -> dict:
         """Every saved Watchlist as {name: [tickers]}."""
         try:
