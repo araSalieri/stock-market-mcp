@@ -17,6 +17,7 @@ services:
       # ever stored in the image, repo, or this file.
       SMM_OPENROUTER_API_KEY: ${SMM_OPENROUTER_API_KEY:-}
       SMM_CLASSIFIER_MODEL: ${SMM_CLASSIFIER_MODEL:-}
+      SMM_LOG_LEVEL: ${SMM_LOG_LEVEL:-}
     ports:
       - "8000:8000"
     volumes:
