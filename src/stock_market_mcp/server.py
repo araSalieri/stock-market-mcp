@@ -57,6 +57,13 @@ def _audited[**P, R](tool: Callable[P, R]) -> Callable[P, R]:
             result = tool(*args, **kwargs)
             outcome = "ok"
             return result
+        except ToolError as exc:
+            # A __cause__ means the tool wrapped a dependency failure; without one it rejected the input or data itself.
+            if exc.__cause__ is not None:
+                log.error(f"tool={tool.__name__} error={exc}", exc_info=exc.__cause__)
+            else:
+                log.warning(f"tool={tool.__name__} error={exc}")
+            raise
         finally:
             ms = round((time.perf_counter() - start) * 1000)
             log.info(" ".join(filter(None, (f"tool={tool.__name__}", fields, f"ms={ms}", f"outcome={outcome}"))))
@@ -391,6 +398,7 @@ def build_server(
                 entry |= _scan_intraday(intraday, clock, entry["price"], entry["prev_close"])
                 results.append({"ticker": ticker, **entry})
             except Exception as exc:
+                log.exception(f"tool=scan ticker={ticker} error={exc}")
                 results.append({"ticker": ticker, "error": str(exc)})
         return results
 

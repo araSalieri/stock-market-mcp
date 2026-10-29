@@ -7,7 +7,7 @@ from mcp.client.streamable_http import streamable_http_client
 
 
 def audit_lines(caplog):
-    return [r for r in caplog.records if r.getMessage().startswith("tool=")]
+    return [r for r in caplog.records if " outcome=" in r.getMessage()]
 
 
 async def test_ok_call_writes_one_info_audit_line(server_url, caplog):
