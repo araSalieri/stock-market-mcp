@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from fakes import (
     FakeClassifier,
     FakeFetcher,
+    NoCloseFakeFetcher,
     ScanFakeFetcher,
     SignalFakeFetcher,
     audit_lines,
@@ -66,6 +67,19 @@ async def test_bad_watchlist_file_logs_error_with_its_traceback(server_url, app_
     assert record.levelno == logging.ERROR
     assert record.exc_info is not None
     assert isinstance(record.exc_info[1], ValueError)
+
+
+async def test_unexpected_exception_logs_error_with_its_traceback(server_url, app_log):
+    result = await call_tool(server_url(NoCloseFakeFetcher()), "get_signal", {"ticker": "AAPL"})
+
+    assert result.is_error
+    [record] = error_records(app_log)
+    assert record.levelno == logging.ERROR
+    assert record.getMessage() == "tool=get_signal error='Close'"
+    assert record.exc_info is not None
+    assert isinstance(record.exc_info[1], KeyError)
+    [audit] = audit_lines(app_log)
+    assert audit.getMessage().endswith("outcome=error")
 
 
 async def test_scan_logs_a_failing_ticker_at_error_and_still_returns_ok(server_url, app_log):

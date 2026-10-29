@@ -77,6 +77,14 @@ class SignalFakeFetcher:
         return fake_history(60)
 
 
+class NoCloseFakeFetcher(SignalFakeFetcher):
+    """History without a Close column: get_signal hits a plain KeyError, a bug path no ToolError wraps."""
+
+    def fetch_history(self, ticker, period, interval="1d", prepost=False):
+        self.history_calls.append((ticker, period, interval, prepost))
+        return fake_history(60).drop(columns="Close")
+
+
 def flat_history(close: float = 100.0, rows: int = 60) -> pd.DataFrame:
     """Flat close with High/Low one unit away: True Range is 2 every row, so ATR(14) is 2."""
     idx = pd.date_range("2024-01-01", periods=rows, freq="D", name="Date")

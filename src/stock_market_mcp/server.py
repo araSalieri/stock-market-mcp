@@ -68,6 +68,9 @@ def _audited[**P, R](tool: Callable[P, R]) -> Callable[P, R]:
             else:
                 log.warning(_error_line(tool.__name__, exc))
             raise
+        except Exception as exc:
+            log.exception(_error_line(tool.__name__, exc))
+            raise
         finally:
             ms = round((time.perf_counter() - start) * 1000)
             log.info(" ".join(filter(None, (f"tool={tool.__name__}", fields, f"ms={ms}", f"outcome={outcome}"))))
