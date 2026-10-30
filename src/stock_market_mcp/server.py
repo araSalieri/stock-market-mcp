@@ -32,9 +32,9 @@ from stock_market_mcp.classifier import (
     SignalClassifier,
 )
 from stock_market_mcp.data import DataFetcher
+from stock_market_mcp.db import DEFAULT_DB_PATH
 from stock_market_mcp.prompt import build_signal_prompt
 from stock_market_mcp.watchlists import (
-    DEFAULT_WATCHLIST_PATH,
     WATCHLIST_MAX_TICKERS,
     WatchlistStore,
 )
@@ -293,7 +293,7 @@ def build_server(
     history_ttl: float = HISTORY_TTL_SECONDS,
     fundamentals_ttl: float = FUNDAMENTALS_TTL_SECONDS,
     signal_ttl: float = SIGNAL_TTL_SECONDS,
-    watchlist_path: str | os.PathLike | None = None,
+    db_path: str | os.PathLike | None = None,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> MCPServer:
     """Assemble the MCP server over an injectable fetcher and classifier.
@@ -312,9 +312,8 @@ def build_server(
         EnforcingClassifier(classifier if classifier is not None else OpenRouterClassifier()),
         signal_ttl=signal_ttl,
     )
-    watchlists = WatchlistStore(
-        watchlist_path or os.environ.get("SMM_WATCHLIST_PATH", DEFAULT_WATCHLIST_PATH)
-    )
+    db_path = db_path or os.environ.get("SMM_DB_PATH", DEFAULT_DB_PATH)
+    watchlists = WatchlistStore(db_path)
     mcp = MCPServer("stock-market-mcp")
 
     def audited_tool[F: Callable](fn: F) -> F:

@@ -7,7 +7,7 @@ QUOTES = {t: {"price": 1.0, "currency": "IDR"} for t in ("BBCA.JK", "TLKM.JK", "
 
 
 def start(server_url, tmp_path):
-    return server_url(FakeFetcher(quotes=QUOTES), watchlist_path=tmp_path / "watchlists.json")
+    return server_url(FakeFetcher(quotes=QUOTES), db_path=tmp_path / "smm.db")
 
 
 async def get_watchlists(url):
@@ -45,7 +45,7 @@ async def test_invalid_names_are_rejected(server_url, tmp_path, name):
 async def test_more_than_15_tickers_is_rejected(server_url, tmp_path):
     tickers = [f"T{i}.JK" for i in range(16)]
     fetcher = FakeFetcher(quotes={t: {"price": 1.0, "currency": "IDR"} for t in tickers})
-    url = server_url(fetcher, watchlist_path=tmp_path / "watchlists.json")
+    url = server_url(fetcher, db_path=tmp_path / "smm.db")
 
     result = await call_tool(url, "set_watchlist", {"name": "big", "tickers": tickers})
     assert result.is_error
@@ -58,7 +58,6 @@ async def test_more_than_15_tickers_is_rejected(server_url, tmp_path):
 async def test_unknown_ticker_rejects_the_whole_save(server_url, tmp_path):
     url = start(server_url, tmp_path)
     await call_tool(url, "set_watchlist", {"name": "idx", "tickers": ["BBCA.JK"]})
-    before = (tmp_path / "watchlists.json").read_bytes()
 
     result = await call_tool(
         url, "set_watchlist", {"name": "idx", "tickers": ["TLKM.JK", "BBCAA.JK", "NOPE.JK"]}
@@ -67,7 +66,7 @@ async def test_unknown_ticker_rejects_the_whole_save(server_url, tmp_path):
     assert result.is_error
     assert "BBCAA.JK" in text_of(result)
     assert "NOPE.JK" in text_of(result)
-    assert (tmp_path / "watchlists.json").read_bytes() == before
+    assert await get_watchlists(url) == {"idx": ["BBCA.JK"]}
 
 
 async def test_empty_list_deletes_and_missing_delete_is_fine(server_url, tmp_path):
@@ -88,16 +87,16 @@ async def test_no_file_means_no_watchlists(server_url, tmp_path):
     assert await get_watchlists(start(server_url, tmp_path)) == {}
 
 
-@pytest.mark.parametrize("content", ["{not json", '["idx"]', '{"idx": "BBCA.JK"}', '{"idx": [1]}'])
-async def test_corrupt_file_errors_and_is_never_overwritten(server_url, tmp_path, content):
-    path = tmp_path / "watchlists.json"
-    path.write_text(content)
+async def test_file_that_is_not_a_database_errors_naming_its_path(server_url, tmp_path):
+    path = tmp_path / "smm.db"
+    path.write_text("{not a database")
     url = start(server_url, tmp_path)
 
-    assert (await call_tool(url, "get_watchlists", {})).is_error
-    result = await call_tool(url, "set_watchlist", {"name": "idx", "tickers": ["BBCA.JK"]})
-    assert result.is_error
-    assert path.read_text() == content
+    for tool, args in [("get_watchlists", {}), ("set_watchlist", {"name": "idx", "tickers": ["BBCA.JK"]})]:
+        result = await call_tool(url, tool, args)
+        assert result.is_error
+        assert str(path) in text_of(result)
+    assert path.read_text() == "{not a database"
 
 
 async def test_watchlists_survive_a_fresh_server(server_url, tmp_path):

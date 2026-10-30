@@ -37,7 +37,7 @@ EVERY_TOOL_ARGS = {
 
 
 async def test_every_registered_tool_writes_an_audit_line(server_url, app_log, tmp_path):
-    url = server_url(FakeFetcher(), watchlist_path=tmp_path / "watchlists.json")
+    url = server_url(FakeFetcher(), db_path=tmp_path / "smm.db")
     async with streamable_http_client(url) as (read, write), ClientSession(read, write) as session:
         await session.initialize()
         listed = {t.name for t in (await session.list_tools()).tools}

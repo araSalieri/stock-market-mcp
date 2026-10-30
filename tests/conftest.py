@@ -12,7 +12,7 @@ from stock_market_mcp.server import build_server
 
 @pytest.fixture
 def server_url():
-    """Factory that starts an MCP server for a fetcher; extra kwargs go to build_server (TTLs, watchlist_path)."""
+    """Factory that starts an MCP server for a fetcher; extra kwargs go to build_server (TTLs, db_path)."""
     started = []
 
     def start(fetcher, **ttl_overrides):

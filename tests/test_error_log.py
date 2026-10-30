@@ -56,13 +56,13 @@ async def test_classifier_exception_logs_error_with_its_traceback(server_url, ap
     assert record.exc_info[1] is boom
 
 
-async def test_bad_watchlist_file_logs_error_with_its_traceback(server_url, app_log, tmp_path):
-    path = tmp_path / "watchlists.json"
-    path.write_text("{not json")
-    result = await call_tool(server_url(FakeFetcher(), watchlist_path=path), "get_watchlists", {})
+async def test_bad_database_file_logs_error_with_its_traceback(server_url, app_log, tmp_path):
+    path = tmp_path / "smm.db"
+    path.write_text("{not a database")
+    result = await call_tool(server_url(FakeFetcher(), db_path=path), "get_watchlists", {})
 
     assert result.is_error
-    assert f"Watchlist file {path} is not valid JSON" in text_of(result)
+    assert str(path) in text_of(result)
     [record] = error_records(app_log)
     assert record.levelno == logging.ERROR
     assert record.exc_info is not None
