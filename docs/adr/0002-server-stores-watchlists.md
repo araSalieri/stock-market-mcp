@@ -1,5 +1,7 @@
 # Server stores Watchlists
 
+Storage superseded by ADR-0003: Watchlists now live in the shared SQLite file.
+
 The server keeps named Watchlists in a JSON file (`SMM_WATCHLIST_PATH`, a Docker volume in compose), edited through `set_watchlist`, instead of the agent passing the tickers on every Scan. That makes it the server's only state and its only write. It still never places orders. Lists persisted on the server outlive any one agent session, and it's the user's choice to keep them there rather than in prompts.
 
 ## Consequences

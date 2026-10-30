@@ -7,7 +7,7 @@ A server that gives coding agents market data, indicators, and advisory trading 
 ### Signal
 
 **Signal**:
-An advisory answer to "is now the time to buy, sell, or hold this stock?", made of a Verdict, a Confidence, a rationale, the data date, the Price, and a Trade Plan when the Verdict is buy or sell.
+An advisory answer to "is now the time to buy, sell, or hold this stock?", made of a Verdict, a Confidence, a rationale, the data date, the Price, the Hit Rate for its ticker and Interval (none until enough are scored), and a Trade Plan when the Verdict is buy or sell.
 _Avoid_: Recommendation, call, alert
 
 **Verdict**:
@@ -18,9 +18,21 @@ _Avoid_: Decision, action
 The classifier's own 0–1 estimate that the Verdict is right. Self-reported, not a measured hit rate.
 _Avoid_: Probability, certainty, score
 
+**Minimum Confidence**:
+The lowest Confidence at which a buy or sell gets a Trade Plan. Set by the server from Hit Rates: 0.6 until enough Signals are scored.
+_Avoid_: Threshold, cut-off
+
 **Price**:
 The last close in the data the Signal was made from; during the session that is the close of the bar still forming. Every Signal has one; on buy or sell it equals the Entry.
 _Avoid_: Current price, last price, quote
+
+**Outcome**:
+What happened to a buy or sell Signal within 20 bars of its Interval, judged against the default Trade Plan: Target (reached first), Stop (reached first, or on the same bar as the Target), or Expired (neither). Scored even when the Signal was below the Minimum Confidence. A hold Signal's Outcome is Quiet (neither the long nor the short default Target reached) or Missed (one was).
+_Avoid_: Result, win/loss
+
+**Hit Rate**:
+For buy and sell, Targets divided by Targets plus Stops over a set of scored Signals, Expired left out; for hold, Quiet divided by all scored holds. The measured counterpart to Confidence.
+_Avoid_: Win rate, accuracy
 
 **Interval**:
 The length of one bar in the price history a Signal is made from: 1m, 5m, 15m, 1h, or 1d.
@@ -29,7 +41,7 @@ _Avoid_: Timeframe, resolution, granularity
 ### Trade Plan
 
 **Trade Plan**:
-The three prices for one Direction: Entry, Stop, and Target. Part of a Signal; a hold Verdict, or a Signal below the minimum Confidence, has none. Advisory only.
+The three prices for one Direction: Entry, Stop, and Target. Part of a Signal; a hold Verdict, or a Signal below the Minimum Confidence, has none. Advisory only.
 _Avoid_: Setup, strategy, levels
 
 **Direction**:
