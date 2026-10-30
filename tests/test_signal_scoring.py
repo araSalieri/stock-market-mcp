@@ -62,6 +62,19 @@ async def test_fewer_than_20_later_bars_and_no_hit_stays_pending(server_url):
     assert await _previous_outcome(server_url, "buy", *[FLAT] * 19) == "pending"
 
 
+
+async def test_hold_reaching_neither_target_within_20_later_bars_is_quiet(server_url):
+    assert await _previous_outcome(server_url, "hold", *[FLAT] * 20, (109.0, 91.0)) == "quiet"
+
+
+@pytest.mark.parametrize("bar", [(109.0, 99.0), (101.0, 91.0)], ids=["long", "short"])
+async def test_hold_reaching_either_target_is_missed(server_url, bar):
+    assert await _previous_outcome(server_url, "hold", FLAT, bar) == "missed"
+
+
+async def test_hold_with_fewer_than_20_later_bars_and_no_target_stays_pending(server_url):
+    assert await _previous_outcome(server_url, "hold", *[FLAT] * 19) == "pending"
+
 async def test_buy_below_the_minimum_confidence_is_scored_too(server_url):
     assert await _previous_outcome(server_url, "buy", (109.0, 99.0), confidence=0.3) == "target"
 
@@ -127,5 +140,15 @@ async def test_hit_rate_counts_only_the_current_prompt_version(server_url, tmp_p
     assert await _hit_rate(server_url, tmp_path, *seeds) is None
 
 
-async def test_hold_reply_has_a_null_hit_rate(server_url, tmp_path):
-    assert await _hit_rate(server_url, tmp_path, (["target"] * 10, {}), reply="hold") is None
+async def test_hold_reply_has_the_hold_hit_rate(server_url, tmp_path):
+    seeds = [(["quiet"] * 3 + ["missed"] * 7, {"verdict": "hold"}), (["target"] * 10, {})]
+    assert await _hit_rate(server_url, tmp_path, *seeds, reply="hold") == pytest.approx(3 / 10)
+
+
+async def test_buy_reply_ignores_scored_holds(server_url, tmp_path):
+    seeds = [(["target"] * 9, {}), (["quiet"] * 10, {"verdict": "hold"})]
+    assert await _hit_rate(server_url, tmp_path, *seeds) is None
+
+
+async def test_hold_hit_rate_is_null_under_10_scored_holds(server_url, tmp_path):
+    assert await _hit_rate(server_url, tmp_path, (["quiet"] * 9, {"verdict": "hold"}), reply="hold") is None
