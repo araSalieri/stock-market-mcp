@@ -8,7 +8,7 @@ An MCP server that gives coding agents stock market data, indicators and advisor
 |------|--------------|
 | `get_quote` | Current price and currency |
 | `get_fundamentals` | Name, sector, industry, market cap |
-| `get_signal` | Buy/sell/hold Verdict with confidence, rationale and a Trade Plan (entry, stop, target). Needs an OpenRouter key. |
+| `get_signal` | Buy/sell/hold Verdict with confidence, rationale and a Trade Plan (entry, stop, target). Only a buy or sell at or above the Minimum Confidence gets a Trade Plan; the server sets that from past Signals' Hit Rates and shows it in the reply. Needs an OpenRouter key. |
 | `set_watchlist` | Save a Watchlist of up to 15 tickers. An empty list deletes it. |
 | `get_watchlists` | Every saved Watchlist |
 | `scan` | Price, previous day's range, ATR, RSI, Gap, Relative Volume and VWAP distance for a Watchlist or list of tickers |

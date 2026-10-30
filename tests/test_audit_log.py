@@ -54,7 +54,7 @@ async def test_audit_line_includes_defaulted_arguments(server_url, app_log):
 
     [line] = audit_lines(app_log)
     assert line.getMessage().startswith(
-        "tool=get_signal ticker=AAPL interval=5m period=None atr_multiple=2.0 reward_ratio=2.0 min_confidence=0.6 ms="
+        "tool=get_signal ticker=AAPL interval=5m period=None atr_multiple=2.0 reward_ratio=2.0 ms="
     )
 
 
@@ -64,7 +64,7 @@ async def test_tool_schema_keeps_argument_names_defaults_and_description(server_
         [tool] = [t for t in (await session.list_tools()).tools if t.name == "get_signal"]
 
     props = tool.input_schema["properties"]
-    assert list(props) == ["ticker", "interval", "period", "atr_multiple", "reward_ratio", "min_confidence"]
+    assert list(props) == ["ticker", "interval", "period", "atr_multiple", "reward_ratio"]
     assert tool.input_schema["required"] == ["ticker"]
     assert {k: v.get("default") for k, v in props.items()} == {
         "ticker": None,
@@ -72,7 +72,6 @@ async def test_tool_schema_keeps_argument_names_defaults_and_description(server_
         "period": None,
         "atr_multiple": 2.0,
         "reward_ratio": 2.0,
-        "min_confidence": 0.6,
     }
     assert tool.description is not None
     assert tool.description.startswith("Advisory buy/sell/hold Signal")

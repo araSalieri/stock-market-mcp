@@ -11,6 +11,10 @@ from stock_market_mcp.db import transaction
 OUTCOME_BARS = 20
 # Targets plus Stops needed before a Hit Rate is reported.
 HIT_RATE_MIN_SCORED = 10
+# Targets plus Stops a Confidence band needs before its Hit Rate can set the Minimum Confidence.
+BAND_MIN_SCORED = 30
+# Minimum Confidence until a band has BAND_MIN_SCORED.
+MIN_CONFIDENCE = 0.6
 
 # Outcome is null while pending; plan prices are the default Trade Plans, null when one has non-positive prices.
 SCHEMA = """CREATE TABLE IF NOT EXISTS signals (
@@ -78,6 +82,27 @@ class SignalLog:
         if targets + stops < HIT_RATE_MIN_SCORED:
             return None
         return targets / (targets + stops)
+
+    def min_confidence(self, prompt_version: int, break_even: float) -> float | None:
+        """Lowest 0.1 Confidence band of this prompt version whose buy/sell Hit Rate is above break_even.
+
+        Only bands with BAND_MIN_SCORED Targets plus Stops count: MIN_CONFIDENCE while none has that many,
+        None when some do but none is above break_even.
+        """
+        with transaction(self.path, SCHEMA) as conn:
+            bands = conn.execute(
+                # The epsilon keeps 0.6 in band 6 despite float error.
+                "SELECT CAST(confidence * 10 + 1e-9 AS INTEGER) AS band, "
+                "COUNT(*) FILTER (WHERE outcome = 'target'), COUNT(*) FILTER (WHERE outcome = 'stop') "
+                "FROM signals WHERE prompt_version = ? AND verdict IN ('buy', 'sell') GROUP BY band ORDER BY band",
+                (prompt_version,),
+            ).fetchall()
+        for band, targets, stops in bands:
+            if targets + stops >= BAND_MIN_SCORED and targets / (targets + stops) > break_even:
+                return band / 10
+        if any(targets + stops >= BAND_MIN_SCORED for _, targets, stops in bands):
+            return None
+        return MIN_CONFIDENCE
 
     def latest(self, ticker: str, interval: str) -> dict | None:
         """The most recent Signal for the ticker and Interval as the classifier sees it, or None."""

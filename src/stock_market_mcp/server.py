@@ -16,7 +16,7 @@ import pandas as pd
 import pandas_ta as ta
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
-from pydantic import Strict
+from pydantic import ConfigDict, Strict
 
 from stock_market_mcp.cache import (
     FUNDAMENTALS_TTL_SECONDS,
@@ -125,7 +125,8 @@ INDICATOR_ALLOWLIST = frozenset(_INDICATOR_DISPATCH)
 PLAN_ATR_MULTIPLE = 2.0
 PLAN_REWARD_RATIO = 2.0
 PLAN_ARG_MAX = 10
-MIN_CONFIDENCE = 0.6
+# Hit Rate a default Trade Plan must beat to break even: a Target gains PLAN_REWARD_RATIO times what a Stop loses.
+BREAK_EVEN_HIT_RATE = 1 / (1 + PLAN_REWARD_RATIO)
 
 # Strict: JSON numbers only; true and "2" are rejected, not coerced.
 StrictNumber = Annotated[float, Strict()]
@@ -330,6 +331,14 @@ def build_server(
 
     def audited_tool[F: Callable](fn: F) -> F:
         mcp.tool()(_audited(fn))
+        # Unknown arguments, like the removed min_confidence, fail loudly instead of being dropped.
+        # shortcut: no public MCPServer hook for this, revisit when the SDK adds one.
+        meta = mcp._tool_manager.get_tool(fn.__name__).fn_metadata  # pyright: ignore[reportPrivateUsage, reportOptionalMemberAccess]
+
+        class ArgModel(meta.arg_model):
+            model_config = ConfigDict(extra="forbid")
+
+        meta.arg_model = ArgModel
         return fn
 
     @audited_tool
@@ -355,14 +364,11 @@ def build_server(
         period: str | None = None,
         atr_multiple: StrictNumber = PLAN_ATR_MULTIPLE,
         reward_ratio: StrictNumber = PLAN_REWARD_RATIO,
-        min_confidence: StrictNumber = MIN_CONFIDENCE,
     ) -> dict:
-        """Advisory buy/sell/hold Signal from price history and indicators on bars of one Interval, with the Price (last close), for buy or sell the Hit Rate of past buy/sell Signals for this ticker and Interval (null until enough are scored), and for buy or sell a Trade Plan (Entry, Stop, Target); buy or sell below min_confidence gets no Trade Plan (null); input only, never acts on it."""
+        """Advisory buy/sell/hold Signal from price history and indicators on bars of one Interval, with the Price (last close), for buy or sell the Hit Rate of past buy/sell Signals for this ticker and Interval (null until enough are scored), the Minimum Confidence applied as min_confidence (set by the server from Hit Rates per 0.1 Confidence band, a fixed default until enough are scored), and for buy or sell at or above min_confidence a Trade Plan (Entry, Stop, Target), else null; min_confidence null means no band beats break-even, so no buy or sell gets a Trade Plan; input only, never acts on it."""
         for name, value in (("atr_multiple", atr_multiple), ("reward_ratio", reward_ratio)):
             if not 0 < value <= PLAN_ARG_MAX:
                 raise ToolError(f"{name} must be in (0, {PLAN_ARG_MAX}], got {value}")
-        if not 0 <= min_confidence <= 1:
-            raise ToolError(f"min_confidence must be in [0, 1], got {min_confidence}")
         period = _period(interval, period)
         try:
             df = fetcher.fetch_history(ticker, period, interval)
@@ -409,8 +415,13 @@ def build_server(
                 )
             except Exception as exc:
                 raise ToolError(str(exc)) from exc
-        # After the cache, so each call's own min_confidence applies to a cached Signal.
-        direction = _VERDICT_DIRECTION.get(signal["verdict"]) if signal["confidence"] >= min_confidence else None
+        # After the cache, so a cached Signal gets the current Minimum Confidence.
+        try:
+            min_confidence = signals.min_confidence(PROMPT_VERSION, BREAK_EVEN_HIT_RATE)
+        except Exception as exc:
+            raise ToolError(str(exc)) from exc
+        confident = min_confidence is not None and signal["confidence"] >= min_confidence
+        direction = _VERDICT_DIRECTION.get(signal["verdict"]) if confident else None
         plan = _trade_plan(df, price, direction, atr_multiple, reward_ratio) if direction else None
         hit_rate = None
         if signal["verdict"] in _VERDICT_DIRECTION:
@@ -418,7 +429,7 @@ def build_server(
                 hit_rate = signals.hit_rate(ticker, interval, PROMPT_VERSION)
             except Exception as exc:
                 raise ToolError(str(exc)) from exc
-        return {**signal, "price": price, "hit_rate": hit_rate, "trade_plan": plan}
+        return {**signal, "price": price, "hit_rate": hit_rate, "min_confidence": min_confidence, "trade_plan": plan}
 
     @audited_tool
     def scan(watchlist: str | None = None, tickers: list[str] | None = None) -> list[dict]:
