@@ -367,7 +367,7 @@ def build_server(
         atr_multiple: StrictNumber = PLAN_ATR_MULTIPLE,
         reward_ratio: StrictNumber = PLAN_REWARD_RATIO,
     ) -> dict:
-        """Advisory buy/sell/hold Signal from price history and indicators on bars of one Interval, with the Price (last close), the Hit Rate of past Signals of its kind (buy/sell or hold) for this ticker and Interval (null until enough are scored), the Minimum Confidence applied as min_confidence (set by the server from buy/sell Hit Rates per 0.1 Confidence band, a fixed default until enough are scored), and for buy or sell at or above min_confidence a Trade Plan (Entry, Stop, Target), else null; min_confidence null means no band beats break-even, so no buy or sell gets a Trade Plan; input only, never acts on it."""
+        """Advisory buy/sell/hold Signal from price history and indicators on bars of one Interval, with the Price (last close), the Hit Rate of past Signals of its kind (buy/sell or hold) for this ticker and Interval (null until enough are scored), the Minimum Confidence applied as min_confidence (set by the server from buy/sell Hit Rates per 0.1 Confidence band, a fixed default until enough are scored), and for buy or sell at or above min_confidence a Trade Plan (Entry, Stop, Target), else null; min_confidence null means no band beats break-even, so no buy or sell gets a Trade Plan; for a held ticker a position key with the Position and its Unrealised P&L (amount and percent of cost) at the Price, absent when not held; input only, never acts on it."""
         for name, value in (("atr_multiple", atr_multiple), ("reward_ratio", reward_ratio)):
             if not 0 < value <= PLAN_ARG_MAX:
                 raise ToolError(f"{name} must be in (0, {PLAN_ARG_MAX}], got {value}")
@@ -389,6 +389,8 @@ def build_server(
         # The prompt without the previous Signal is the cache key, so storing a Signal doesn't defeat the cache.
         prompt = build_signal_prompt(ticker, period, df, interval=interval)
         try:
+            # Read before the classifier, so a broken Portfolio file fails before a classifier call; the prompt never sees it (ADR-0004).
+            position = portfolio.load().get(ticker)
             signals.score(ticker, interval, df, now().isoformat())
             signal = signal_cache.get(prompt, signal_ttl)
             fresh = signal is None
@@ -424,7 +426,10 @@ def build_server(
             raise
         except Exception as exc:
             raise ToolError(str(exc)) from exc
-        return {**signal, "price": price, "hit_rate": hit_rate, "min_confidence": min_confidence, "trade_plan": plan}
+        reply = {**signal, "price": price, "hit_rate": hit_rate, "min_confidence": min_confidence, "trade_plan": plan}
+        if position is not None:
+            reply["position"] = {**position, **_unrealised_pnl(position, price)}
+        return reply
 
     @audited_tool
     def scan(watchlist: str | None = None, tickers: list[str] | None = None) -> list[dict]:
