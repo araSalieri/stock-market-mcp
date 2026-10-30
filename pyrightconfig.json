@@ -2,5 +2,6 @@
   "include": ["src", "tests"],
   "venvPath": ".",
   "venv": ".venv",
-  "reportPrivateImportUsage": false
+  "reportPrivateImportUsage": false,
+  "reportPrivateUsage": "error"
 }
