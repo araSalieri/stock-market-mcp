@@ -6,7 +6,6 @@ from typing import Any
 
 import pandas as pd
 
-from stock_market_mcp.classifier import SignalClassifier
 from stock_market_mcp.data import DataFetcher
 
 # Production TTLs: quotes and history (intraday bars) move fast, fundamentals are stable.
@@ -16,9 +15,8 @@ FUNDAMENTALS_TTL_SECONDS = 300.0
 SIGNAL_TTL_SECONDS = 300.0
 
 
-class _TTLCache:
-    """Shared private per-key TTL cache (monotonic clock, lock) used by both
-    caching decorators. Expiry is checked per key at read time."""
+class TTLCache:
+    """Per-key TTL cache (monotonic clock, lock). Expiry is checked per key at read time."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -55,9 +53,9 @@ class CachingFetcher:
         self._quote_ttl = quote_ttl
         self._history_ttl = history_ttl
         self._fundamentals_ttl = fundamentals_ttl
-        self._quotes = _TTLCache()
-        self._histories = _TTLCache()
-        self._fundamentals = _TTLCache()
+        self._quotes = TTLCache()
+        self._histories = TTLCache()
+        self._fundamentals = TTLCache()
 
     def fetch_quote(self, ticker: str) -> dict:
         cached = self._quotes.get(ticker, self._quote_ttl)
@@ -86,29 +84,3 @@ class CachingFetcher:
         self._histories.put(key, result)
         return result
 
-
-class CachingClassifier:
-    """SignalClassifier decorator that serves repeated classify calls from a TTL cache.
-
-    Verdicts are cached per key (the prompt without the previous Signal, which
-    pins ticker, period and data rows) for SIGNAL_TTL_SECONDS. Failures are never cached: the delegate
-    raises, the cache stays empty.
-    """
-
-    def __init__(
-        self,
-        classifier: SignalClassifier,
-        signal_ttl: float = SIGNAL_TTL_SECONDS,
-    ) -> None:
-        self._classifier = classifier
-        self._signal_ttl = signal_ttl
-        self._signals = _TTLCache()
-
-    def classify(self, prompt: str, key: str) -> tuple[dict, bool]:
-        """The Signal for prompt, cached under key, and whether it is a fresh classifier answer."""
-        cached = self._signals.get(key, self._signal_ttl)
-        if cached is not None:
-            return cached, False
-        result = self._classifier.classify(prompt)
-        self._signals.put(key, result)
-        return result, True

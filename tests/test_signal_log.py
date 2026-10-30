@@ -113,3 +113,32 @@ async def test_unusable_database_fails_get_signal_loudly(server_url, tmp_path):
     assert result.is_error
     assert str(tmp_path) in text_of(result)
     assert classifier.prompts == []
+
+
+async def test_invalid_caller_plan_fails_before_the_signal_is_stored(server_url):
+    # Close 10, ATR 2: a 5 ATR Stop is 0, but the default 2 ATR plan is valid.
+    classifier = FakeClassifier(_signal("buy"))
+    url = server_url(FlatFakeFetcher(close=10.0), classifier=classifier)
+
+    failed = await call_tool(url, "get_signal", {"ticker": "AAPL", "interval": "1d", "atr_multiple": 5})
+    retry = await call_tool(url, "get_signal", {"ticker": "AAPL", "interval": "1d"})
+
+    assert failed.is_error
+    assert not retry.is_error
+    assert "previous_signal" not in json.loads(classifier.prompts[1])  # not stored, and not cached either
+
+
+async def test_failed_store_is_not_cached_so_a_retry_stores_the_signal(server_url, tmp_path):
+    db = tmp_path / "s.db"
+    classifier = FakeClassifier(_signal("buy"))
+    url = server_url(FlatFakeFetcher(), classifier=classifier, db_path=db)
+    await call_tool(url, "get_signal", {"ticker": "MSFT"})  # creates the file
+    db.chmod(0o444)  # reads still work, the insert fails
+
+    failed = await call_tool(url, "get_signal", {"ticker": "AAPL"})
+    db.chmod(0o644)
+    retry = await call_tool(url, "get_signal", {"ticker": "AAPL"})
+
+    assert failed.is_error
+    assert not retry.is_error
+    assert len(classifier.prompts) == 3  # the retry asked the classifier again instead of a cache hit

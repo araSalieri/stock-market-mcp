@@ -23,8 +23,8 @@ from stock_market_mcp.cache import (
     HISTORY_TTL_SECONDS,
     QUOTE_TTL_SECONDS,
     SIGNAL_TTL_SECONDS,
-    CachingClassifier,
     CachingFetcher,
+    TTLCache,
 )
 from stock_market_mcp.classifier import (
     PROMPT_VERSION,
@@ -34,7 +34,7 @@ from stock_market_mcp.classifier import (
 )
 from stock_market_mcp.data import DataFetcher
 from stock_market_mcp.db import DEFAULT_DB_PATH
-from stock_market_mcp.prompt import build_signal_prompt
+from stock_market_mcp.prompt import build_signal_prompt, with_previous_signal
 from stock_market_mcp.signals import SignalLog
 from stock_market_mcp.watchlists import (
     WATCHLIST_MAX_TICKERS,
@@ -320,10 +320,8 @@ def build_server(
         history_ttl=history_ttl,
         fundamentals_ttl=fundamentals_ttl,
     )
-    signal_classifier = CachingClassifier(
-        EnforcingClassifier(classifier if classifier is not None else OpenRouterClassifier()),
-        signal_ttl=signal_ttl,
-    )
+    signal_classifier = EnforcingClassifier(classifier if classifier is not None else OpenRouterClassifier())
+    signal_cache = TTLCache()
     db_path = db_path or os.environ.get("SMM_DB_PATH", DEFAULT_DB_PATH)
     watchlists = WatchlistStore(db_path)
     signals = SignalLog(db_path)
@@ -376,22 +374,25 @@ def build_server(
         if not math.isfinite(price):
             raise ToolError(f"latest row has a non-finite close (close={price})")
         ticker = ticker.upper()
+        # The prompt without the previous Signal is the cache key, so storing a Signal doesn't defeat the cache.
+        prompt = build_signal_prompt(ticker, period, df, interval=interval)
         try:
             signals.score(ticker, interval, df, now().isoformat())
-            previous = signals.latest(ticker, interval)
-        except Exception as exc:
-            raise ToolError(str(exc)) from exc
-        # Cached by the prompt without the previous Signal, so storing a Signal doesn't defeat the cache.
-        key = build_signal_prompt(ticker, period, df, interval=interval)
-        prompt = build_signal_prompt(ticker, period, df, interval=interval, previous_signal=previous)
-        try:
-            signal, fresh = signal_classifier.classify(prompt, key)
-        except Exception as exc:
-            raise ToolError(str(exc)) from exc
-        if fresh:
-            long_stop, long_target = _default_plan(df, price, "long")
-            short_stop, short_target = _default_plan(df, price, "short")
-            try:
+            signal = signal_cache.get(prompt, signal_ttl)
+            fresh = signal is None
+            if fresh:
+                previous = signals.latest(ticker, interval)
+                signal = signal_classifier.classify(prompt if previous is None else with_previous_signal(prompt, previous))
+            # After the cache, so a cached Signal gets the current Minimum Confidence; a new pending Signal changes neither read.
+            min_confidence = signals.min_confidence(PROMPT_VERSION, BREAK_EVEN_HIT_RATE)
+            hit_rate = signals.hit_rate(ticker, interval, PROMPT_VERSION, signal["verdict"])
+            confident = min_confidence is not None and signal["confidence"] >= min_confidence
+            direction = _VERDICT_DIRECTION.get(signal["verdict"]) if confident else None
+            # Before the Signal is stored, so a plan error doesn't fail a call that already logged.
+            plan = _trade_plan(df, price, direction, atr_multiple, reward_ratio) if direction else None
+            if fresh:
+                long_stop, long_target = _default_plan(df, price, "long")
+                short_stop, short_target = _default_plan(df, price, "short")
                 signals.add(
                     ticker=ticker,
                     interval=interval,
@@ -405,18 +406,10 @@ def build_server(
                     short_stop=short_stop,
                     short_target=short_target,
                 )
-            except Exception as exc:
-                raise ToolError(str(exc)) from exc
-        # After the cache, so a cached Signal gets the current Minimum Confidence.
-        try:
-            min_confidence = signals.min_confidence(PROMPT_VERSION, BREAK_EVEN_HIT_RATE)
-        except Exception as exc:
-            raise ToolError(str(exc)) from exc
-        confident = min_confidence is not None and signal["confidence"] >= min_confidence
-        direction = _VERDICT_DIRECTION.get(signal["verdict"]) if confident else None
-        plan = _trade_plan(df, price, direction, atr_multiple, reward_ratio) if direction else None
-        try:
-            hit_rate = signals.hit_rate(ticker, interval, PROMPT_VERSION, signal["verdict"])
+                # Cached only once stored, so a failed store is retried instead of served from the cache.
+                signal_cache.put(prompt, signal)
+        except ToolError:
+            raise
         except Exception as exc:
             raise ToolError(str(exc)) from exc
         return {**signal, "price": price, "hit_rate": hit_rate, "min_confidence": min_confidence, "trade_plan": plan}

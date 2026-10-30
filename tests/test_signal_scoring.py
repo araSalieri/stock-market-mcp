@@ -94,7 +94,8 @@ async def test_signal_whose_bar_is_outside_the_fetched_history_stays_pending(ser
 
 async def test_signal_without_a_default_plan_stays_pending(server_url):
     # Close 1 with ATR 2 puts the long default Stop below zero, so it is stored null.
-    classifier = FakeClassifier(replies=[_signal("buy"), _signal("hold")])
+    # Below the Minimum Confidence, so the call gets no Trade Plan and doesn't fail on it.
+    classifier = FakeClassifier(replies=[_signal("buy", 0.3), _signal("hold")])
     fetcher = SequenceFakeFetcher([flat_history(close=1.0), flat_history(close=1.0, rows=90)])
     url = server_url(fetcher, classifier=classifier, signal_ttl=0, history_ttl=0)
 
