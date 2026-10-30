@@ -1,12 +1,10 @@
 """Tests for the automatic Minimum Confidence (#55): set from Hit Rates per Confidence band."""
 
 import json
-import sqlite3
-from contextlib import closing
 
 import pytest
 
-from fakes import FakeClassifier, FlatFakeFetcher, call_tool, text_of
+from fakes import FakeClassifier, FlatFakeFetcher, call_tool, seed_signals, text_of
 
 
 def _signal(verdict="buy", confidence=0.7):
@@ -24,22 +22,14 @@ async def test_no_scored_signals_applies_0_6(server_url):
     assert payload["trade_plan"]["direction"] == "long"
 
 
-def _seed(db, confidence, targets, stops, expired=0, prompt_version=1, ticker="AAPL", interval="1d"):
-    # 30+ scored Signals per band would take dozens of MCP calls, so these rows go in directly.
-    outcomes = ["target"] * targets + ["stop"] * stops + ["expired"] * expired
-    with closing(sqlite3.connect(db)) as conn, conn:
-        conn.executemany(
-            "INSERT INTO signals (ticker, interval, prompt_version, data_date, verdict, confidence, price, outcome) "
-            "VALUES (?, ?, ?, '2023-01-01T00:00:00', 'buy', ?, 100.0, ?)",
-            [(ticker, interval, prompt_version, confidence, o) for o in outcomes],
-        )
+def _seed(db, targets, stops, expired=0, **kwargs):
+    seed_signals(db, ["target"] * targets + ["stop"] * stops + ["expired"] * expired, **kwargs)
 
 
 async def _reply(server_url, tmp_path, *seeds, signal=None):
-    """get_signal reply after seeding _seed kwargs; a first call creates the table."""
+    """get_signal reply after seeding _seed kwargs."""
     db = tmp_path / "s.db"
-    url = server_url(FlatFakeFetcher(), classifier=FakeClassifier(signal or _signal()), db_path=db, signal_ttl=0)
-    await call_tool(url, "get_signal", {"ticker": "AAPL"})
+    url = server_url(FlatFakeFetcher(), classifier=FakeClassifier(signal or _signal()), db_path=db)
     for seed in seeds:
         _seed(db, **seed)
     result = await call_tool(url, "get_signal", {"ticker": "AAPL"})

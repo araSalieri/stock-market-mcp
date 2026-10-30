@@ -1,11 +1,9 @@
 """Tests for scoring buy/sell Signals (#53): get_signal scores pending Signals on the history it fetched."""
 
 import json
-import sqlite3
-from contextlib import closing
 
 import pytest
-from fakes import FakeClassifier, FlatFakeFetcher, SequenceFakeFetcher, call_tool, flat_history, text_of
+from fakes import FakeClassifier, FlatFakeFetcher, SequenceFakeFetcher, call_tool, flat_history, seed_signals, text_of
 
 
 def _signal(verdict, confidence=0.7):
@@ -106,23 +104,12 @@ async def test_signal_without_a_default_plan_stays_pending(server_url):
     assert json.loads(classifier.prompts[1])["previous_signal"]["outcome"] == "pending"
 
 
-def _seed(db, *outcomes, prompt_version=1, verdict="buy"):
-    # Seeding 10+ scored Signals over MCP would take dozens of calls, so these rows go in directly.
-    with closing(sqlite3.connect(db)) as conn, conn:
-        conn.executemany(
-            "INSERT INTO signals (ticker, interval, prompt_version, data_date, verdict, confidence, price, outcome) "
-            "VALUES ('AAPL', '1d', ?, '2023-01-01T00:00:00', ?, 0.7, 100.0, ?)",
-            [(prompt_version, verdict, o) for o in outcomes],
-        )
-
-
 async def _hit_rate(server_url, tmp_path, *seeds, reply="buy"):
-    """hit_rate in a second reply after seeding (outcomes, _seed kwargs) pairs."""
+    """hit_rate in the reply after seeding (outcomes, seed_signals kwargs) pairs."""
     db = tmp_path / "s.db"
-    url = server_url(FlatFakeFetcher(), classifier=FakeClassifier(_signal(reply)), db_path=db, signal_ttl=0)
-    await call_tool(url, "get_signal", {"ticker": "AAPL", "interval": "1d"})  # creates the table
+    url = server_url(FlatFakeFetcher(), classifier=FakeClassifier(_signal(reply)), db_path=db)
     for outcomes, kwargs in seeds:
-        _seed(db, *outcomes, **kwargs)
+        seed_signals(db, outcomes, **kwargs)
     result = await call_tool(url, "get_signal", {"ticker": "AAPL", "interval": "1d"})
     return json.loads(text_of(result))["hit_rate"]
 
