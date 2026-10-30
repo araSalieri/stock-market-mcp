@@ -9,7 +9,7 @@ services:
       # is LAN-visible on the host (accepted risk: no auth, so anyone on the
       # LAN can read and replace your Watchlists; see ADR-0002).
       SMM_HOST: 0.0.0.0
-      # Server state (Watchlists) lives on the named volume, so it survives restarts and image updates.
+      # Server state (Watchlists and the Signal log) lives on the named volume, so it survives restarts and image updates.
       SMM_DB_PATH: /home/appuser/data/stock-market-mcp.db
       # Passthrough only: values resolve from the host environment (or .env,
       # which compose reads automatically). Empty defaults keep the classifier's
