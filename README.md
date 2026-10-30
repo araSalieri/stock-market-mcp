@@ -1,6 +1,6 @@
 # stock-market-mcp
 
-An MCP server that gives coding agents stock market data, indicators and advisory trading guidance from Yahoo Finance. It never places orders. It writes only its own state: your Watchlists and a log of past Signals.
+An MCP server that gives coding agents stock market data, indicators and advisory trading guidance from Yahoo Finance. It never places orders. It writes only its own state: your Watchlists, your Portfolio and a log of past Signals.
 
 ## Tools
 
@@ -12,6 +12,8 @@ An MCP server that gives coding agents stock market data, indicators and advisor
 | `set_watchlist` | Save a Watchlist of up to 15 tickers. An empty list deletes it. |
 | `get_watchlists` | Every saved Watchlist |
 | `scan` | Price, previous day's range, ATR, RSI, Gap, Relative Volume and VWAP distance for a Watchlist or list of tickers |
+| `set_position` | Save the Position for a ticker: long or short, quantity and average cost. Replaces any held one; quantity 0 deletes it. At most 15 Positions. |
+| `get_portfolio` | Every Position with its latest price and Unrealised P&L in the ticker's own currency, with no total |
 
 Each tool's arguments and output are described in its MCP schema. Domain terms are defined in [GLOSSARY.md](GLOSSARY.md).
 
@@ -38,7 +40,7 @@ The server listens at `http://127.0.0.1:8000/mcp` (streamable HTTP). Connect Cla
 claude mcp add --transport http stock-market http://127.0.0.1:8000/mcp
 ```
 
-The compose setup listens on all interfaces and has no auth, so anyone on your LAN can read and replace your Watchlists. Watchlists are kept in a SQLite file on a named volume and survive restarts. Older `watchlists.json` files are not imported: re-create those lists with `set_watchlist`.
+The compose setup listens on all interfaces and has no auth, so anyone on your LAN can read and replace your Watchlists and Portfolio. Both are kept in a SQLite file on a named volume and survive restarts. Older `watchlists.json` files are not imported: re-create those lists with `set_watchlist`.
 
 ## Configuration
 

@@ -620,10 +620,12 @@ async def test_server_lists_its_tools_and_get_signal_says_advisory_and_price(ser
 
     assert sorted(tools) == [
         "get_fundamentals",
+        "get_portfolio",
         "get_quote",
         "get_signal",
         "get_watchlists",
         "scan",
+        "set_position",
         "set_watchlist",
     ]
     description = (tools["get_signal"].description or "").lower()

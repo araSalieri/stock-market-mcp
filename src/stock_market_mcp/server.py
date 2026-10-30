@@ -34,6 +34,7 @@ from stock_market_mcp.classifier import (
 )
 from stock_market_mcp.data import DataFetcher
 from stock_market_mcp.db import DEFAULT_DB_PATH
+from stock_market_mcp.portfolio import PortfolioStore
 from stock_market_mcp.prompt import build_signal_prompt, with_previous_signal
 from stock_market_mcp.signals import SignalLog
 from stock_market_mcp.watchlists import (
@@ -231,6 +232,16 @@ def _finite(value: float) -> float | None:
     return value if math.isfinite(value) else None
 
 
+def _unrealised_pnl(position: dict, price: float) -> dict:
+    """Unrealised P&L of a Position at price, as an amount and a percent of cost; null when non-finite."""
+    sign = 1 if position["direction"] == "long" else -1
+    pnl = sign * (price - position["avg_cost"]) * position["quantity"]
+    return {
+        "unrealised_pnl": _finite(pnl),
+        "unrealised_pnl_pct": _finite(pnl / (position["avg_cost"] * position["quantity"]) * 100),
+    }
+
+
 def _scan_daily(df: pd.DataFrame, now: datetime) -> dict:
     """Daily Scan numbers; the previous day is the last bar dated before today in the exchange timezone."""
     index = cast("pd.DatetimeIndex", df.index)
@@ -325,6 +336,7 @@ def build_server(
     db_path = db_path or os.environ.get("SMM_DB_PATH", DEFAULT_DB_PATH)
     watchlists = WatchlistStore(db_path)
     signals = SignalLog(db_path)
+    portfolio = PortfolioStore(db_path)
     mcp = MCPServer("stock-market-mcp")
 
     def audited_tool[F: Callable](fn: F) -> F:
@@ -473,5 +485,53 @@ def build_server(
             return watchlists.load()
         except Exception as exc:
             raise ToolError(str(exc)) from exc
+
+    @audited_tool
+    def set_position(ticker: str, direction: Direction, quantity: StrictNumber, avg_cost: StrictNumber) -> dict:
+        """Save the Position for a ticker (checked with a quote), replacing any held one; quantity 0 deletes it. Direction long or short, quantity at least 0, avg_cost above 0; as many Positions as a Watchlist has tickers. Records only, never places orders."""
+        ticker = ticker.upper()
+        if not (math.isfinite(quantity) and quantity >= 0):
+            raise ToolError(f"quantity must be a finite number of at least 0, got {quantity}")
+        saved = {"ticker": ticker, "direction": direction, "quantity": quantity, "avg_cost": avg_cost}
+        try:
+            if quantity == 0:
+                portfolio.delete(ticker)
+                return saved
+            if not (math.isfinite(avg_cost) and avg_cost > 0):
+                raise ToolError(f"avg_cost must be a finite number above 0, got {avg_cost}")
+            held = portfolio.load()
+            if ticker not in held and len(held) >= WATCHLIST_MAX_TICKERS:
+                raise ToolError(f"at most {WATCHLIST_MAX_TICKERS} Positions; delete one before adding {ticker}")
+            try:
+                fetcher.fetch_quote(ticker)
+            except Exception:
+                # Bad input, not a dependency failure: no cause, so the audit logs a warning like set_watchlist.
+                raise ToolError(f"unknown ticker, nothing saved: {ticker}") from None
+            portfolio.set(ticker, direction, quantity, avg_cost)
+        except ToolError:
+            raise
+        except Exception as exc:
+            raise ToolError(str(exc)) from exc
+        return saved
+
+    @audited_tool
+    def get_portfolio() -> list[dict]:
+        """Every Position with its latest price and Unrealised P&L (amount and percent of cost) in the ticker's own currency; no total across currencies. A Position whose quote fails gets its own error entry."""
+        try:
+            held = portfolio.load()
+        except Exception as exc:
+            raise ToolError(str(exc)) from exc
+        results = []
+        for ticker, position in held.items():
+            entry = {"ticker": ticker, **position}
+            try:
+                quote = fetcher.fetch_quote(ticker)
+                price = float(quote["price"])
+                entry |= {"price": _finite(price), "currency": quote["currency"], **_unrealised_pnl(position, price)}
+            except Exception as exc:
+                log.exception(_error_line(f"get_portfolio ticker={ticker}", exc))
+                entry["error"] = str(exc)
+            results.append(entry)
+        return results
 
     return mcp
