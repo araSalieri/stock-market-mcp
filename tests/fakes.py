@@ -127,6 +127,18 @@ class FlatFakeFetcher(SignalFakeFetcher):
         return df
 
 
+class SequenceFakeFetcher(SignalFakeFetcher):
+    """History frames handed out one per fetch_history call; the last one repeats."""
+
+    def __init__(self, frames: list[pd.DataFrame]):
+        super().__init__()
+        self.frames = frames
+
+    def fetch_history(self, ticker, period, interval="1d", prepost=False):
+        self.history_calls.append((ticker, period, interval, prepost))
+        return self.frames[min(len(self.history_calls), len(self.frames)) - 1]
+
+
 class FakeClassifier:
     """Fake transport below the classifier boundary; no network, records prompts.
 

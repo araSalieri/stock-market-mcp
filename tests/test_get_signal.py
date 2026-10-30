@@ -49,6 +49,7 @@ async def test_get_signal_returns_strict_json_signal(server_url):
     plan = payload.pop("trade_plan")
     assert plan["direction"] == "long"
     assert payload.pop("price") == plan["entry"]
+    assert payload.pop("hit_rate") is None
     assert payload == {
         "verdict": "buy",
         "confidence": 0.7,
@@ -121,6 +122,7 @@ async def test_single_formatting_slip_recovers_after_one_retry(server_url):
     plan = payload.pop("trade_plan")
     assert plan["direction"] == "short"
     assert payload.pop("price") == plan["entry"]
+    assert payload.pop("hit_rate") is None
     assert payload == good
     assert len(classifier.prompts) == 2  # the retry happened, not a third call
 
@@ -417,6 +419,7 @@ async def test_buy_carries_a_long_trade_plan(server_url):
     assert json.loads(text_of(result)) == {
         **_signal("buy"),
         "price": 100.0,
+        "hit_rate": None,
         "trade_plan": {
             "direction": "long",
             "entry": 100.0,
@@ -455,7 +458,7 @@ async def test_hold_has_no_trade_plan_but_carries_the_price(server_url):
     )
 
     assert not result.is_error, text_of(result)
-    assert json.loads(text_of(result)) == {**_signal("hold"), "price": 123.5, "trade_plan": None}
+    assert json.loads(text_of(result)) == {**_signal("hold"), "price": 123.5, "hit_rate": None, "trade_plan": None}
 
 
 @pytest.mark.parametrize("verdict", ["buy", "sell"])
@@ -468,7 +471,7 @@ async def test_buy_or_sell_below_default_min_confidence_has_no_trade_plan(server
 
     assert not result.is_error, text_of(result)
     assert json.loads(text_of(result)) == {
-        **_signal(verdict, 0.59), "price": 100.0, "trade_plan": None,
+        **_signal(verdict, 0.59), "price": 100.0, "hit_rate": None, "trade_plan": None,
     }
 
 

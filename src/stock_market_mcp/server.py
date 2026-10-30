@@ -357,7 +357,7 @@ def build_server(
         reward_ratio: StrictNumber = PLAN_REWARD_RATIO,
         min_confidence: StrictNumber = MIN_CONFIDENCE,
     ) -> dict:
-        """Advisory buy/sell/hold Signal from price history and indicators on bars of one Interval, with the Price (last close) and, for buy or sell, a Trade Plan (Entry, Stop, Target); buy or sell below min_confidence gets no Trade Plan (null); input only, never acts on it."""
+        """Advisory buy/sell/hold Signal from price history and indicators on bars of one Interval, with the Price (last close), for buy or sell the Hit Rate of past buy/sell Signals for this ticker and Interval (null until enough are scored), and for buy or sell a Trade Plan (Entry, Stop, Target); buy or sell below min_confidence gets no Trade Plan (null); input only, never acts on it."""
         for name, value in (("atr_multiple", atr_multiple), ("reward_ratio", reward_ratio)):
             if not 0 < value <= PLAN_ARG_MAX:
                 raise ToolError(f"{name} must be in (0, {PLAN_ARG_MAX}], got {value}")
@@ -379,6 +379,7 @@ def build_server(
             raise ToolError(f"latest row has a non-finite close (close={price})")
         ticker = ticker.upper()
         try:
+            signals.score(ticker, interval, df, now().isoformat())
             previous = signals.latest(ticker, interval)
         except Exception as exc:
             raise ToolError(str(exc)) from exc
@@ -411,7 +412,13 @@ def build_server(
         # After the cache, so each call's own min_confidence applies to a cached Signal.
         direction = _VERDICT_DIRECTION.get(signal["verdict"]) if signal["confidence"] >= min_confidence else None
         plan = _trade_plan(df, price, direction, atr_multiple, reward_ratio) if direction else None
-        return {**signal, "price": price, "trade_plan": plan}
+        hit_rate = None
+        if signal["verdict"] in _VERDICT_DIRECTION:
+            try:
+                hit_rate = signals.hit_rate(ticker, interval, PROMPT_VERSION)
+            except Exception as exc:
+                raise ToolError(str(exc)) from exc
+        return {**signal, "price": price, "hit_rate": hit_rate, "trade_plan": plan}
 
     @audited_tool
     def scan(watchlist: str | None = None, tickers: list[str] | None = None) -> list[dict]:
