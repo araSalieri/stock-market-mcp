@@ -365,7 +365,7 @@ def build_server(
         atr_multiple: StrictNumber = PLAN_ATR_MULTIPLE,
         reward_ratio: StrictNumber = PLAN_REWARD_RATIO,
     ) -> dict:
-        """Advisory buy/sell/hold Signal from price history and indicators on bars of one Interval, with the Price (last close), for buy or sell the Hit Rate of past buy/sell Signals for this ticker and Interval (null until enough are scored), the Minimum Confidence applied as min_confidence (set by the server from Hit Rates per 0.1 Confidence band, a fixed default until enough are scored), and for buy or sell at or above min_confidence a Trade Plan (Entry, Stop, Target), else null; min_confidence null means no band beats break-even, so no buy or sell gets a Trade Plan; input only, never acts on it."""
+        """Advisory buy/sell/hold Signal from price history and indicators on bars of one Interval, with the Price (last close), the Hit Rate of past Signals of its kind (buy/sell or hold) for this ticker and Interval (null until enough are scored), the Minimum Confidence applied as min_confidence (set by the server from buy/sell Hit Rates per 0.1 Confidence band, a fixed default until enough are scored), and for buy or sell at or above min_confidence a Trade Plan (Entry, Stop, Target), else null; min_confidence null means no band beats break-even, so no buy or sell gets a Trade Plan; input only, never acts on it."""
         for name, value in (("atr_multiple", atr_multiple), ("reward_ratio", reward_ratio)):
             if not 0 < value <= PLAN_ARG_MAX:
                 raise ToolError(f"{name} must be in (0, {PLAN_ARG_MAX}], got {value}")
@@ -423,12 +423,10 @@ def build_server(
         confident = min_confidence is not None and signal["confidence"] >= min_confidence
         direction = _VERDICT_DIRECTION.get(signal["verdict"]) if confident else None
         plan = _trade_plan(df, price, direction, atr_multiple, reward_ratio) if direction else None
-        hit_rate = None
-        if signal["verdict"] in _VERDICT_DIRECTION:
-            try:
-                hit_rate = signals.hit_rate(ticker, interval, PROMPT_VERSION)
-            except Exception as exc:
-                raise ToolError(str(exc)) from exc
+        try:
+            hit_rate = signals.hit_rate(ticker, interval, PROMPT_VERSION, signal["verdict"])
+        except Exception as exc:
+            raise ToolError(str(exc)) from exc
         return {**signal, "price": price, "hit_rate": hit_rate, "min_confidence": min_confidence, "trade_plan": plan}
 
     @audited_tool
