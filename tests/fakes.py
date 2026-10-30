@@ -83,7 +83,7 @@ class SignalFakeFetcher:
     def __init__(self):
         self.history_calls = []
 
-    def fetch_quote(self, ticker):
+    def fetch_quote(self, ticker) -> dict:
         raise AssertionError("get_signal tests never fetch quotes")
 
     def fetch_fundamentals(self, ticker):

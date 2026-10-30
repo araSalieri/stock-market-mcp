@@ -34,6 +34,7 @@ from stock_market_mcp.classifier import (
 )
 from stock_market_mcp.data import DataFetcher
 from stock_market_mcp.db import DEFAULT_DB_PATH
+from stock_market_mcp.portfolio import PortfolioStore
 from stock_market_mcp.prompt import build_signal_prompt, with_previous_signal
 from stock_market_mcp.signals import SignalLog
 from stock_market_mcp.watchlists import (
@@ -231,6 +232,16 @@ def _finite(value: float) -> float | None:
     return value if math.isfinite(value) else None
 
 
+def _unrealised_pnl(position: dict, price: float) -> dict:
+    """Unrealised P&L of a Position at price, as an amount and a percent of cost; null when non-finite."""
+    sign = 1 if position["direction"] == "long" else -1
+    pnl = sign * (price - position["avg_cost"]) * position["quantity"]
+    return {
+        "unrealised_pnl": _finite(pnl),
+        "unrealised_pnl_pct": _finite(pnl / (position["avg_cost"] * position["quantity"]) * 100),
+    }
+
+
 def _scan_daily(df: pd.DataFrame, now: datetime) -> dict:
     """Daily Scan numbers; the previous day is the last bar dated before today in the exchange timezone."""
     index = cast("pd.DatetimeIndex", df.index)
@@ -325,6 +336,7 @@ def build_server(
     db_path = db_path or os.environ.get("SMM_DB_PATH", DEFAULT_DB_PATH)
     watchlists = WatchlistStore(db_path)
     signals = SignalLog(db_path)
+    portfolio = PortfolioStore(db_path)
     mcp = MCPServer("stock-market-mcp")
 
     def audited_tool[F: Callable](fn: F) -> F:
@@ -355,7 +367,7 @@ def build_server(
         atr_multiple: StrictNumber = PLAN_ATR_MULTIPLE,
         reward_ratio: StrictNumber = PLAN_REWARD_RATIO,
     ) -> dict:
-        """Advisory buy/sell/hold Signal from price history and indicators on bars of one Interval, with the Price (last close), the Hit Rate of past Signals of its kind (buy/sell or hold) for this ticker and Interval (null until enough are scored), the Minimum Confidence applied as min_confidence (set by the server from buy/sell Hit Rates per 0.1 Confidence band, a fixed default until enough are scored), and for buy or sell at or above min_confidence a Trade Plan (Entry, Stop, Target), else null; min_confidence null means no band beats break-even, so no buy or sell gets a Trade Plan; input only, never acts on it."""
+        """Advisory buy/sell/hold Signal from price history and indicators on bars of one Interval, with the Price (last close), the Hit Rate of past Signals of its kind (buy/sell or hold) for this ticker and Interval (null until enough are scored), the Minimum Confidence applied as min_confidence (set by the server from buy/sell Hit Rates per 0.1 Confidence band, a fixed default until enough are scored), and for buy or sell at or above min_confidence a Trade Plan (Entry, Stop, Target), else null; min_confidence null means no band beats break-even, so no buy or sell gets a Trade Plan; for a held ticker a position key with the Position and its Unrealised P&L (amount and percent of cost) at the Price, absent when not held; input only, never acts on it."""
         for name, value in (("atr_multiple", atr_multiple), ("reward_ratio", reward_ratio)):
             if not 0 < value <= PLAN_ARG_MAX:
                 raise ToolError(f"{name} must be in (0, {PLAN_ARG_MAX}], got {value}")
@@ -377,6 +389,8 @@ def build_server(
         # The prompt without the previous Signal is the cache key, so storing a Signal doesn't defeat the cache.
         prompt = build_signal_prompt(ticker, period, df, interval=interval)
         try:
+            # Read before the classifier, so a broken Portfolio file fails before a classifier call; the prompt never sees it (ADR-0004).
+            position = portfolio.load().get(ticker)
             signals.score(ticker, interval, df, now().isoformat())
             signal = signal_cache.get(prompt, signal_ttl)
             fresh = signal is None
@@ -412,7 +426,10 @@ def build_server(
             raise
         except Exception as exc:
             raise ToolError(str(exc)) from exc
-        return {**signal, "price": price, "hit_rate": hit_rate, "min_confidence": min_confidence, "trade_plan": plan}
+        reply = {**signal, "price": price, "hit_rate": hit_rate, "min_confidence": min_confidence, "trade_plan": plan}
+        if position is not None:
+            reply["position"] = {**position, **_unrealised_pnl(position, price)}
+        return reply
 
     @audited_tool
     def scan(watchlist: str | None = None, tickers: list[str] | None = None) -> list[dict]:
@@ -473,5 +490,52 @@ def build_server(
             return watchlists.load()
         except Exception as exc:
             raise ToolError(str(exc)) from exc
+
+    @audited_tool
+    def set_position(ticker: str, direction: Direction, quantity: StrictNumber, avg_cost: StrictNumber) -> dict:
+        """Save the Position for a ticker (checked with a quote), replacing any held one; quantity 0 deletes it and replies with just the ticker and quantity 0. Direction long or short, quantity at least 0, avg_cost above 0; as many Positions as a Watchlist has tickers. Records only, never places orders."""
+        ticker = ticker.upper()
+        if not (math.isfinite(quantity) and quantity >= 0):
+            raise ToolError(f"quantity must be a finite number of at least 0, got {quantity}")
+        try:
+            if quantity == 0:
+                portfolio.delete(ticker)
+                return {"ticker": ticker, "quantity": 0}
+            if not (math.isfinite(avg_cost) and avg_cost > 0):
+                raise ToolError(f"avg_cost must be a finite number above 0, got {avg_cost}")
+            held = portfolio.load()
+            if ticker not in held and len(held) >= WATCHLIST_MAX_TICKERS:
+                raise ToolError(f"at most {WATCHLIST_MAX_TICKERS} Positions; delete one before adding {ticker}")
+            try:
+                fetcher.fetch_quote(ticker)
+            except Exception:
+                # Bad input, not a dependency failure: no cause, so the audit logs a warning like set_watchlist.
+                raise ToolError(f"unknown ticker, nothing saved: {ticker}") from None
+            portfolio.set(ticker, direction, quantity, avg_cost)
+        except ToolError:
+            raise
+        except Exception as exc:
+            raise ToolError(str(exc)) from exc
+        return {"ticker": ticker, "direction": direction, "quantity": quantity, "avg_cost": avg_cost}
+
+    @audited_tool
+    def get_portfolio() -> list[dict]:
+        """Every Position with its latest price and Unrealised P&L (amount and percent of cost) in the ticker's own currency; no total across currencies. A Position whose quote fails gets its own error entry."""
+        try:
+            held = portfolio.load()
+        except Exception as exc:
+            raise ToolError(str(exc)) from exc
+        results = []
+        for ticker, position in held.items():
+            entry = {"ticker": ticker, **position}
+            try:
+                quote = fetcher.fetch_quote(ticker)
+                price = float(quote["price"])
+                entry |= {"price": _finite(price), "currency": quote["currency"], **_unrealised_pnl(position, price)}
+            except Exception as exc:
+                log.exception(_error_line(f"get_portfolio ticker={ticker}", exc))
+                entry["error"] = str(exc)
+            results.append(entry)
+        return results
 
     return mcp

@@ -68,7 +68,7 @@ _Avoid_: Risk/reward, R-multiple, R:R
 
 **Watchlist**:
 A named list of tickers the user saves to scan together, usually one market per list.
-_Avoid_: Portfolio, universe, list
+_Avoid_: Universe, list
 
 **Scan**:
 A quick set of numbers for each ticker in a Watchlist or ad-hoc list, used to pick which ones deserve a Signal. Has no Verdict.
@@ -85,3 +85,17 @@ _Avoid_: RVOL, volume ratio
 **VWAP Distance**:
 How far the Price is from this session's VWAP (volume-weighted average price), as a percent. Positive when the Price is above it.
 _Avoid_: VWAP gap, VWAP deviation
+
+### Portfolio
+
+**Portfolio**:
+The Positions the user holds, set by the user through the agent. The server only records them; it never places orders.
+_Avoid_: Holdings, account
+
+**Position**:
+One ticker in the Portfolio with a Direction, a quantity, and an average cost.
+_Avoid_: Holding, lot
+
+**Unrealised P&L**:
+A Position's profit or loss if closed at a given price: the price minus the average cost, times the quantity, sign flipped for short. In the ticker's currency, also given as a percent of cost.
+_Avoid_: Gain, return, open P&L

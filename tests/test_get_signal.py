@@ -620,16 +620,19 @@ async def test_server_lists_its_tools_and_get_signal_says_advisory_and_price(ser
 
     assert sorted(tools) == [
         "get_fundamentals",
+        "get_portfolio",
         "get_quote",
         "get_signal",
         "get_watchlists",
         "scan",
+        "set_position",
         "set_watchlist",
     ]
     description = (tools["get_signal"].description or "").lower()
     assert "advisory" in description
     assert "price (last close)" in description
     assert "min_confidence null means no band beats break-even" in description
+    assert "position" in description and "unrealised p&l" in description
 
 
 @pytest.mark.parametrize("name", ["get_plan", "get_history"])
