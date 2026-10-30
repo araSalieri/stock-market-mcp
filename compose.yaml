@@ -21,7 +21,7 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - watchlists:/home/appuser/data
+      - db:/home/appuser/data
 
 volumes:
-  watchlists:
+  db:
