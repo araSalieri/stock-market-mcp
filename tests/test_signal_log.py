@@ -25,7 +25,7 @@ async def test_second_call_shows_the_classifier_the_first_signal_as_pending(serv
 
 
 def _stored(db):
-    # The reply doesn't show stored rows until scoring (#53), so these tests read the table.
+    # Row counts and plan prices never reach the reply or the classifier, so these tests read the table.
     if not db.exists():
         return []
     with closing(sqlite3.connect(db)) as conn:
@@ -45,23 +45,24 @@ async def test_cache_hit_within_the_ttl_stores_nothing(server_url, tmp_path):
     assert len(_stored(tmp_path / "s.db")) == 1
 
 
+async def _previous_after(server_url, db, failing_url):
+    """The previous Signal a working server on db shows the classifier after a failed call on failing_url."""
+    assert (await call_tool(failing_url, "get_signal", {"ticker": "AAPL"})).is_error
+    classifier = FakeClassifier()
+    await call_tool(server_url(FlatFakeFetcher(), classifier=classifier, db_path=db), "get_signal", {"ticker": "AAPL"})
+    return json.loads(classifier.prompts[0]).get("previous_signal")
+
+
 async def test_failed_classifier_call_stores_nothing(server_url, tmp_path):
-    classifier = FakeClassifier(error=RuntimeError("down"))
-    url = server_url(FlatFakeFetcher(), classifier=classifier, db_path=tmp_path / "s.db")
-
-    result = await call_tool(url, "get_signal", {"ticker": "AAPL"})
-
-    assert result.is_error
-    assert _stored(tmp_path / "s.db") == []
+    db = tmp_path / "s.db"
+    failing = server_url(FlatFakeFetcher(), classifier=FakeClassifier(error=RuntimeError("down")), db_path=db)
+    assert await _previous_after(server_url, db, failing) is None
 
 
 async def test_failed_fetch_stores_nothing(server_url, tmp_path):
-    url = server_url(FlatFakeFetcher(rows=5), classifier=FakeClassifier(), db_path=tmp_path / "s.db")
-
-    result = await call_tool(url, "get_signal", {"ticker": "AAPL"})
-
-    assert result.is_error
-    assert _stored(tmp_path / "s.db") == []
+    db = tmp_path / "s.db"
+    failing = server_url(FlatFakeFetcher(rows=5), classifier=FakeClassifier(), db_path=db)
+    assert await _previous_after(server_url, db, failing) is None
 
 
 async def test_hold_is_stored_with_both_default_plans_whatever_the_caller_asked(server_url, tmp_path):
