@@ -52,3 +52,13 @@ def build_signal_prompt(
         rows = rows[1:]
         prompt = json.dumps({**head, "rows": rows})
     return prompt
+
+
+def with_previous_signal(prompt: str, previous_signal: dict) -> str:
+    """prompt with previous_signal (Verdict, Confidence, Outcome) in its head, where row trimming never drops it.
+
+    The rows were trimmed without it, so the prompt may run that many characters over the budget.
+    """
+    payload = json.loads(prompt)
+    rows = payload.pop("rows")
+    return json.dumps({**payload, "previous_signal": previous_signal, "rows": rows})

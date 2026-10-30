@@ -12,8 +12,9 @@ SQLite over a JSON file because Signals grow without bound and Hit Rates need gr
 ## Consequences
 
 - Signals for tickers or Intervals never asked for again stay unscored, as do ones whose window falls outside the fetched history. Yahoo keeps 1m bars for about 7 days.
+- A Signal whose default Trade Plan has non-positive prices (ATR too large for the Price) is stored without it and never scored.
 - Feeding the previous Signal back in has no baseline to compare against; the model may anchor on its own last answer.
 - After a prompt change, the Hit Rate in the reply is null and the Minimum Confidence is 0.6 until the new version has enough scored Signals.
 - If enough data shows no Confidence band breaks even, no Signal gets a Trade Plan.
-- Agents passing `min_confidence` get a validation error.
+- Agents still passing `min_confidence` get no error: the server ignores unknown arguments.
 - Watchlists saved before the move are lost on upgrade and must be re-created.

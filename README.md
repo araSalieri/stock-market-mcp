@@ -1,6 +1,6 @@
 # stock-market-mcp
 
-An MCP server that gives coding agents stock market data, indicators and advisory trading guidance from Yahoo Finance. It never places orders. Its only write is saving your Watchlists.
+An MCP server that gives coding agents stock market data, indicators and advisory trading guidance from Yahoo Finance. It never places orders. It writes only its own state: your Watchlists and a log of past Signals.
 
 ## Tools
 
@@ -8,7 +8,7 @@ An MCP server that gives coding agents stock market data, indicators and advisor
 |------|--------------|
 | `get_quote` | Current price and currency |
 | `get_fundamentals` | Name, sector, industry, market cap |
-| `get_signal` | Buy/sell/hold Verdict with confidence, rationale and a Trade Plan (entry, stop, target). Needs an OpenRouter key. |
+| `get_signal` | Buy/sell/hold Verdict with confidence, rationale and a Trade Plan (entry, stop, target). Only a buy or sell at or above the Minimum Confidence gets a Trade Plan. The server sets that from past Signals' Hit Rates (there is no `min_confidence` argument) and shows it as `min_confidence`; null means no buy or sell gets a Trade Plan. `hit_rate` is the Hit Rate of past Signals of the same kind for the ticker and Interval, null until enough are scored. Needs an OpenRouter key. |
 | `set_watchlist` | Save a Watchlist of up to 15 tickers. An empty list deletes it. |
 | `get_watchlists` | Every saved Watchlist |
 | `scan` | Price, previous day's range, ATR, RSI, Gap, Relative Volume and VWAP distance for a Watchlist or list of tickers |
@@ -38,7 +38,7 @@ The server listens at `http://127.0.0.1:8000/mcp` (streamable HTTP). Connect Cla
 claude mcp add --transport http stock-market http://127.0.0.1:8000/mcp
 ```
 
-The compose setup listens on all interfaces and has no auth, so anyone on your LAN can read and replace your Watchlists. Watchlists are kept on a named volume and survive restarts.
+The compose setup listens on all interfaces and has no auth, so anyone on your LAN can read and replace your Watchlists. Watchlists are kept in a SQLite file on a named volume and survive restarts. Older `watchlists.json` files are not imported: re-create those lists with `set_watchlist`.
 
 ## Configuration
 
@@ -49,7 +49,7 @@ The compose setup listens on all interfaces and has no auth, so anyone on your L
 | `SMM_HOST` | `127.0.0.1` | Listen address (compose sets `0.0.0.0`) |
 | `SMM_PORT` | `8000` | Listen port |
 | `SMM_CLASSIFIER_MAX_STATE_CHARS` | `32000` | Max size of the market data sent to the classifier |
-| `SMM_WATCHLIST_PATH` | `watchlists.json` | Watchlist file (compose sets a path on its volume) |
+| `SMM_DB_PATH` | `stock-market-mcp.db` | SQLite file for server state (compose sets a path on its volume) |
 | `SMM_LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING` or `ERROR` |
 
 compose reads `SMM_OPENROUTER_API_KEY`, `SMM_CLASSIFIER_MODEL` and `SMM_LOG_LEVEL` from `.env`.

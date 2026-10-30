@@ -59,7 +59,7 @@ CLEANUP = (
     f"CLEANUP: could not delete the {WATCHLIST!r} Watchlist. Once the container is up, run in {ROOT}:\n"
     f"  {' '.join(COMPOSE)} exec stock-market-mcp /app/.venv/bin/python -c "
     "'import os; from stock_market_mcp.watchlists import WatchlistStore; "
-    f'WatchlistStore(os.environ["SMM_WATCHLIST_PATH"]).set("{WATCHLIST}", [])\''
+    f'WatchlistStore(os.environ["SMM_DB_PATH"]).set("{WATCHLIST}", [])\''
 )
 
 

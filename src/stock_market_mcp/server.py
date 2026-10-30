@@ -23,18 +23,20 @@ from stock_market_mcp.cache import (
     HISTORY_TTL_SECONDS,
     QUOTE_TTL_SECONDS,
     SIGNAL_TTL_SECONDS,
-    CachingClassifier,
     CachingFetcher,
+    TTLCache,
 )
 from stock_market_mcp.classifier import (
+    PROMPT_VERSION,
     EnforcingClassifier,
     OpenRouterClassifier,
     SignalClassifier,
 )
 from stock_market_mcp.data import DataFetcher
-from stock_market_mcp.prompt import build_signal_prompt
+from stock_market_mcp.db import DEFAULT_DB_PATH
+from stock_market_mcp.prompt import build_signal_prompt, with_previous_signal
+from stock_market_mcp.signals import SignalLog
 from stock_market_mcp.watchlists import (
-    DEFAULT_WATCHLIST_PATH,
     WATCHLIST_MAX_TICKERS,
     WatchlistStore,
 )
@@ -123,7 +125,8 @@ INDICATOR_ALLOWLIST = frozenset(_INDICATOR_DISPATCH)
 PLAN_ATR_MULTIPLE = 2.0
 PLAN_REWARD_RATIO = 2.0
 PLAN_ARG_MAX = 10
-MIN_CONFIDENCE = 0.6
+# Hit Rate a default Trade Plan must beat to break even: a Target gains PLAN_REWARD_RATIO times what a Stop loses.
+BREAK_EVEN_HIT_RATE = 1 / (1 + PLAN_REWARD_RATIO)
 
 # Strict: JSON numbers only; true and "2" are rejected, not coerced.
 StrictNumber = Annotated[float, Strict()]
@@ -203,6 +206,15 @@ def _trade_plan(
         "atr_multiple": atr_multiple,
         "reward_ratio": reward_ratio,
     }
+
+
+def _default_plan(df: pd.DataFrame, entry: float, direction: Direction) -> tuple[float | None, float | None]:
+    """Stop and Target of the default Trade Plan stored with a Signal; nulls when that plan can't be made."""
+    try:
+        plan = _trade_plan(df, entry, direction, PLAN_ATR_MULTIPLE, PLAN_REWARD_RATIO)
+    except ToolError:
+        return None, None
+    return plan["stop"], plan["target"]
 
 
 def _indicator_frame(name: str, df: pd.DataFrame) -> pd.DataFrame:
@@ -293,7 +305,7 @@ def build_server(
     history_ttl: float = HISTORY_TTL_SECONDS,
     fundamentals_ttl: float = FUNDAMENTALS_TTL_SECONDS,
     signal_ttl: float = SIGNAL_TTL_SECONDS,
-    watchlist_path: str | os.PathLike | None = None,
+    db_path: str | os.PathLike | None = None,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> MCPServer:
     """Assemble the MCP server over an injectable fetcher and classifier.
@@ -308,13 +320,11 @@ def build_server(
         history_ttl=history_ttl,
         fundamentals_ttl=fundamentals_ttl,
     )
-    signal_classifier = CachingClassifier(
-        EnforcingClassifier(classifier if classifier is not None else OpenRouterClassifier()),
-        signal_ttl=signal_ttl,
-    )
-    watchlists = WatchlistStore(
-        watchlist_path or os.environ.get("SMM_WATCHLIST_PATH", DEFAULT_WATCHLIST_PATH)
-    )
+    signal_classifier = EnforcingClassifier(classifier if classifier is not None else OpenRouterClassifier())
+    signal_cache = TTLCache()
+    db_path = db_path or os.environ.get("SMM_DB_PATH", DEFAULT_DB_PATH)
+    watchlists = WatchlistStore(db_path)
+    signals = SignalLog(db_path)
     mcp = MCPServer("stock-market-mcp")
 
     def audited_tool[F: Callable](fn: F) -> F:
@@ -344,14 +354,11 @@ def build_server(
         period: str | None = None,
         atr_multiple: StrictNumber = PLAN_ATR_MULTIPLE,
         reward_ratio: StrictNumber = PLAN_REWARD_RATIO,
-        min_confidence: StrictNumber = MIN_CONFIDENCE,
     ) -> dict:
-        """Advisory buy/sell/hold Signal from price history and indicators on bars of one Interval, with the Price (last close) and, for buy or sell, a Trade Plan (Entry, Stop, Target); buy or sell below min_confidence gets no Trade Plan (null); input only, never acts on it."""
+        """Advisory buy/sell/hold Signal from price history and indicators on bars of one Interval, with the Price (last close), the Hit Rate of past Signals of its kind (buy/sell or hold) for this ticker and Interval (null until enough are scored), the Minimum Confidence applied as min_confidence (set by the server from buy/sell Hit Rates per 0.1 Confidence band, a fixed default until enough are scored), and for buy or sell at or above min_confidence a Trade Plan (Entry, Stop, Target), else null; min_confidence null means no band beats break-even, so no buy or sell gets a Trade Plan; input only, never acts on it."""
         for name, value in (("atr_multiple", atr_multiple), ("reward_ratio", reward_ratio)):
             if not 0 < value <= PLAN_ARG_MAX:
                 raise ToolError(f"{name} must be in (0, {PLAN_ARG_MAX}], got {value}")
-        if not 0 <= min_confidence <= 1:
-            raise ToolError(f"min_confidence must be in [0, 1], got {min_confidence}")
         period = _period(interval, period)
         try:
             df = fetcher.fetch_history(ticker, period, interval)
@@ -366,15 +373,46 @@ def build_server(
         price = float(df["Close"].iloc[-1])
         if not math.isfinite(price):
             raise ToolError(f"latest row has a non-finite close (close={price})")
-        prompt = build_signal_prompt(ticker.upper(), period, df, interval=interval)
+        ticker = ticker.upper()
+        # The prompt without the previous Signal is the cache key, so storing a Signal doesn't defeat the cache.
+        prompt = build_signal_prompt(ticker, period, df, interval=interval)
         try:
-            signal = signal_classifier.classify(prompt)
+            signals.score(ticker, interval, df, now().isoformat())
+            signal = signal_cache.get(prompt, signal_ttl)
+            fresh = signal is None
+            if fresh:
+                previous = signals.latest(ticker, interval)
+                signal = signal_classifier.classify(prompt if previous is None else with_previous_signal(prompt, previous))
+            # After the cache, so a cached Signal gets the current Minimum Confidence; a new pending Signal changes neither read.
+            min_confidence = signals.min_confidence(PROMPT_VERSION, BREAK_EVEN_HIT_RATE)
+            hit_rate = signals.hit_rate(ticker, interval, PROMPT_VERSION, signal["verdict"])
+            confident = min_confidence is not None and signal["confidence"] >= min_confidence
+            direction = _VERDICT_DIRECTION.get(signal["verdict"]) if confident else None
+            # Before the Signal is stored, so a plan error doesn't fail a call that already logged.
+            plan = _trade_plan(df, price, direction, atr_multiple, reward_ratio) if direction else None
+            if fresh:
+                long_stop, long_target = _default_plan(df, price, "long")
+                short_stop, short_target = _default_plan(df, price, "short")
+                signals.add(
+                    ticker=ticker,
+                    interval=interval,
+                    prompt_version=PROMPT_VERSION,
+                    data_date=cast("pd.Timestamp", df.index[-1]).isoformat(),
+                    verdict=signal["verdict"],
+                    confidence=signal["confidence"],
+                    price=price,
+                    long_stop=long_stop,
+                    long_target=long_target,
+                    short_stop=short_stop,
+                    short_target=short_target,
+                )
+                # Cached only once stored, so a failed store is retried instead of served from the cache.
+                signal_cache.put(prompt, signal)
+        except ToolError:
+            raise
         except Exception as exc:
             raise ToolError(str(exc)) from exc
-        # After the cache, so each call's own min_confidence applies to a cached Signal.
-        direction = _VERDICT_DIRECTION.get(signal["verdict"]) if signal["confidence"] >= min_confidence else None
-        plan = _trade_plan(df, price, direction, atr_multiple, reward_ratio) if direction else None
-        return {**signal, "price": price, "trade_plan": plan}
+        return {**signal, "price": price, "hit_rate": hit_rate, "min_confidence": min_confidence, "trade_plan": plan}
 
     @audited_tool
     def scan(watchlist: str | None = None, tickers: list[str] | None = None) -> list[dict]:

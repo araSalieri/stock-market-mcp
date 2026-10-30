@@ -6,6 +6,7 @@ from mcp.client.streamable_http import streamable_http_client
 from mcp.types import CallToolResult
 
 from stock_market_mcp.data import DataFetcher
+from stock_market_mcp.signals import SignalLog
 
 
 async def call_tool(url: str, name: str, args: dict) -> CallToolResult:
@@ -23,6 +24,22 @@ def text_of(result: CallToolResult) -> str:
 
 def audit_lines(caplog) -> list:
     return [r for r in caplog.records if " outcome=" in r.getMessage()]
+
+
+def seed_signals(db, outcomes, *, verdict="buy", confidence=0.7, prompt_version=1, ticker="AAPL", interval="1d"):
+    """Store one Signal per Outcome through SignalLog: scoring dozens of Signals over MCP would take dozens of calls."""
+    log = SignalLog(db)
+    for outcome in outcomes:
+        log.add(
+            ticker=ticker,
+            interval=interval,
+            prompt_version=prompt_version,
+            data_date="2023-01-01T00:00:00",
+            verdict=verdict,
+            confidence=confidence,
+            price=100.0,
+            outcome=outcome,
+        )
 
 
 def fake_history(rows: int = 60) -> pd.DataFrame:
@@ -125,6 +142,18 @@ class FlatFakeFetcher(SignalFakeFetcher):
         if self.last_close is not None:
             df.loc[df.index[-1], "Close"] = self.last_close
         return df
+
+
+class SequenceFakeFetcher(SignalFakeFetcher):
+    """History frames handed out one per fetch_history call; the last one repeats."""
+
+    def __init__(self, frames: list[pd.DataFrame]):
+        super().__init__()
+        self.frames = frames
+
+    def fetch_history(self, ticker, period, interval="1d", prepost=False):
+        self.history_calls.append((ticker, period, interval, prepost))
+        return self.frames[min(len(self.history_calls), len(self.frames)) - 1]
 
 
 class FakeClassifier:
