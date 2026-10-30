@@ -18,6 +18,9 @@ DEFAULT_CLASSIFIER_MODEL = "typesafe/jev-1.13"
 # chat/completions with 400, so the transport targets the Decisions API.
 OPENROUTER_DECISIONS_URL = "https://openrouter.ai/api/alpha/decisions"
 
+# Stored with each Signal; bump by hand whenever the prompt or the criteria below change.
+PROMPT_VERSION = 1
+
 # The single question the verdict hinges on. The state supplied by the caller
 # is the prompt builder's serialized OHLCV+indicators payload (the API accepts
 # a string state verbatim).

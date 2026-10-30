@@ -11,11 +11,15 @@ from stock_market_mcp.server import build_server
 
 
 @pytest.fixture
-def server_url():
-    """Factory that starts an MCP server for a fetcher; extra kwargs go to build_server (TTLs, db_path)."""
+def server_url(tmp_path):
+    """Factory that starts an MCP server for a fetcher; extra kwargs go to build_server (TTLs, db_path).
+
+    db_path defaults to a file under tmp_path so no test writes to the working directory.
+    """
     started = []
 
     def start(fetcher, **ttl_overrides):
+        ttl_overrides.setdefault("db_path", tmp_path / "server.db")
         app = build_server(fetcher, **ttl_overrides).streamable_http_app()
         config = Config(app, host="127.0.0.1", port=0, log_level="warning")
         server = Server(config)

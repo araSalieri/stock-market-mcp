@@ -27,6 +27,7 @@ from stock_market_mcp.cache import (
     CachingFetcher,
 )
 from stock_market_mcp.classifier import (
+    PROMPT_VERSION,
     EnforcingClassifier,
     OpenRouterClassifier,
     SignalClassifier,
@@ -34,6 +35,7 @@ from stock_market_mcp.classifier import (
 from stock_market_mcp.data import DataFetcher
 from stock_market_mcp.db import DEFAULT_DB_PATH
 from stock_market_mcp.prompt import build_signal_prompt
+from stock_market_mcp.signals import SignalLog
 from stock_market_mcp.watchlists import (
     WATCHLIST_MAX_TICKERS,
     WatchlistStore,
@@ -205,6 +207,15 @@ def _trade_plan(
     }
 
 
+def _default_plan(df: pd.DataFrame, entry: float, direction: Direction) -> tuple[float | None, float | None]:
+    """Stop and Target of the default Trade Plan stored with a Signal; nulls when that plan can't be made."""
+    try:
+        plan = _trade_plan(df, entry, direction, PLAN_ATR_MULTIPLE, PLAN_REWARD_RATIO)
+    except ToolError:
+        return None, None
+    return plan["stop"], plan["target"]
+
+
 def _indicator_frame(name: str, df: pd.DataFrame) -> pd.DataFrame:
     """Indicator values for one allowed name, keyed by pandas-ta's own column names."""
     handler = _INDICATOR_DISPATCH.get(name)
@@ -314,6 +325,7 @@ def build_server(
     )
     db_path = db_path or os.environ.get("SMM_DB_PATH", DEFAULT_DB_PATH)
     watchlists = WatchlistStore(db_path)
+    signals = SignalLog(db_path)
     mcp = MCPServer("stock-market-mcp")
 
     def audited_tool[F: Callable](fn: F) -> F:
@@ -365,11 +377,37 @@ def build_server(
         price = float(df["Close"].iloc[-1])
         if not math.isfinite(price):
             raise ToolError(f"latest row has a non-finite close (close={price})")
-        prompt = build_signal_prompt(ticker.upper(), period, df, interval=interval)
+        ticker = ticker.upper()
         try:
-            signal = signal_classifier.classify(prompt)
+            previous = signals.latest(ticker, interval)
         except Exception as exc:
             raise ToolError(str(exc)) from exc
+        # Cached by the prompt without the previous Signal, so storing a Signal doesn't defeat the cache.
+        key = build_signal_prompt(ticker, period, df, interval=interval)
+        prompt = build_signal_prompt(ticker, period, df, interval=interval, previous_signal=previous)
+        try:
+            signal, fresh = signal_classifier.classify(prompt, key)
+        except Exception as exc:
+            raise ToolError(str(exc)) from exc
+        if fresh:
+            long_stop, long_target = _default_plan(df, price, "long")
+            short_stop, short_target = _default_plan(df, price, "short")
+            try:
+                signals.add(
+                    ticker=ticker,
+                    interval=interval,
+                    prompt_version=PROMPT_VERSION,
+                    data_date=cast("pd.Timestamp", df.index[-1]).isoformat(),
+                    verdict=signal["verdict"],
+                    confidence=signal["confidence"],
+                    price=price,
+                    long_stop=long_stop,
+                    long_target=long_target,
+                    short_stop=short_stop,
+                    short_target=short_target,
+                )
+            except Exception as exc:
+                raise ToolError(str(exc)) from exc
         # After the cache, so each call's own min_confidence applies to a cached Signal.
         direction = _VERDICT_DIRECTION.get(signal["verdict"]) if signal["confidence"] >= min_confidence else None
         plan = _trade_plan(df, price, direction, atr_multiple, reward_ratio) if direction else None

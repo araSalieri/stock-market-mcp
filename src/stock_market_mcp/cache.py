@@ -90,8 +90,8 @@ class CachingFetcher:
 class CachingClassifier:
     """SignalClassifier decorator that serves repeated classify calls from a TTL cache.
 
-    Verdicts are cached per prompt (the prompt already pins ticker, period and
-    data rows) for SIGNAL_TTL_SECONDS. Failures are never cached: the delegate
+    Verdicts are cached per key (the prompt without the previous Signal, which
+    pins ticker, period and data rows) for SIGNAL_TTL_SECONDS. Failures are never cached: the delegate
     raises, the cache stays empty.
     """
 
@@ -104,10 +104,11 @@ class CachingClassifier:
         self._signal_ttl = signal_ttl
         self._signals = _TTLCache()
 
-    def classify(self, prompt: str) -> dict:
-        cached = self._signals.get(prompt, self._signal_ttl)
+    def classify(self, prompt: str, key: str) -> tuple[dict, bool]:
+        """The Signal for prompt, cached under key, and whether it is a fresh classifier answer."""
+        cached = self._signals.get(key, self._signal_ttl)
         if cached is not None:
-            return cached
+            return cached, False
         result = self._classifier.classify(prompt)
-        self._signals.put(prompt, result)
-        return result
+        self._signals.put(key, result)
+        return result, True

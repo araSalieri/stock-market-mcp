@@ -22,6 +22,7 @@ def build_signal_prompt(
     *,
     interval: str = "1d",
     max_chars: int | None = None,
+    previous_signal: dict | None = None,
 ) -> str:
     """Serialize OHLCV history plus joined indicator columns for the classifier.
 
@@ -32,6 +33,8 @@ def build_signal_prompt(
     If the serialized payload exceeds the character budget, the oldest rows are
     dropped until it fits: recency is the point of a timing signal, so the most
     recent rows are the ones kept.
+
+    previous_signal (Verdict, Confidence, Outcome) goes in the payload head when given.
     """
     if max_chars is None:
         # Read at call time; empty counts as unset (compose passthrough pattern).
@@ -46,7 +49,10 @@ def build_signal_prompt(
     if payload is None:
         raise ValueError("could not serialize history rows")
     rows = json.loads(payload)
-    head = {"ticker": ticker, "period": period, "interval": interval}
+    head: dict = {"ticker": ticker, "period": period, "interval": interval}
+    # In the head, not the rows, so trimming never drops it.
+    if previous_signal is not None:
+        head["previous_signal"] = previous_signal
     prompt = json.dumps({**head, "rows": rows})
     while len(prompt) > max_chars and len(rows) > 1:
         rows = rows[1:]
