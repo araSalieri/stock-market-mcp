@@ -493,15 +493,14 @@ def build_server(
 
     @audited_tool
     def set_position(ticker: str, direction: Direction, quantity: StrictNumber, avg_cost: StrictNumber) -> dict:
-        """Save the Position for a ticker (checked with a quote), replacing any held one; quantity 0 deletes it. Direction long or short, quantity at least 0, avg_cost above 0; as many Positions as a Watchlist has tickers. Records only, never places orders."""
+        """Save the Position for a ticker (checked with a quote), replacing any held one; quantity 0 deletes it and replies with just the ticker and quantity 0. Direction long or short, quantity at least 0, avg_cost above 0; as many Positions as a Watchlist has tickers. Records only, never places orders."""
         ticker = ticker.upper()
         if not (math.isfinite(quantity) and quantity >= 0):
             raise ToolError(f"quantity must be a finite number of at least 0, got {quantity}")
-        saved = {"ticker": ticker, "direction": direction, "quantity": quantity, "avg_cost": avg_cost}
         try:
             if quantity == 0:
                 portfolio.delete(ticker)
-                return saved
+                return {"ticker": ticker, "quantity": 0}
             if not (math.isfinite(avg_cost) and avg_cost > 0):
                 raise ToolError(f"avg_cost must be a finite number above 0, got {avg_cost}")
             held = portfolio.load()
@@ -517,7 +516,7 @@ def build_server(
             raise
         except Exception as exc:
             raise ToolError(str(exc)) from exc
-        return saved
+        return {"ticker": ticker, "direction": direction, "quantity": quantity, "avg_cost": avg_cost}
 
     @audited_tool
     def get_portfolio() -> list[dict]:

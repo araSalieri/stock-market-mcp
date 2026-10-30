@@ -170,10 +170,11 @@ async def test_quantity_zero_deletes_and_deleting_one_not_held_succeeds(server_u
     await set_position(url, "AAPL")
     await set_position(url, "MSFT")
 
-    deleted = await set_position(url, "aapl", quantity=0, avg_cost=0)
+    deleted = await set_position(url, "aapl", "short", quantity=0, avg_cost=-5.0)
     not_held = await set_position(url, "GONE", quantity=0)
 
     assert not deleted.is_error, text_of(deleted)
+    assert json.loads(text_of(deleted)) == {"ticker": "AAPL", "quantity": 0}
     assert not not_held.is_error, text_of(not_held)
     assert [e["ticker"] for e in await get_portfolio(url)] == ["MSFT"]
 
