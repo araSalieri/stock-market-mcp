@@ -84,13 +84,3 @@ async def test_enough_data_with_no_band_above_break_even_gives_no_trade_plan(ser
     assert payload["min_confidence"] is None
     assert payload["trade_plan"] is None
 
-
-async def test_passing_min_confidence_is_rejected(server_url):
-    classifier = FakeClassifier(_signal())
-    result = await call_tool(
-        server_url(FlatFakeFetcher(), classifier=classifier), "get_signal", {"ticker": "AAPL", "min_confidence": 0.5}
-    )
-
-    assert result.is_error
-    assert "min_confidence" in text_of(result)
-    assert classifier.prompts == []

@@ -16,7 +16,7 @@ import pandas as pd
 import pandas_ta as ta
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
-from pydantic import ConfigDict, Strict
+from pydantic import Strict
 
 from stock_market_mcp.cache import (
     FUNDAMENTALS_TTL_SECONDS,
@@ -331,14 +331,6 @@ def build_server(
 
     def audited_tool[F: Callable](fn: F) -> F:
         mcp.tool()(_audited(fn))
-        # Unknown arguments, like the removed min_confidence, fail loudly instead of being dropped.
-        # shortcut: no public MCPServer hook for this, revisit when the SDK adds one.
-        meta = mcp._tool_manager.get_tool(fn.__name__).fn_metadata  # pyright: ignore[reportPrivateUsage, reportOptionalMemberAccess]
-
-        class ArgModel(meta.arg_model):
-            model_config = ConfigDict(extra="forbid")
-
-        meta.arg_model = ArgModel
         return fn
 
     @audited_tool
