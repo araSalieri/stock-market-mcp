@@ -34,6 +34,10 @@ _Avoid_: Result, win/loss
 For buy and sell, Targets divided by Targets plus Stops over a set of scored Signals, Expired left out; for hold, Quiet divided by all scored holds. The measured counterpart to Confidence.
 _Avoid_: Win rate, accuracy
 
+**Track Record**:
+The Outcome counts and Hit Rates of the current prompt version's Signals, by Confidence band and Verdict, optionally for one ticker or Interval. Shows how Confidence compares with Hit Rate and why the Minimum Confidence sits where it does.
+_Avoid_: Stats, performance, backtest, scorecard
+
 **Interval**:
 The length of one bar in the price history a Signal is made from: 1m, 5m, 15m, 1h, or 1d.
 _Avoid_: Timeframe, resolution, granularity
