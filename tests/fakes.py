@@ -1,5 +1,8 @@
 """Shared test fakes and MCP client helpers; test modules import from here, never from each other."""
 
+import sqlite3
+from contextlib import closing
+
 import pandas as pd
 from mcp import ClientSession, types
 from mcp.client.streamable_http import streamable_http_client
@@ -27,19 +30,16 @@ def audit_lines(caplog) -> list:
 
 
 def seed_signals(db, outcomes, *, verdict="buy", confidence=0.7, prompt_version=PROMPT_VERSION, ticker="AAPL", interval="1d", cut_loss=None):
-    """Store one Signal per Outcome through SignalLog: scoring dozens of Signals over MCP would take dozens of calls."""
-    log = SignalLog(db)
-    for outcome in outcomes:
-        log.add(
-            ticker=ticker,
-            interval=interval,
-            prompt_version=prompt_version,
-            data_date="2023-01-01T00:00:00",
-            verdict=verdict,
-            confidence=confidence,
-            price=100.0,
-            outcome=outcome,
-            cut_loss=cut_loss,
+    """Store one scored Signal per Outcome: scoring dozens of Signals over MCP would take dozens of calls.
+
+    The only test code that knows the signals schema; SignalLog(db).latest creates the table first.
+    """
+    SignalLog(db).latest(ticker, interval)
+    with closing(sqlite3.connect(db)) as conn, conn:
+        conn.executemany(
+            "INSERT INTO signals (ticker, interval, prompt_version, data_date, verdict, confidence, price, outcome, "
+            "cut_loss) VALUES (?, ?, ?, '2023-01-01T00:00:00', ?, ?, 100.0, ?, ?)",
+            [(ticker, interval, prompt_version, verdict, confidence, outcome, cut_loss) for outcome in outcomes],
         )
 
 

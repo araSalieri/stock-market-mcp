@@ -1,9 +1,12 @@
-"""Tests for scoring buy/sell Signals (#53): get_signal scores pending Signals on the history it fetched."""
+"""Tests for scoring Signals (#53): SignalLog gives pending Signals an Outcome from later bars."""
 
 import json
+from typing import cast
 
 import pytest
 from fakes import FakeClassifier, FakeFetcher, call_tool, flat_history, seed_signals, text_of
+
+from stock_market_mcp.signals import SignalLog
 
 
 def _signal(verdict, confidence=0.7):
@@ -21,87 +24,80 @@ def _later(*bars):
 FLAT = (101.0, 99.0)
 
 
-async def _previous_outcome(server_url, verdict, *bars, confidence=0.7):
+def _outcome(tmp_path, verdict, *bars, confidence=0.7, first=None, scored_on=None):
+    """Outcome of one Signal recorded on first (default: 60 flat bars), then scored on scored_on (default: _later(*bars))."""
     # Entry 100, ATR 2, default plans: long Stop 96 / Target 108, short Stop 104 / Target 92.
-    classifier = FakeClassifier(replies=[_signal(verdict, confidence), _signal("hold")])
-    url = server_url(FakeFetcher(history=[flat_history(), _later(*bars)]), classifier=classifier, signal_ttl=0, history_ttl=0)
-
-    await call_tool(url, "get_signal", {"ticker": "AAPL", "interval": "1d"})
-    await call_tool(url, "get_signal", {"ticker": "AAPL", "interval": "1d"})
-
-    return json.loads(classifier.prompts[1])["previous_signal"]["outcome"]
+    log = SignalLog(tmp_path / "s.db")
+    first = flat_history() if first is None else first
+    log.record("AAPL", "1d", _signal(verdict, confidence), first, float(first["Close"].iloc[-1]), None)
+    log.score("AAPL", "1d", _later(*bars) if scored_on is None else scored_on, "2024-06-01T00:00:00")
+    return cast("dict", log.latest("AAPL", "1d"))["outcome"]
 
 
-async def test_buy_reaching_its_target_first_is_a_target(server_url):
-    assert await _previous_outcome(server_url, "buy", FLAT, (109.0, 99.0), (101.0, 90.0)) == "target"
+def test_buy_reaching_its_target_first_is_a_target(tmp_path):
+    assert _outcome(tmp_path, "buy", FLAT, (109.0, 99.0), (101.0, 90.0)) == "target"
 
 
-async def test_sell_reaching_its_target_first_is_a_target(server_url):
-    assert await _previous_outcome(server_url, "sell", FLAT, (101.0, 91.0), (105.0, 99.0)) == "target"
+def test_sell_reaching_its_target_first_is_a_target(tmp_path):
+    assert _outcome(tmp_path, "sell", FLAT, (101.0, 91.0), (105.0, 99.0)) == "target"
 
 
-async def test_buy_reaching_its_stop_first_is_a_stop(server_url):
-    assert await _previous_outcome(server_url, "buy", FLAT, (101.0, 95.0), (109.0, 99.0)) == "stop"
+def test_buy_reaching_its_stop_first_is_a_stop(tmp_path):
+    assert _outcome(tmp_path, "buy", FLAT, (101.0, 95.0), (109.0, 99.0)) == "stop"
 
 
-async def test_sell_reaching_its_stop_first_is_a_stop(server_url):
-    assert await _previous_outcome(server_url, "sell", (105.0, 99.0), (101.0, 91.0)) == "stop"
+def test_sell_reaching_its_stop_first_is_a_stop(tmp_path):
+    assert _outcome(tmp_path, "sell", (105.0, 99.0), (101.0, 91.0)) == "stop"
 
 
-async def test_stop_and_target_in_one_bar_is_a_stop(server_url):
-    assert await _previous_outcome(server_url, "buy", FLAT, (109.0, 95.0)) == "stop"
+def test_stop_and_target_in_one_bar_is_a_stop(tmp_path):
+    assert _outcome(tmp_path, "buy", FLAT, (109.0, 95.0)) == "stop"
 
 
-async def test_neither_within_20_later_bars_is_expired(server_url):
-    assert await _previous_outcome(server_url, "buy", *[FLAT] * 20, (109.0, 99.0)) == "expired"
+def test_neither_within_20_later_bars_is_expired(tmp_path):
+    assert _outcome(tmp_path, "buy", *[FLAT] * 20, (109.0, 99.0)) == "expired"
 
 
-async def test_fewer_than_20_later_bars_and_no_hit_stays_pending(server_url):
-    assert await _previous_outcome(server_url, "buy", *[FLAT] * 19) == "pending"
+def test_fewer_than_20_later_bars_and_no_hit_stays_pending(tmp_path):
+    assert _outcome(tmp_path, "buy", *[FLAT] * 19) == "pending"
 
 
-
-async def test_hold_reaching_neither_target_within_20_later_bars_is_quiet(server_url):
-    assert await _previous_outcome(server_url, "hold", *[FLAT] * 20, (109.0, 91.0)) == "quiet"
+def test_hold_reaching_neither_target_within_20_later_bars_is_quiet(tmp_path):
+    assert _outcome(tmp_path, "hold", *[FLAT] * 20, (109.0, 91.0)) == "quiet"
 
 
 @pytest.mark.parametrize("bar", [(109.0, 99.0), (101.0, 91.0)], ids=["long", "short"])
-async def test_hold_reaching_either_target_is_missed(server_url, bar):
-    assert await _previous_outcome(server_url, "hold", FLAT, bar) == "missed"
+def test_hold_reaching_either_target_is_missed(tmp_path, bar):
+    assert _outcome(tmp_path, "hold", FLAT, bar) == "missed"
 
 
-async def test_hold_with_fewer_than_20_later_bars_and_no_target_stays_pending(server_url):
-    assert await _previous_outcome(server_url, "hold", *[FLAT] * 19) == "pending"
-
-async def test_buy_below_the_minimum_confidence_is_scored_too(server_url):
-    assert await _previous_outcome(server_url, "buy", (109.0, 99.0), confidence=0.3) == "target"
+def test_hold_with_fewer_than_20_later_bars_and_no_target_stays_pending(tmp_path):
+    assert _outcome(tmp_path, "hold", *[FLAT] * 19) == "pending"
 
 
-async def test_signal_whose_bar_is_outside_the_fetched_history_stays_pending(server_url):
-    classifier = FakeClassifier(replies=[_signal("buy"), _signal("hold")])
-    # The second history starts on the bar after the Signal's, which reaches the Target.
-    fetcher = FakeFetcher(history=[flat_history(), _later((109.0, 99.0), *[FLAT] * 59).iloc[60:]])
-    url = server_url(fetcher, classifier=classifier, signal_ttl=0, history_ttl=0)
-
-    await call_tool(url, "get_signal", {"ticker": "AAPL", "interval": "1d"})
-    await call_tool(url, "get_signal", {"ticker": "AAPL", "interval": "1d"})
-
-    assert json.loads(classifier.prompts[1])["previous_signal"]["outcome"] == "pending"
-    assert len(fetcher.history_calls) == 2  # no extra fetch to reach the window
+def test_buy_below_the_minimum_confidence_is_scored_too(tmp_path):
+    assert _outcome(tmp_path, "buy", (109.0, 99.0), confidence=0.3) == "target"
 
 
-async def test_signal_without_a_default_plan_stays_pending(server_url):
+def test_signal_whose_bar_is_outside_the_history_stays_pending(tmp_path):
+    # The history starts on the bar after the Signal's, which reaches the Target.
+    assert _outcome(tmp_path, "buy", scored_on=_later((109.0, 99.0), *[FLAT] * 59).iloc[60:]) == "pending"
+
+
+def test_signal_without_a_default_plan_stays_pending(tmp_path):
     # Close 1 with ATR 2 puts the long default Stop below zero, so it is stored null.
-    # Below the Minimum Confidence, so the call gets no Trade Plan and doesn't fail on it.
-    classifier = FakeClassifier(replies=[_signal("buy", 0.3), _signal("hold")])
-    fetcher = FakeFetcher(history=[flat_history(close=1.0), flat_history(close=1.0, rows=90)])
-    url = server_url(fetcher, classifier=classifier, signal_ttl=0, history_ttl=0)
+    first = flat_history(close=1.0)
+    assert _outcome(tmp_path, "buy", first=first, scored_on=flat_history(close=1.0, rows=90)) == "pending"
+
+
+async def test_second_get_signal_call_scores_the_first(server_url):
+    classifier = FakeClassifier(replies=[_signal("buy"), _signal("hold")])
+    url = server_url(FakeFetcher(history=[flat_history(), _later(FLAT, (109.0, 99.0))]), classifier=classifier, signal_ttl=0, history_ttl=0)
 
     await call_tool(url, "get_signal", {"ticker": "AAPL", "interval": "1d"})
-    second = await call_tool(url, "get_signal", {"ticker": "AAPL", "interval": "1d"})
+    await call_tool(url, "get_signal", {"ticker": "AAPL", "interval": "1d"})
 
-    assert not second.is_error
-    assert json.loads(classifier.prompts[1])["previous_signal"]["outcome"] == "pending"
+    assert json.loads(classifier.prompts[1])["previous_signal"]["outcome"] == "target"
 
 
 async def _hit_rate(server_url, tmp_path, *seeds, reply="buy"):

@@ -10,7 +10,7 @@ import time
 from collections.abc import Callable
 from dataclasses import asdict
 from datetime import UTC, datetime
-from typing import Annotated, Literal, cast
+from typing import Annotated, cast
 
 import numpy as np
 import pandas as pd
@@ -28,7 +28,6 @@ from stock_market_mcp.cache import (
     TTLCache,
 )
 from stock_market_mcp.classifier import (
-    PROMPT_VERSION,
     EnforcingClassifier,
     OpenRouterClassifier,
     SignalClassifier,
@@ -38,7 +37,7 @@ from stock_market_mcp.db import DEFAULT_DB_PATH
 from stock_market_mcp.errors import InputError
 from stock_market_mcp.portfolio import PortfolioStore
 from stock_market_mcp.prompt import build_signal_prompt, with_previous_signal
-from stock_market_mcp.signals import SignalLog
+from stock_market_mcp.signals import PLAN_ATR_MULTIPLE, PLAN_REWARD_RATIO, Direction, SignalLog, trade_plan
 from stock_market_mcp.watchlists import (
     WATCHLIST_MAX_TICKERS,
     WatchlistStore,
@@ -90,16 +89,10 @@ def _audited[**P, R](tool: Callable[P, R]) -> Callable[P, R]:
     return wrapper
 
 
-PLAN_ATR_MULTIPLE = 2.0
-PLAN_REWARD_RATIO = 2.0
 PLAN_ARG_MAX = 10
-# Hit Rate a default Trade Plan must beat to break even: a Target gains PLAN_REWARD_RATIO times what a Stop loses.
-BREAK_EVEN_HIT_RATE = 1 / (1 + PLAN_REWARD_RATIO)
 
 # Strict: JSON numbers only; true and "2" are rejected, not coerced.
 StrictNumber = Annotated[float, Strict()]
-
-Direction = Literal["long", "short"]
 
 def _tickers(tickers: list[str]) -> list[str]:
     """Upper-cased and de-duplicated in order; one Scan or Watchlist takes at most WATCHLIST_MAX_TICKERS."""
@@ -111,42 +104,6 @@ def _tickers(tickers: list[str]) -> list[str]:
 
 # Verdict -> Trade Plan Direction; hold has no plan.
 _VERDICT_DIRECTION: dict[str, Direction] = {"buy": "long", "sell": "short"}
-
-
-def _trade_plan(
-    df: pd.DataFrame, entry: float, direction: Direction, atr_multiple: float, reward_ratio: float
-) -> dict:
-    """Stop and Target around entry (the Price) from the last ATR(14) of df."""
-    atr = last_value("atr", df)
-    if not math.isfinite(atr):
-        raise ToolError(f"latest row has a non-finite ATR (atr={atr})")
-    sign = 1 if direction == "long" else -1
-    stop = entry - sign * atr_multiple * atr
-    # Same line for both Directions: short Target = Entry - ratio * (Stop - Entry).
-    target = entry + reward_ratio * (entry - stop)
-    if stop <= 0 or target <= 0:
-        raise ToolError(
-            f"plan has non-positive prices (stop={stop}, target={target}); "
-            "ATR is too large relative to the last close"
-        )
-    return {
-        "direction": direction,
-        "entry": entry,
-        "stop": stop,
-        "target": target,
-        "atr": atr,
-        "atr_multiple": atr_multiple,
-        "reward_ratio": reward_ratio,
-    }
-
-
-def _default_plan(df: pd.DataFrame, entry: float, direction: Direction) -> tuple[float | None, float | None]:
-    """Stop and Target of the default Trade Plan stored with a Signal; nulls when that plan can't be made."""
-    try:
-        plan = _trade_plan(df, entry, direction, PLAN_ATR_MULTIPLE, PLAN_REWARD_RATIO)
-    except ToolError:
-        return None, None
-    return plan["stop"], plan["target"]
 
 
 def _finite(value: float) -> float | None:
@@ -296,31 +253,16 @@ def build_server(
             previous = signals.latest(ticker, interval)
             signal = signal_classifier.classify(prompt if previous is None else with_previous_signal(prompt, previous))
         # After the cache, so a cached Signal gets the current Minimum Confidence; a new pending Signal changes neither read.
-        min_confidence = signals.min_confidence(PROMPT_VERSION, BREAK_EVEN_HIT_RATE)
-        hit_rate = signals.hit_rate(ticker, interval, PROMPT_VERSION, signal["verdict"])
+        min_confidence = signals.min_confidence()
+        hit_rate = signals.hit_rate(ticker, interval, signal["verdict"])
         confident = min_confidence is not None and signal["confidence"] >= min_confidence
         direction = _VERDICT_DIRECTION.get(signal["verdict"]) if confident else None
         # Before the Signal is stored, so a plan error doesn't fail a call that already logged.
-        plan = _trade_plan(df, price, direction, atr_multiple, reward_ratio) if direction else None
+        plan = trade_plan(df, price, direction, atr_multiple, reward_ratio) if direction else None
         # Stored at any Confidence for the Cut Loss Hit Rate; the reply's cut_loss also needs the Minimum Confidence.
         opposes_losing = position.opposes_losing(signal["verdict"], price) if position is not None else None
         if fresh:
-            long_stop, long_target = _default_plan(df, price, "long")
-            short_stop, short_target = _default_plan(df, price, "short")
-            signals.add(
-                ticker=ticker,
-                interval=interval,
-                prompt_version=PROMPT_VERSION,
-                data_date=cast("pd.Timestamp", df.index[-1]).isoformat(),
-                verdict=signal["verdict"],
-                confidence=signal["confidence"],
-                price=price,
-                long_stop=long_stop,
-                long_target=long_target,
-                short_stop=short_stop,
-                short_target=short_target,
-                cut_loss=opposes_losing,
-            )
+            signals.record(ticker, interval, signal, df, price, opposes_losing)
             # Cached only once stored, so a failed store is retried instead of served from the cache.
             signal_cache.put(prompt, signal)
         reply = {**signal, "price": price, "hit_rate": hit_rate, "min_confidence": min_confidence, "trade_plan": plan}
@@ -329,7 +271,7 @@ def build_server(
                 **asdict(position),
                 **position.unrealised_pnl(price),
                 "cut_loss": confident and opposes_losing,
-                "cut_loss_hit_rate": signals.cut_loss_hit_rate(PROMPT_VERSION),
+                "cut_loss_hit_rate": signals.cut_loss_hit_rate(),
             }
         return reply
 
