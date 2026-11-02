@@ -199,6 +199,11 @@ class SignalLog:
                     "pending": pending,
                     "hit_rate": _rate(target, stop),
                 }
+        for entry in bands.values():
+            buy, sell = entry["buy"], entry["sell"]
+            entry["buy_sell_hit_rate"] = _rate(
+                buy["target"] + sell["target"], buy["stop"] + sell["stop"], BAND_MIN_SCORED
+            )
         return list(bands.values())
 
     def cut_loss_hit_rate(self) -> float | None:
@@ -228,9 +233,9 @@ class SignalLog:
         return {"verdict": verdict, "confidence": confidence, "outcome": outcome or "pending"}
 
 
-def _rate(hits: int, misses: int) -> float | None:
-    """hits / (hits + misses); None under HIT_RATE_MIN_SCORED."""
-    if hits + misses < HIT_RATE_MIN_SCORED:
+def _rate(hits: int, misses: int, min_scored: int = HIT_RATE_MIN_SCORED) -> float | None:
+    """hits / (hits + misses); None under min_scored."""
+    if hits + misses < min_scored:
         return None
     return hits / (hits + misses)
 

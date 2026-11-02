@@ -44,14 +44,18 @@ async def test_counts_signals_by_band_and_verdict_in_ascending_order(server_url,
                 "buy": empty_direction,
                 "sell": {**empty_direction, "stop": 2},
                 "hold": {"quiet": 3, "missed": 1, "pending": 1, "hit_rate": None},
+                "buy_sell_hit_rate": None,
             },
             {
                 "band": 0.8,
                 "buy": {"target": 2, "stop": 1, "expired": 1, "pending": 3, "hit_rate": None},
                 "sell": empty_direction,
                 "hold": {"quiet": 0, "missed": 0, "pending": 0, "hit_rate": None},
+                "buy_sell_hit_rate": None,
             },
         ],
+        "min_confidence": 0.6,
+        "cut_loss_hit_rate": None,
     }
 
 
@@ -118,3 +122,42 @@ async def test_a_bad_interval_is_rejected(server_url):
     result = await call_tool(server_url(FakeFetcher()), "get_track_record", {"interval": "2d"})
 
     assert result.is_error
+
+
+async def test_buy_sell_hit_rate_combines_both_directions_and_is_null_at_29_scored_and_set_at_30(server_url, tmp_path):
+    seeds = [
+        _seed({"target": 10, "stop": 5, "expired": 3, None: 3}, confidence=0.7),
+        _seed({"target": 5, "stop": 9}, verdict="sell", confidence=0.7),
+        _seed({"target": 10, "stop": 5}, confidence=0.8),
+        _seed({"target": 5, "stop": 10}, verdict="sell", confidence=0.8),
+        _seed({"quiet": 30}, verdict="hold", confidence=0.8),
+    ]
+    low, high = (await _track_record(server_url, tmp_path, seeds))["bands"]
+
+    assert low["buy_sell_hit_rate"] is None
+    assert high["buy_sell_hit_rate"] == pytest.approx(0.5)
+
+
+@pytest.mark.parametrize(
+    ("args", "buy_sell_hit_rates"),
+    [
+        ({}, [pytest.approx(0.2), pytest.approx(0.6)]),
+        ({"ticker": "msft"}, [pytest.approx(0.2)]),
+        ({"interval": "1d"}, [pytest.approx(0.6)]),
+        ({"ticker": "nope"}, []),
+    ],
+)
+async def test_min_confidence_and_cut_loss_hit_rate_are_server_wide_while_buy_sell_hit_rate_follows_filters(
+    server_url, tmp_path, args, buy_sell_hit_rates
+):
+    seeds = [
+        # Band 0.6 is under break-even, so the Minimum Confidence is band 0.7.
+        _seed({"target": 6, "stop": 24}, confidence=0.6, ticker="MSFT", interval="1h"),
+        _seed({"target": 15, "stop": 15}, verdict="sell", confidence=0.7, cut_loss=1),
+        _seed({"target": 9, "stop": 1}, confidence=0.7, cut_loss=1),
+    ]
+    reply = await _track_record(server_url, tmp_path, seeds, args)
+
+    assert reply["min_confidence"] == 0.7
+    assert reply["cut_loss_hit_rate"] == pytest.approx(0.6)
+    assert [band["buy_sell_hit_rate"] for band in reply["bands"]] == buy_sell_hit_rates

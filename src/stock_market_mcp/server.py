@@ -212,13 +212,15 @@ def build_server(
 
     @audited_tool
     def get_track_record(ticker: str | None = None, interval: Interval | None = None) -> dict:
-        """Track Record: how the current prompt version's Signals turned out, from the server's Signal log; no market data or classifier call. ticker and/or interval narrow it; both are echoed back (null when not given) with prompt_version. bands lists each 0.1 Confidence band that has Signals, ascending, as band (its lower bound: 0.6 for 0.6-0.69) with buy and sell each {target, stop, expired, pending, hit_rate: Targets / (Targets + Stops)} and hold {quiet, missed, pending, hit_rate: Quiet / (Quiet + Missed)}; Expired and pending are counted but left out of hit_rate, which is null until enough are scored. Signals that can never be scored (no default Trade Plan) are left out. A filter matching nothing gives an empty bands list."""
+        """Track Record: how the current prompt version's Signals turned out, from the server's Signal log; no market data or classifier call. ticker and/or interval narrow it; both are echoed back (null when not given) with prompt_version. bands lists each 0.1 Confidence band that has Signals, ascending, as band (its lower bound: 0.6 for 0.6-0.69) with buy and sell each {target, stop, expired, pending, hit_rate: Targets / (Targets + Stops)} and hold {quiet, missed, pending, hit_rate: Quiet / (Quiet + Missed)}, and buy_sell_hit_rate: buy and sell Targets / (Targets + Stops) together, the rate the Minimum Confidence is set from; Expired and pending are counted but left out of each Hit Rate, which is null until enough are scored (more for buy_sell_hit_rate). min_confidence and cut_loss_hit_rate are the server-wide values get_signal reports, ignoring ticker and interval. Signals that can never be scored (no default Trade Plan) are left out. A filter matching nothing gives an empty bands list."""
         ticker = ticker.upper() if ticker is not None else None
         return {
             "prompt_version": PROMPT_VERSION,
             "ticker": ticker,
             "interval": interval,
             "bands": signal_log.track_record(ticker, interval),
+            "min_confidence": signal_log.min_confidence(),
+            "cut_loss_hit_rate": signal_log.cut_loss_hit_rate(),
         }
 
     @audited_tool
