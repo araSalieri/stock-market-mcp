@@ -1,6 +1,6 @@
 # Classifier sees the Position, so it can call a Cut Loss
 
-Supersedes ADR-0004. The `get_signal` prompt now carries the Position for a held ticker (Direction, average cost, Unrealised P&L % at the Price; no quantity) and `Position: none` otherwise, so the Verdict on a held ticker is about the holding. A Cut Loss is a sell on a losing long or a buy on a losing short at or above the Minimum Confidence. We chose this so the classifier, not the agent, judges whether to cut, at the cost of the single yardstick ADR-0004 kept.
+Supersedes ADR-0004. The `get_signal` prompt now carries the Position for a held ticker (Direction, average cost, Unrealised P&L % at the Price; no quantity) and `"position": null` otherwise, so the Verdict on a held ticker is about the holding. A Cut Loss is a sell on a losing long or a buy on a losing short at or above the Minimum Confidence. We chose this so the classifier, not the agent, judges whether to cut, at the cost of the single yardstick ADR-0004 kept.
 
 ## Considered Options
 
