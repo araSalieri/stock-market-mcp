@@ -1,7 +1,6 @@
-"""Tests for get_signal: the Signal and its Trade Plan through the MCP surface, plan argument checks, the TTL cache, the Decisions transport, and the three-tool surface."""
+"""Tests for get_signal over MCP: one happy path, argument checks, error wrapping, the Decisions transport, and the tool surface; Signal rules are tested on SignalMaker."""
 
 import json
-import time
 from datetime import UTC, datetime
 
 import pytest
@@ -25,10 +24,6 @@ from stock_market_mcp.classifier import (
     SignalContractError,
     classifier_model_id,
 )
-
-# Short TTL so tests can cross the expiry window without waiting on real timeouts.
-TEST_SIGNAL_TTL = 0.2
-
 
 def test_classifier_model_id_default_and_env_override(monkeypatch):
     monkeypatch.delenv("SMM_CLASSIFIER_MODEL", raising=False)
@@ -168,35 +163,6 @@ async def test_other_tools_keep_working_without_openrouter_key(server_url, monke
 
     assert not result.is_error
     assert "190.0" in text_of(result)
-
-
-async def test_second_signal_within_ttl_is_served_from_cache(server_url):
-    classifier = FakeClassifier()
-    fetcher = FakeFetcher(history=fake_history())
-    url = server_url(fetcher, classifier=classifier)
-
-    first = await call_tool(url, "get_signal", {"ticker": "AAPL", "period": "1mo"})
-    second = await call_tool(url, "get_signal", {"ticker": "AAPL", "period": "1mo"})
-
-    assert not first.is_error
-    assert not second.is_error
-    assert text_of(second) == text_of(first)  # identical verdict inside the window
-    assert len(classifier.prompts) == 1  # second call never touched the classifier
-
-
-async def test_signal_after_ttl_expiry_reinvokes_classifier(server_url):
-    classifier = FakeClassifier()
-    fetcher = FakeFetcher(history=fake_history())
-    url = server_url(fetcher, classifier=classifier, signal_ttl=TEST_SIGNAL_TTL)
-
-    first = await call_tool(url, "get_signal", {"ticker": "AAPL", "period": "1mo"})
-    time.sleep(TEST_SIGNAL_TTL + 0.1)
-    second = await call_tool(url, "get_signal", {"ticker": "AAPL", "period": "1mo"})
-
-    assert not first.is_error
-    assert not second.is_error
-    assert len(classifier.prompts) == 2  # window expired: classifier ran again
-    assert text_of(second) == text_of(first)
 
 
 class FakeResponse:
@@ -399,129 +365,12 @@ def test_provider_http_error_is_loud_and_never_retried(monkeypatch):
     assert len(posts) == 1
 
 
-async def test_any_ticker_casing_shares_one_history_cache_entry(server_url):
-    fetcher = FakeFetcher(history=fake_history())
-    url = server_url(fetcher, classifier=FakeClassifier())
-
-    await call_tool(url, "get_signal", {"ticker": "aapl", "period": "1mo"})
-    await call_tool(url, "get_signal", {"ticker": "AAPL", "period": "1mo"})
-
-    assert fetcher.history_calls == [("AAPL", "1mo", "5m", False)]
-
-
-async def test_failed_signal_is_never_cached(server_url):
-    classifier = FakeClassifier(error=RuntimeError("openrouter 500"))
-    fetcher = FakeFetcher(history=fake_history())
-    url = server_url(fetcher, classifier=classifier)
-
-    first = await call_tool(url, "get_signal", {"ticker": "AAPL", "period": "1mo"})
-    second = await call_tool(url, "get_signal", {"ticker": "AAPL", "period": "1mo"})
-
-    assert first.is_error
-    assert "openrouter 500" in text_of(first)
-    assert second.is_error  # failure is retried, not pinned to the ticker
-    assert "openrouter 500" in text_of(second)
-    assert len(classifier.prompts) == 2  # the failed call was not cached
-
-
-# --- Trade Plan attached to the Signal (ticket #21) ---
+# --- Trade Plan arguments (ticket #21) ---
 
 
 def _signal(verdict, confidence=0.7):
     return {"verdict": verdict, "confidence": confidence,
             "rationale": "test", "data_date": "2024-02-29T00:00:00"}
-
-
-async def test_buy_carries_a_long_trade_plan(server_url):
-    # Entry 100, ATR 2: Stop = 100 - 2*2 = 96, Target = 100 + 2*(100 - 96) = 108.
-    result = await call_tool(
-        server_url(FakeFetcher(history=flat_history()), classifier=FakeClassifier(_signal("buy"))),
-        "get_signal",
-        {"ticker": "AAPL"},
-    )
-
-    assert not result.is_error, text_of(result)
-    assert json.loads(text_of(result)) == {
-        **_signal("buy"),
-        "price": 100.0,
-        "hit_rate": None,
-        "min_confidence": 0.6,
-        "trade_plan": {
-            "direction": "long",
-            "entry": 100.0,
-            "stop": pytest.approx(96.0),
-            "target": pytest.approx(108.0),
-            "atr": pytest.approx(2.0),
-            "atr_multiple": 2.0,
-            "reward_ratio": 2.0,
-        },
-    }
-
-
-async def test_sell_carries_a_short_trade_plan(server_url):
-    # Entry 100, ATR 2: Stop = 100 + 2*2 = 104, Target = 100 - 2*(104 - 100) = 92.
-    result = await call_tool(
-        server_url(FakeFetcher(history=flat_history()), classifier=FakeClassifier(_signal("sell"))),
-        "get_signal",
-        {"ticker": "AAPL"},
-    )
-
-    assert not result.is_error, text_of(result)
-    payload = json.loads(text_of(result))
-    plan = payload["trade_plan"]
-    assert plan["direction"] == "short"
-    assert plan["entry"] == 100.0
-    assert payload["price"] == 100.0
-    assert plan["stop"] == pytest.approx(104.0)
-    assert plan["target"] == pytest.approx(92.0)
-
-
-async def test_hold_has_no_trade_plan_but_carries_the_price(server_url):
-    result = await call_tool(
-        server_url(FakeFetcher(history=flat_history(last_close=123.5)), classifier=FakeClassifier(_signal("hold"))),
-        "get_signal",
-        {"ticker": "AAPL"},
-    )
-
-    assert not result.is_error, text_of(result)
-    assert json.loads(text_of(result)) == {
-        **_signal("hold"), "price": 123.5, "hit_rate": None, "min_confidence": 0.6, "trade_plan": None,
-    }
-
-
-@pytest.mark.parametrize("verdict", ["buy", "sell"])
-async def test_buy_or_sell_below_default_min_confidence_has_no_trade_plan(server_url, verdict):
-    result = await call_tool(
-        server_url(FakeFetcher(history=flat_history()), classifier=FakeClassifier(_signal(verdict, 0.59))),
-        "get_signal",
-        {"ticker": "AAPL"},
-    )
-
-    assert not result.is_error, text_of(result)
-    assert json.loads(text_of(result)) == {
-        **_signal(verdict, 0.59), "price": 100.0, "hit_rate": None, "min_confidence": 0.6, "trade_plan": None,
-    }
-
-
-# Entry 100, ATR 2, atr_multiple 1.5, reward_ratio 3:
-# long Stop = 100 - 1.5*2 = 97, Target = 100 + 3*(100-97) = 109;
-# short Stop = 100 + 1.5*2 = 103, Target = 100 - 3*(103-100) = 91.
-@pytest.mark.parametrize(("verdict", "stop", "target"), [("buy", 97.0, 109.0), ("sell", 103.0, 91.0)])
-async def test_custom_atr_multiple_and_reward_ratio_change_the_plan_and_are_echoed(
-    server_url, verdict, stop, target
-):
-    result = await call_tool(
-        server_url(FakeFetcher(history=flat_history()), classifier=FakeClassifier(_signal(verdict))),
-        "get_signal",
-        {"ticker": "AAPL", "atr_multiple": 1.5, "reward_ratio": 3},
-    )
-
-    assert not result.is_error, text_of(result)
-    plan = json.loads(text_of(result))["trade_plan"]
-    assert plan["stop"] == pytest.approx(stop)
-    assert plan["target"] == pytest.approx(target)
-    assert plan["atr_multiple"] == 1.5
-    assert plan["reward_ratio"] == 3
 
 
 async def test_exactly_ten_is_accepted_and_ints_echo_as_floats(server_url):
@@ -569,51 +418,6 @@ async def test_non_number_plan_argument_fails_before_the_classifier(server_url, 
     assert result.is_error
     assert arg in text_of(result)
     assert classifier.prompts == []
-
-
-# Entry 1, ATR 2: long Stop = 1 - 2*2 = -3; short Stop = 5, Target = 1 - 2*(5 - 1) = -7.
-@pytest.mark.parametrize("verdict", ["buy", "sell"])
-async def test_non_positive_plan_price_is_a_loud_tool_error(server_url, verdict):
-    result = await call_tool(
-        server_url(FakeFetcher(history=flat_history(close=1.0)), classifier=FakeClassifier(_signal(verdict))),
-        "get_signal",
-        {"ticker": "AAPL"},
-    )
-
-    assert result.is_error
-    assert "non-positive" in text_of(result)
-
-
-@pytest.mark.parametrize("verdict", ["buy", "sell", "hold"])
-async def test_nan_last_close_is_a_loud_tool_error(server_url, verdict):
-    classifier = FakeClassifier(_signal(verdict))
-    result = await call_tool(
-        server_url(FakeFetcher(history=flat_history(last_close=float("nan"))), classifier=classifier),
-        "get_signal",
-        {"ticker": "AAPL"},
-    )
-
-    assert result.is_error
-    assert "non-finite close" in text_of(result)
-    assert classifier.prompts == []
-
-
-async def test_cached_signal_carries_the_price_and_a_recomputed_plan(server_url):
-    # atr_multiple 1: Stop = 100 - 1*2 = 98, Target = 100 + 2*(100 - 98) = 104.
-    classifier = FakeClassifier(_signal("buy"))
-    url = server_url(FakeFetcher(history=flat_history()), classifier=classifier)
-
-    first = await call_tool(url, "get_signal", {"ticker": "AAPL"})
-    second = await call_tool(url, "get_signal", {"ticker": "AAPL", "atr_multiple": 1})
-
-    assert not first.is_error and not second.is_error
-    assert json.loads(text_of(first))["trade_plan"]["stop"] == pytest.approx(96.0)
-    payload = json.loads(text_of(second))
-    assert payload["price"] == 100.0
-    plan = payload["trade_plan"]
-    assert plan["stop"] == pytest.approx(98.0)
-    assert plan["target"] == pytest.approx(104.0)
-    assert len(classifier.prompts) == 1
 
 
 # --- Tool surface (ticket #22) ---
@@ -670,19 +474,6 @@ async def test_interval_outside_the_allowlist_is_a_tool_error(server_url):
     assert classifier.prompts == []
 
 
-async def test_prompt_carries_the_interval(server_url):
-    classifier = FakeClassifier(_signal("hold"))
-    await call_tool(
-        server_url(FakeFetcher(history=intraday_history()), classifier=classifier),
-        "get_signal",
-        {"ticker": "AAPL", "interval": "5m"},
-    )
-
-    payload = json.loads(classifier.prompts[0])
-    assert payload["interval"] == "5m"
-    assert payload["period"] == "1mo"
-
-
 async def test_intraday_data_date_is_the_latest_bars_timestamp(server_url, monkeypatch):
     # Real transport: data_date comes from the prompt's last row. The fake's 60th
     # 5m bar opens 2024-03-01 13:55 WIB, given in the exchange's offset as scan does.
@@ -726,31 +517,3 @@ async def test_daily_data_date_matches_scans_for_the_same_last_bar(server_url, m
     assert scan.structured_content is not None
     assert json.loads(text_of(signal))["data_date"] == scan.structured_content["result"][0]["data_date"]
     assert json.loads(text_of(signal))["data_date"] == "2024-03-15T00:00:00+07:00"
-
-
-async def test_intraday_trade_plan_uses_the_intraday_atr(server_url):
-    # 5m bars with High/Low 0.25 from a flat 100 close: ATR(14) is 0.5.
-    # Stop = 100 - 2*0.5 = 99, Target = 100 + 2*(100 - 99) = 102.
-    result = await call_tool(
-        server_url(FakeFetcher(history=intraday_history()), classifier=FakeClassifier(_signal("buy"))),
-        "get_signal",
-        {"ticker": "BBCA.JK", "interval": "5m"},
-    )
-
-    assert not result.is_error, text_of(result)
-    plan = json.loads(text_of(result))["trade_plan"]
-    assert plan["atr"] == pytest.approx(0.5)
-    assert plan["stop"] == pytest.approx(99.0)
-    assert plan["target"] == pytest.approx(102.0)
-
-
-async def test_default_call_uses_5m_bars_over_a_month(server_url):
-    fetcher = FakeFetcher(history=flat_history())
-    classifier = FakeClassifier(_signal("buy"))
-    result = await call_tool(server_url(fetcher, classifier=classifier), "get_signal", {"ticker": "AAPL"})
-
-    assert not result.is_error, text_of(result)
-    assert fetcher.history_calls == [("AAPL", "1mo", "5m", False)]
-    payload = json.loads(classifier.prompts[0])
-    assert (payload["period"], payload["interval"]) == ("1mo", "5m")
-    assert payload["rows"][-1]["Date"].startswith("2024-02-29")

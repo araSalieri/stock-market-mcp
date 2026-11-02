@@ -4,7 +4,7 @@ import json
 from typing import cast
 
 import pytest
-from fakes import FakeClassifier, FakeFetcher, call_tool, flat_history, seed_signals, text_of
+from fakes import FakeClassifier, FakeFetcher, flat_history, seed_signals
 
 from stock_market_mcp.signals import SignalLog
 
@@ -90,49 +90,48 @@ def test_signal_without_a_default_plan_stays_pending(tmp_path):
     assert _outcome(tmp_path, "buy", first=first, scored_on=flat_history(close=1.0, rows=90)) == "pending"
 
 
-async def test_second_get_signal_call_scores_the_first(server_url):
+def test_second_call_scores_the_first_before_the_classifier_sees_it(signal_maker):
     classifier = FakeClassifier(replies=[_signal("buy"), _signal("hold")])
-    url = server_url(FakeFetcher(history=[flat_history(), _later(FLAT, (109.0, 99.0))]), classifier=classifier, signal_ttl=0, history_ttl=0)
+    maker = signal_maker(FakeFetcher(history=[flat_history(), _later(FLAT, (109.0, 99.0))]), classifier, ttl=0)
 
-    await call_tool(url, "get_signal", {"ticker": "AAPL", "interval": "1d"})
-    await call_tool(url, "get_signal", {"ticker": "AAPL", "interval": "1d"})
+    maker.make("AAPL", "1d")
+    maker.make("AAPL", "1d")
 
     assert json.loads(classifier.prompts[1])["previous_signal"]["outcome"] == "target"
 
 
-async def _hit_rate(server_url, tmp_path, *seeds, reply="buy"):
-    """hit_rate in the reply after seeding (outcomes, seed_signals kwargs) pairs."""
+def _hit_rate(signal_maker, tmp_path, *seeds, reply="buy"):
+    """hit_rate in the SignalMaker reply after seeding (outcomes, seed_signals kwargs) pairs."""
     db = tmp_path / "s.db"
-    url = server_url(FakeFetcher(history=flat_history()), classifier=FakeClassifier(_signal(reply)), db_path=db)
+    maker = signal_maker(FakeFetcher(history=flat_history()), FakeClassifier(_signal(reply)), db_path=db)
     for outcomes, kwargs in seeds:
         seed_signals(db, outcomes, **kwargs)
-    result = await call_tool(url, "get_signal", {"ticker": "AAPL", "interval": "1d"})
-    return json.loads(text_of(result))["hit_rate"]
+    return maker.make("AAPL", "1d")["hit_rate"]
 
 
-async def test_hit_rate_is_targets_over_targets_and_stops_ignoring_expired(server_url, tmp_path):
+def test_hit_rate_is_targets_over_targets_and_stops_ignoring_expired(signal_maker, tmp_path):
     seeds = [(["target"] * 3 + ["stop"] * 7 + ["expired"] * 5, {}), (["stop"], {"verdict": "sell"})]
-    assert await _hit_rate(server_url, tmp_path, *seeds) == pytest.approx(3 / 11)
+    assert _hit_rate(signal_maker, tmp_path, *seeds) == pytest.approx(3 / 11)
 
 
-async def test_hit_rate_is_null_under_10_scored(server_url, tmp_path):
-    assert await _hit_rate(server_url, tmp_path, (["target"] * 9 + ["expired"] * 5, {})) is None
+def test_hit_rate_is_null_under_10_scored(signal_maker, tmp_path):
+    assert _hit_rate(signal_maker, tmp_path, (["target"] * 9 + ["expired"] * 5, {})) is None
 
 
-async def test_hit_rate_counts_only_the_current_prompt_version(server_url, tmp_path):
+def test_hit_rate_counts_only_the_current_prompt_version(signal_maker, tmp_path):
     seeds = [(["target"] * 9, {}), (["stop"] * 10, {"prompt_version": 0})]
-    assert await _hit_rate(server_url, tmp_path, *seeds) is None
+    assert _hit_rate(signal_maker, tmp_path, *seeds) is None
 
 
-async def test_hold_reply_has_the_hold_hit_rate(server_url, tmp_path):
+def test_hold_reply_has_the_hold_hit_rate(signal_maker, tmp_path):
     seeds = [(["quiet"] * 3 + ["missed"] * 7, {"verdict": "hold"}), (["target"] * 10, {})]
-    assert await _hit_rate(server_url, tmp_path, *seeds, reply="hold") == pytest.approx(3 / 10)
+    assert _hit_rate(signal_maker, tmp_path, *seeds, reply="hold") == pytest.approx(3 / 10)
 
 
-async def test_buy_reply_ignores_scored_holds(server_url, tmp_path):
+def test_buy_reply_ignores_scored_holds(signal_maker, tmp_path):
     seeds = [(["target"] * 9, {}), (["quiet"] * 10, {"verdict": "hold"})]
-    assert await _hit_rate(server_url, tmp_path, *seeds) is None
+    assert _hit_rate(signal_maker, tmp_path, *seeds) is None
 
 
-async def test_hold_hit_rate_is_null_under_10_scored_holds(server_url, tmp_path):
-    assert await _hit_rate(server_url, tmp_path, (["quiet"] * 9, {"verdict": "hold"}), reply="hold") is None
+def test_hold_hit_rate_is_null_under_10_scored_holds(signal_maker, tmp_path):
+    assert _hit_rate(signal_maker, tmp_path, (["quiet"] * 9, {"verdict": "hold"}), reply="hold") is None
