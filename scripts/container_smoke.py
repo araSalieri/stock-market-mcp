@@ -47,7 +47,7 @@ ROOT = Path(__file__).resolve().parent.parent
 # Without a project, compose derives it from ROOT, as in the README run.
 COMPOSE = ["docker", "compose", *(["-p", PROJECT] if PROJECT else [])]
 RETRIES = 30  # one-second tries for the server to come back after the restart
-TOOLS = ["get_fundamentals", "get_portfolio", "get_quote", "get_signal", "get_watchlists", "scan", "set_position", "set_watchlist"]
+TOOLS = ["get_fundamentals", "get_portfolio", "get_quote", "get_signal", "get_track_record", "get_watchlists", "scan", "set_position", "set_watchlist"]
 
 KEY_SETUP = (
     "STOP: real-classifier smoke needs an OpenRouter key on the host.\n"
@@ -134,8 +134,13 @@ def check_signal(payload, interval):
     plan = payload.pop("trade_plan")
     price = payload.pop("price")
     assert isinstance(price, (int, float)) and math.isfinite(price), price
+    min_confidence = payload.pop("min_confidence")
+    payload.pop("hit_rate")
+    payload.pop("position", None)
     verdict = validate_signal(payload)
-    assert (plan is None) == (verdict["verdict"] == "hold"), plan
+    # A buy or sell below the Minimum Confidence has no Trade Plan either.
+    assert plan is None or verdict["verdict"] != "hold", plan
+    assert plan is None or (min_confidence is not None and verdict["confidence"] >= min_confidence), plan
     if interval != "1d":
         # Intraday bars carry a time and the exchange offset.
         stamp = datetime.fromisoformat(verdict["data_date"])
@@ -198,6 +203,9 @@ async def delete_watchlist(session):
 async def check_signals(session):
     for interval in ("1d", "5m"):
         check_signal(await call(session, "get_signal", {"ticker": TICKER, "interval": interval}), interval)
+    record = await call(session, "get_track_record", {"ticker": TICKER})
+    assert "bands" in record and "min_confidence" in record, record
+    print(f"get_track_record: {len(record['bands'])} bands, min_confidence {record['min_confidence']}")
 
 
 async def main():
