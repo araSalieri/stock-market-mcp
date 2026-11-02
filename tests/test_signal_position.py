@@ -102,9 +102,11 @@ async def test_changing_the_position_beyond_quantity_reclassifies(server_url, tm
 
     await get_signal(url, fetcher)
     await set_position(url, "AAPL", **change)
-    await get_signal(url, fetcher)
+    second = await get_signal(url, fetcher)
 
     assert len(classifier.prompts) == 2
+    if change == {"quantity": 0}:
+        assert "position" not in second
 
 
 def _prompt(classifier, n=-1) -> dict:

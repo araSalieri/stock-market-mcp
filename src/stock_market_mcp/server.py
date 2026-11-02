@@ -237,6 +237,11 @@ def _unrealised_pnl(position: dict, price: float) -> dict:
     }
 
 
+def _losing(pnl: dict) -> bool:
+    """Whether an Unrealised P&L is a loss; break-even and a non-finite (null) amount are not."""
+    return pnl["unrealised_pnl"] is not None and pnl["unrealised_pnl"] < 0
+
+
 def _scan_daily(df: pd.DataFrame, now: datetime) -> dict:
     """Daily Scan numbers; the previous day is the last bar dated before today in the exchange timezone."""
     index = cast("pd.DatetimeIndex", df.index)
@@ -375,9 +380,10 @@ def build_server(
         # Read before the classifier, so a broken Portfolio file fails before a classifier call.
         position = portfolio.load().get(ticker)
         # Quantity stays out, so size doesn't sway the Verdict or bust the cache (ADR-0005).
-        held = None
+        held = pnl = None
         if position is not None:
-            pct = _unrealised_pnl(position, price)["unrealised_pnl_pct"]
+            pnl = _unrealised_pnl(position, price)
+            pct = pnl["unrealised_pnl_pct"]
             held = {"direction": position["direction"], "avg_cost": position["avg_cost"], "unrealised_pnl_pct": pct}
         # The prompt without the previous Signal is the cache key, so storing a Signal doesn't defeat the cache.
         prompt = build_signal_prompt(ticker, period, df, interval=interval, position=held)
@@ -395,11 +401,10 @@ def build_server(
         # Before the Signal is stored, so a plan error doesn't fail a call that already logged.
         plan = _trade_plan(df, price, direction, atr_multiple, reward_ratio) if direction else None
         # Stored at any Confidence for the Cut Loss Hit Rate; the reply's cut_loss also needs the Minimum Confidence.
-        against_loss = None
-        if position is not None:
-            sign = 1 if position["direction"] == "long" else -1
+        opposes_losing = None
+        if position is not None and pnl is not None:
             opposes = _VERDICT_DIRECTION.get(signal["verdict"]) not in (None, position["direction"])
-            against_loss = opposes and sign * (price - position["avg_cost"]) < 0
+            opposes_losing = opposes and _losing(pnl)
         if fresh:
             long_stop, long_target = _default_plan(df, price, "long")
             short_stop, short_target = _default_plan(df, price, "short")
@@ -415,16 +420,16 @@ def build_server(
                 long_target=long_target,
                 short_stop=short_stop,
                 short_target=short_target,
-                cut_loss=against_loss,
+                cut_loss=opposes_losing,
             )
             # Cached only once stored, so a failed store is retried instead of served from the cache.
             signal_cache.put(prompt, signal)
         reply = {**signal, "price": price, "hit_rate": hit_rate, "min_confidence": min_confidence, "trade_plan": plan}
-        if position is not None:
+        if position is not None and pnl is not None:
             reply["position"] = {
                 **position,
-                **_unrealised_pnl(position, price),
-                "cut_loss": confident and against_loss,
+                **pnl,
+                "cut_loss": confident and opposes_losing,
                 "cut_loss_hit_rate": signals.cut_loss_hit_rate(PROMPT_VERSION),
             }
         return reply
