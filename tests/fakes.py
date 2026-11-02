@@ -5,7 +5,6 @@ from mcp import ClientSession, types
 from mcp.client.streamable_http import streamable_http_client
 from mcp.types import CallToolResult
 
-from stock_market_mcp.data import DataFetcher
 from stock_market_mcp.signals import SignalLog
 
 
@@ -56,7 +55,7 @@ def fake_history(rows: int = 60) -> pd.DataFrame:
     )
 
 
-class FakeFetcher(DataFetcher):
+class FakeFetcher:
     def __init__(self, quotes=None, error=None):
         self.quotes = quotes or {}
         self.error = error
@@ -73,8 +72,7 @@ class FakeFetcher(DataFetcher):
 
     def fetch_fundamentals(self, ticker):
         raise AssertionError("get_quote tests never fetch fundamentals")
-    # fetch_history intentionally not overridden: relies on the Protocol default,
-    # which test_get_quote.py's loud-failure test exercises end to end.
+    # No fetch_history: test_get_quote.py checks a quote-only fake reaching get_signal fails loudly.
 
 
 class SignalFakeFetcher:
