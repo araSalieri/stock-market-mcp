@@ -161,6 +161,7 @@ async def test_server_lists_its_tools_and_get_signal_says_advisory_and_price(ser
         "get_portfolio",
         "get_quote",
         "get_signal",
+        "get_track_record",
         "get_watchlists",
         "scan",
         "set_position",

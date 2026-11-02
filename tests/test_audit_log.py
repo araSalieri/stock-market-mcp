@@ -35,6 +35,7 @@ EVERY_TOOL_ARGS = {
     "get_watchlists": {},
     "set_position": {"ticker": "AAPL", "direction": "long", "quantity": 1, "avg_cost": 1.0},
     "get_portfolio": {},
+    "get_track_record": {},
 }
 
 
