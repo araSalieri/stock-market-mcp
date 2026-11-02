@@ -2,6 +2,8 @@
 
 import json
 
+import pytest
+
 from stock_market_mcp.classifier import PROMPT_VERSION
 
 from fakes import FakeClassifier, FakeFetcher, call_tool, seed_signals, text_of
@@ -51,3 +53,19 @@ async def test_counts_signals_by_band_and_verdict_in_ascending_order(server_url,
             },
         ],
     }
+
+
+@pytest.mark.parametrize(
+    ("verdict", "hit", "miss"), [("buy", "target", "stop"), ("sell", "target", "stop"), ("hold", "quiet", "missed")]
+)
+async def test_hit_rate_is_null_at_9_scored_and_set_at_10_with_expired_and_pending_left_out(
+    server_url, tmp_path, verdict, hit, miss
+):
+    seeds = [
+        _seed({hit: 3, miss: 6, "expired": 5, None: 5}, verdict=verdict, confidence=0.5),
+        _seed({hit: 4, miss: 6, "expired": 5, None: 5}, verdict=verdict, confidence=0.7),
+    ]
+    low, high = (await _track_record(server_url, tmp_path, seeds))["bands"]
+
+    assert low[verdict]["hit_rate"] is None
+    assert high[verdict]["hit_rate"] == pytest.approx(0.4)
