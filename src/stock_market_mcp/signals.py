@@ -1,6 +1,9 @@
 """Signal log: one row per fresh classifier answer in the server database (ADR-0003)."""
 
 import os
+import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import cast
 
 import pandas as pd
@@ -17,6 +20,7 @@ BAND_MIN_SCORED = 30
 MIN_CONFIDENCE = 0.6
 
 # Outcome is null while pending; plan prices are the default Trade Plans, null when one has non-positive prices.
+# cut_loss: 1 when the Verdict opposed a losing Position at any Confidence, 0 when held otherwise, null when not held.
 SCHEMA = """CREATE TABLE IF NOT EXISTS signals (
     id INTEGER PRIMARY KEY,
     ticker TEXT NOT NULL,
@@ -31,7 +35,8 @@ SCHEMA = """CREATE TABLE IF NOT EXISTS signals (
     short_stop REAL,
     short_target REAL,
     outcome TEXT,
-    scored_at TEXT
+    scored_at TEXT,
+    cut_loss INTEGER
 )"""
 
 
@@ -39,11 +44,20 @@ class SignalLog:
     def __init__(self, path: str | os.PathLike):
         self.path = path
 
+    @contextmanager
+    def _open(self) -> Iterator[sqlite3.Connection]:
+        """A transaction on the signals table, adding cut_loss to a file from before it existed (null on old rows)."""
+        with transaction(self.path, SCHEMA) as conn:
+            # shortcut: two servers upgrading one file at once can fail one call on a duplicate column; retry succeeds.
+            if "cut_loss" not in {column[1] for column in conn.execute("PRAGMA table_info(signals)")}:
+                conn.execute("ALTER TABLE signals ADD COLUMN cut_loss INTEGER")
+            yield conn
+
     def add(self, **signal: object) -> None:
         """Store one Signal; keys are the column names, Outcome and scored-at left null."""
         columns = ", ".join(signal)
         marks = ", ".join(f":{k}" for k in signal)
-        with transaction(self.path, SCHEMA) as conn:
+        with self._open() as conn:
             conn.execute(f"INSERT INTO signals ({columns}) VALUES ({marks})", signal)
 
     def score(self, ticker: str, interval: str, history: pd.DataFrame, scored_at: str) -> None:
@@ -51,7 +65,7 @@ class SignalLog:
 
         A Signal whose bar isn't in history, or without enough later bars or a default plan, stays pending.
         """
-        with transaction(self.path, SCHEMA) as conn:
+        with self._open() as conn:
             pending = conn.execute(
                 "SELECT id, data_date, verdict, long_stop, long_target, short_stop, short_target FROM signals "
                 "WHERE ticker = ? AND interval = ? AND outcome IS NULL",
@@ -80,7 +94,7 @@ class SignalLog:
         """
         hold = verdict == "hold"
         hits, misses = ("quiet", "missed") if hold else ("target", "stop")
-        with transaction(self.path, SCHEMA) as conn:
+        with self._open() as conn:
             right, wrong = conn.execute(
                 "SELECT COUNT(*) FILTER (WHERE outcome = ?), COUNT(*) FILTER (WHERE outcome = ?) "
                 "FROM signals WHERE ticker = ? AND interval = ? AND prompt_version = ? "
@@ -97,7 +111,7 @@ class SignalLog:
         Only bands with BAND_MIN_SCORED Targets plus Stops count: MIN_CONFIDENCE while none has that many,
         None when some do but none is above break_even.
         """
-        with transaction(self.path, SCHEMA) as conn:
+        with self._open() as conn:
             bands = conn.execute(
                 # The epsilon keeps 0.6 in band 6 despite float error.
                 "SELECT CAST(confidence * 10 + 1e-9 AS INTEGER) AS band, "
@@ -114,7 +128,7 @@ class SignalLog:
 
     def latest(self, ticker: str, interval: str) -> dict | None:
         """The most recent Signal for the ticker and Interval as the classifier sees it, or None."""
-        with transaction(self.path, SCHEMA) as conn:
+        with self._open() as conn:
             row = conn.execute(
                 "SELECT verdict, confidence, outcome FROM signals WHERE ticker = ? AND interval = ? "
                 "ORDER BY id DESC LIMIT 1",

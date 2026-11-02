@@ -394,6 +394,12 @@ def build_server(
         direction = _VERDICT_DIRECTION.get(signal["verdict"]) if confident else None
         # Before the Signal is stored, so a plan error doesn't fail a call that already logged.
         plan = _trade_plan(df, price, direction, atr_multiple, reward_ratio) if direction else None
+        # Stored at any Confidence for the Cut Loss Hit Rate; the reply's cut_loss also needs the Minimum Confidence.
+        against_loss = None
+        if position is not None:
+            sign = 1 if position["direction"] == "long" else -1
+            opposes = _VERDICT_DIRECTION.get(signal["verdict"]) not in (None, position["direction"])
+            against_loss = opposes and sign * (price - position["avg_cost"]) < 0
         if fresh:
             long_stop, long_target = _default_plan(df, price, "long")
             short_stop, short_target = _default_plan(df, price, "short")
@@ -409,15 +415,13 @@ def build_server(
                 long_target=long_target,
                 short_stop=short_stop,
                 short_target=short_target,
+                cut_loss=against_loss,
             )
             # Cached only once stored, so a failed store is retried instead of served from the cache.
             signal_cache.put(prompt, signal)
         reply = {**signal, "price": price, "hit_rate": hit_rate, "min_confidence": min_confidence, "trade_plan": plan}
         if position is not None:
-            sign = 1 if position["direction"] == "long" else -1
-            opposes = _VERDICT_DIRECTION.get(signal["verdict"]) not in (None, position["direction"])
-            cut_loss = confident and opposes and sign * (price - position["avg_cost"]) < 0
-            reply["position"] = {**position, **_unrealised_pnl(position, price), "cut_loss": cut_loss}
+            reply["position"] = {**position, **_unrealised_pnl(position, price), "cut_loss": confident and against_loss}
         return reply
 
     @audited_tool
