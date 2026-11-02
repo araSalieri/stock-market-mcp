@@ -3,7 +3,6 @@
 import functools
 import inspect
 import logging
-import math
 import os
 import time
 from collections.abc import Callable
@@ -17,7 +16,7 @@ from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import Strict
 
-from stock_market_mcp.bars import Interval, last_value
+from stock_market_mcp.bars import Interval, finite, last_value
 from stock_market_mcp.cache import (
     FUNDAMENTALS_TTL_SECONDS,
     HISTORY_TTL_SECONDS,
@@ -87,10 +86,6 @@ def _audited[**P, R](tool: Callable[P, R]) -> Callable[P, R]:
 # Strict: JSON numbers only; true and "2" are rejected, not coerced.
 StrictNumber = Annotated[float, Strict()]
 
-def _finite(value: float) -> float | None:
-    """JSON has no NaN; an indicator without a value is null."""
-    return value if math.isfinite(value) else None
-
 
 def _scan_daily(df: pd.DataFrame, now: datetime) -> dict:
     """Daily Scan numbers; the previous day is the last bar dated before today in the exchange timezone."""
@@ -110,8 +105,8 @@ def _scan_daily(df: pd.DataFrame, now: datetime) -> dict:
         "prev_high": float(prev["High"]),
         "prev_low": float(prev["Low"]),
         "prev_close": prev_close,
-        "atr_pct": _finite(atr / prev_close * 100),
-        "rsi": _finite(rsi),
+        "atr_pct": finite(atr / prev_close * 100),
+        "rsi": finite(rsi),
     }
 
 
@@ -141,7 +136,7 @@ def _scan_intraday(df: pd.DataFrame, now: datetime, price: float, prev_close: fl
     volume = df["Volume"].to_numpy(dtype=float)
     if not in_session.any():
         pre_market = close[(days == today) & ~regular]
-        gap = _finite(_pct(float(pre_market[-1]), prev_close)) if len(pre_market) else None
+        gap = finite(_pct(float(pre_market[-1]), prev_close)) if len(pre_market) else None
         return {"gap_pct": gap, "relative_volume": None, "vwap_distance_pct": None}
 
     session_volume = float(volume[in_session].sum())
@@ -152,9 +147,9 @@ def _scan_intraday(df: pd.DataFrame, now: datetime, price: float, prev_close: fl
     typical = (df["High"].to_numpy(dtype=float) + df["Low"].to_numpy(dtype=float) + close) / 3
     vwap = float((typical * volume)[in_session].sum()) / session_volume if session_volume else None
     return {
-        "gap_pct": _finite(_pct(float(df["Open"].to_numpy(dtype=float)[in_session][0]), prev_close)),
-        "relative_volume": _finite(session_volume / average) if average else None,
-        "vwap_distance_pct": _finite(_pct(price, vwap)) if vwap else None,
+        "gap_pct": finite(_pct(float(df["Open"].to_numpy(dtype=float)[in_session][0]), prev_close)),
+        "relative_volume": finite(session_volume / average) if average else None,
+        "vwap_distance_pct": finite(_pct(price, vwap)) if vwap else None,
     }
 
 
@@ -288,7 +283,7 @@ def build_server(
             try:
                 quote = fetcher.fetch_quote(ticker)
                 price = float(quote["price"])
-                entry |= {"price": _finite(price), "currency": quote["currency"], **position.unrealised_pnl(price)}
+                entry |= {"price": finite(price), "currency": quote["currency"], **position.unrealised_pnl(price)}
             except Exception as exc:
                 log.exception(_error_line(f"get_portfolio ticker={ticker}", exc))
                 entry["error"] = str(exc)

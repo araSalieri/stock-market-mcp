@@ -1,5 +1,6 @@
 """Price history for one Interval: its period rules and the indicators joined onto the bars."""
 
+import math
 from typing import Literal, NamedTuple, cast
 
 import pandas as pd
@@ -85,6 +86,11 @@ _INDICATOR_DISPATCH = {
 def last_value(name: str, df: pd.DataFrame) -> float:
     """Last value of a single-column indicator over df."""
     return float(_INDICATOR_DISPATCH[name](df).iloc[-1, 0])
+
+
+def finite(value: float) -> float | None:
+    """JSON has no NaN; a non-finite number is null."""
+    return value if math.isfinite(value) else None
 
 
 def history(fetcher: DataFetcher, ticker: str, interval: Interval, period: str | None) -> pd.DataFrame:

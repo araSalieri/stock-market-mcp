@@ -4,6 +4,7 @@ import math
 import os
 from dataclasses import dataclass
 
+from stock_market_mcp.bars import finite
 from stock_market_mcp.db import transaction
 from stock_market_mcp.errors import InputError
 from stock_market_mcp.watchlists import WATCHLIST_MAX_TICKERS
@@ -14,11 +15,6 @@ SCHEMA = """CREATE TABLE IF NOT EXISTS positions (
     quantity REAL NOT NULL,
     avg_cost REAL NOT NULL
 )"""
-
-
-def _finite(value: float) -> float | None:
-    """JSON has no NaN; a non-finite amount is null."""
-    return value if math.isfinite(value) else None
 
 
 @dataclass(frozen=True)
@@ -32,8 +28,8 @@ class Position:
         sign = 1 if self.direction == "long" else -1
         pnl = sign * (price - self.avg_cost) * self.quantity
         return {
-            "unrealised_pnl": _finite(pnl),
-            "unrealised_pnl_pct": _finite(pnl / (self.avg_cost * self.quantity) * 100),
+            "unrealised_pnl": finite(pnl),
+            "unrealised_pnl_pct": finite(pnl / (self.avg_cost * self.quantity) * 100),
         }
 
     def classifier_view(self, price: float) -> dict:
