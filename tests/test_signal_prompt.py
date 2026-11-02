@@ -28,8 +28,22 @@ def test_prompt_payload_has_ticker_period_and_iso_dates():
     payload = json.loads(prompt)
     assert payload["ticker"] == "AAPL"
     assert payload["period"] == "1mo"
-    assert payload["rows"][0]["Date"] == "2024-01-01T00:00:00.000"
-    assert payload["rows"][2]["Date"] == "2024-01-01T02:00:00.000"
+    assert payload["rows"][0]["Date"] == "2024-01-01T00:00:00"
+    assert payload["rows"][2]["Date"] == "2024-01-01T02:00:00"
+
+
+@pytest.mark.parametrize(
+    ("interval", "freq", "last_date"),
+    [("1d", "D", "2024-03-12T00:00:00-04:00"), ("5m", "5min", "2024-03-12T09:40:00-04:00")],
+)
+def test_prompt_dates_keep_the_exchanges_offset_on_every_interval(interval, freq, last_date):
+    start = "2024-03-10" if interval == "1d" else "2024-03-12 09:30"
+    idx = pd.date_range(start, periods=3, freq=freq, tz="America/New_York", name="Date")
+    df = prompt_frame().set_axis(idx)
+
+    payload = json.loads(build_signal_prompt("AAPL", "1mo", df, interval=interval))
+
+    assert payload["rows"][-1]["Date"] == last_date
 
 
 def test_prompt_serializes_nan_indicator_values_as_null():
