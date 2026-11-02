@@ -69,3 +69,24 @@ async def test_hit_rate_is_null_at_9_scored_and_set_at_10_with_expired_and_pendi
 
     assert low[verdict]["hit_rate"] is None
     assert high[verdict]["hit_rate"] == pytest.approx(0.4)
+
+
+async def test_other_prompt_versions_and_signals_that_can_never_be_scored_are_left_out(server_url, tmp_path):
+    seeds = [
+        _seed({"target": 1}, confidence=0.8),
+        _seed({"target": 5}, confidence=0.8, prompt_version=PROMPT_VERSION - 1),
+        _seed({"target": 5}, confidence=0.8, long_plan=False),
+        _seed({"target": 5}, verdict="sell", confidence=0.8, short_plan=False),
+        _seed({"quiet": 5}, verdict="hold", confidence=0.8, short_plan=False),
+        _seed({"quiet": 5}, verdict="hold", confidence=0.8, long_plan=False),
+        _seed({"target": 5}, confidence=0.3, prompt_version=PROMPT_VERSION - 1),
+        # Still scored: a buy only needs the long plan, a sell the short one.
+        _seed({"target": 1}, verdict="sell", confidence=0.8, long_plan=False),
+        _seed({"stop": 1}, confidence=0.8, short_plan=False),
+    ]
+    (band,) = (await _track_record(server_url, tmp_path, seeds))["bands"]
+
+    assert band["band"] == 0.8
+    assert (band["buy"]["target"], band["buy"]["stop"]) == (1, 1)
+    assert band["sell"]["target"] == 1
+    assert band["hold"]["quiet"] == 0
