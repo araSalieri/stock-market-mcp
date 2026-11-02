@@ -61,6 +61,9 @@ class PortfolioStore:
         """Replace the ticker's Position; as many Positions as a Watchlist has tickers."""
         if not (math.isfinite(quantity) and quantity >= 0):
             raise InputError(f"quantity must be a finite number of at least 0, got {quantity}")
+        # Separate from the check above, whose text set_position replies with; the tool deletes on 0 instead.
+        if quantity == 0:
+            raise InputError("quantity 0 is no Position; delete it instead")
         if not (math.isfinite(avg_cost) and avg_cost > 0):
             raise InputError(f"avg_cost must be a finite number above 0, got {avg_cost}")
         with transaction(self.path, SCHEMA) as conn:

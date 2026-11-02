@@ -66,6 +66,7 @@ def test_store_file_that_is_not_a_database_errors_naming_its_path(tmp_path):
         (-1, 1.0, "quantity must be a finite number of at least 0, got -1"),
         (float("inf"), 1.0, "quantity must be a finite number of at least 0, got inf"),
         (float("nan"), 1.0, "quantity must be a finite number of at least 0, got nan"),
+        (0, 1.0, "quantity 0 is no Position; delete it instead"),
         (1, 0, "avg_cost must be a finite number above 0, got 0"),
         (1, -5.0, "avg_cost must be a finite number above 0, got -5.0"),
         (1, float("inf"), "avg_cost must be a finite number above 0, got inf"),
