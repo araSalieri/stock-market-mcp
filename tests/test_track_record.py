@@ -6,7 +6,9 @@ import pytest
 
 from stock_market_mcp.classifier import PROMPT_VERSION
 
-from fakes import FakeClassifier, FakeFetcher, call_tool, seed_signals, text_of
+from fakes import FakeClassifier, FakeFetcher, call_tool, flat_history, seed_signals, text_of
+
+from stock_market_mcp.portfolio import PortfolioStore
 
 
 async def _track_record(server_url, tmp_path, seeds, args=None) -> dict:
@@ -161,3 +163,17 @@ async def test_min_confidence_and_cut_loss_hit_rate_are_server_wide_while_buy_se
     assert reply["min_confidence"] == 0.7
     assert reply["cut_loss_hit_rate"] == pytest.approx(0.6)
     assert [band["buy_sell_hit_rate"] for band in reply["bands"]] == buy_sell_hit_rates
+
+
+async def test_min_confidence_and_cut_loss_hit_rate_match_get_signal(server_url, tmp_path):
+    db = tmp_path / "s.db"
+    seed_signals(db, ["target"] * 6 + ["stop"] * 24, confidence=0.6)
+    seed_signals(db, ["target"] * 18 + ["stop"] * 12, confidence=0.7, cut_loss=1)
+    PortfolioStore(db).set("TSLA", "long", 10, 90.0)
+    url = server_url(FakeFetcher(history=flat_history()), classifier=FakeClassifier(), db_path=db)
+
+    signal = json.loads(text_of(await call_tool(url, "get_signal", {"ticker": "TSLA", "interval": "1d"})))
+    track_record = json.loads(text_of(await call_tool(url, "get_track_record", {})))
+
+    assert track_record["min_confidence"] == signal["min_confidence"] == 0.7
+    assert track_record["cut_loss_hit_rate"] == signal["position"]["cut_loss_hit_rate"] == pytest.approx(0.6)
