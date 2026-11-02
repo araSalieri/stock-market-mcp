@@ -50,7 +50,10 @@ def _error_line(tool: str, exc: BaseException) -> str:
 
 
 def _audited[**P, R](tool: Callable[P, R]) -> Callable[P, R]:
-    """Log one audit line per call: tool name, arguments, ms and outcome, even when the tool raises."""
+    """Log one audit line per call: tool name, arguments, ms and outcome, even when the tool raises.
+
+    Any other exception becomes a ToolError with it as the cause, so the caller sees its message.
+    """
     signature = inspect.signature(tool)
 
     @functools.wraps(tool)
@@ -73,7 +76,7 @@ def _audited[**P, R](tool: Callable[P, R]) -> Callable[P, R]:
             raise
         except Exception as exc:
             log.exception(_error_line(tool.__name__, exc))
-            raise
+            raise ToolError(str(exc)) from exc
         finally:
             ms = round((time.perf_counter() - start) * 1000)
             log.info(" ".join(filter(None, (f"tool={tool.__name__}", fields, f"ms={ms}", f"outcome={outcome}"))))
@@ -346,18 +349,12 @@ def build_server(
     @audited_tool
     def get_quote(ticker: str) -> dict:
         """Current quote for a stock ticker (price and currency)."""
-        try:
-            return fetcher.fetch_quote(ticker)
-        except Exception as exc:
-            raise ToolError(str(exc)) from exc
+        return fetcher.fetch_quote(ticker)
 
     @audited_tool
     def get_fundamentals(ticker: str) -> dict:
         """Key company fundamentals (name, sector, industry, market cap)."""
-        try:
-            return fetcher.fetch_fundamentals(ticker)
-        except Exception as exc:
-            raise ToolError(str(exc)) from exc
+        return fetcher.fetch_fundamentals(ticker)
 
     @audited_tool
     def get_signal(
@@ -372,10 +369,7 @@ def build_server(
             if not 0 < value <= PLAN_ARG_MAX:
                 raise ToolError(f"{name} must be in (0, {PLAN_ARG_MAX}], got {value}")
         period = _period(interval, period)
-        try:
-            df = fetcher.fetch_history(ticker, period, interval)
-        except Exception as exc:
-            raise ToolError(str(exc)) from exc
+        df = fetcher.fetch_history(ticker, period, interval)
         for name in sorted(INDICATOR_ALLOWLIST):
             ind = _indicator_frame(name, df)
             if ind is None:
@@ -388,44 +382,39 @@ def build_server(
         ticker = ticker.upper()
         # The prompt without the previous Signal is the cache key, so storing a Signal doesn't defeat the cache.
         prompt = build_signal_prompt(ticker, period, df, interval=interval)
-        try:
-            # Read before the classifier, so a broken Portfolio file fails before a classifier call; the prompt never sees it (ADR-0004).
-            position = portfolio.load().get(ticker)
-            signals.score(ticker, interval, df, now().isoformat())
-            signal = signal_cache.get(prompt, signal_ttl)
-            fresh = signal is None
-            if fresh:
-                previous = signals.latest(ticker, interval)
-                signal = signal_classifier.classify(prompt if previous is None else with_previous_signal(prompt, previous))
-            # After the cache, so a cached Signal gets the current Minimum Confidence; a new pending Signal changes neither read.
-            min_confidence = signals.min_confidence(PROMPT_VERSION, BREAK_EVEN_HIT_RATE)
-            hit_rate = signals.hit_rate(ticker, interval, PROMPT_VERSION, signal["verdict"])
-            confident = min_confidence is not None and signal["confidence"] >= min_confidence
-            direction = _VERDICT_DIRECTION.get(signal["verdict"]) if confident else None
-            # Before the Signal is stored, so a plan error doesn't fail a call that already logged.
-            plan = _trade_plan(df, price, direction, atr_multiple, reward_ratio) if direction else None
-            if fresh:
-                long_stop, long_target = _default_plan(df, price, "long")
-                short_stop, short_target = _default_plan(df, price, "short")
-                signals.add(
-                    ticker=ticker,
-                    interval=interval,
-                    prompt_version=PROMPT_VERSION,
-                    data_date=cast("pd.Timestamp", df.index[-1]).isoformat(),
-                    verdict=signal["verdict"],
-                    confidence=signal["confidence"],
-                    price=price,
-                    long_stop=long_stop,
-                    long_target=long_target,
-                    short_stop=short_stop,
-                    short_target=short_target,
-                )
-                # Cached only once stored, so a failed store is retried instead of served from the cache.
-                signal_cache.put(prompt, signal)
-        except ToolError:
-            raise
-        except Exception as exc:
-            raise ToolError(str(exc)) from exc
+        # Read before the classifier, so a broken Portfolio file fails before a classifier call; the prompt never sees it (ADR-0004).
+        position = portfolio.load().get(ticker)
+        signals.score(ticker, interval, df, now().isoformat())
+        signal = signal_cache.get(prompt, signal_ttl)
+        fresh = signal is None
+        if fresh:
+            previous = signals.latest(ticker, interval)
+            signal = signal_classifier.classify(prompt if previous is None else with_previous_signal(prompt, previous))
+        # After the cache, so a cached Signal gets the current Minimum Confidence; a new pending Signal changes neither read.
+        min_confidence = signals.min_confidence(PROMPT_VERSION, BREAK_EVEN_HIT_RATE)
+        hit_rate = signals.hit_rate(ticker, interval, PROMPT_VERSION, signal["verdict"])
+        confident = min_confidence is not None and signal["confidence"] >= min_confidence
+        direction = _VERDICT_DIRECTION.get(signal["verdict"]) if confident else None
+        # Before the Signal is stored, so a plan error doesn't fail a call that already logged.
+        plan = _trade_plan(df, price, direction, atr_multiple, reward_ratio) if direction else None
+        if fresh:
+            long_stop, long_target = _default_plan(df, price, "long")
+            short_stop, short_target = _default_plan(df, price, "short")
+            signals.add(
+                ticker=ticker,
+                interval=interval,
+                prompt_version=PROMPT_VERSION,
+                data_date=cast("pd.Timestamp", df.index[-1]).isoformat(),
+                verdict=signal["verdict"],
+                confidence=signal["confidence"],
+                price=price,
+                long_stop=long_stop,
+                long_target=long_target,
+                short_stop=short_stop,
+                short_target=short_target,
+            )
+            # Cached only once stored, so a failed store is retried instead of served from the cache.
+            signal_cache.put(prompt, signal)
         reply = {**signal, "price": price, "hit_rate": hit_rate, "min_confidence": min_confidence, "trade_plan": plan}
         if position is not None:
             reply["position"] = {**position, **_unrealised_pnl(position, price)}
@@ -437,10 +426,7 @@ def build_server(
         if (watchlist is None) == (tickers is None):
             raise ToolError("give exactly one of watchlist or tickers")
         if watchlist is not None:
-            try:
-                lists = watchlists.load()
-            except Exception as exc:
-                raise ToolError(str(exc)) from exc
+            lists = watchlists.load()
             if watchlist not in lists:
                 raise ToolError(f"no Watchlist named {watchlist!r}")
             tickers = lists[watchlist]
@@ -477,19 +463,13 @@ def build_server(
                 bad.append(ticker)
         if bad:
             raise ToolError(f"unknown tickers, nothing saved: {', '.join(bad)}")
-        try:
-            watchlists.set(name, tickers)
-        except Exception as exc:
-            raise ToolError(str(exc)) from exc
+        watchlists.set(name, tickers)
         return {"name": name, "tickers": tickers}
 
     @audited_tool
     def get_watchlists() -> dict:
         """Every saved Watchlist as {name: [tickers]}."""
-        try:
-            return watchlists.load()
-        except Exception as exc:
-            raise ToolError(str(exc)) from exc
+        return watchlists.load()
 
     @audited_tool
     def set_position(ticker: str, direction: Direction, quantity: StrictNumber, avg_cost: StrictNumber) -> dict:
@@ -497,34 +477,26 @@ def build_server(
         ticker = ticker.upper()
         if not (math.isfinite(quantity) and quantity >= 0):
             raise ToolError(f"quantity must be a finite number of at least 0, got {quantity}")
+        if quantity == 0:
+            portfolio.delete(ticker)
+            return {"ticker": ticker, "quantity": 0}
+        if not (math.isfinite(avg_cost) and avg_cost > 0):
+            raise ToolError(f"avg_cost must be a finite number above 0, got {avg_cost}")
+        held = portfolio.load()
+        if ticker not in held and len(held) >= WATCHLIST_MAX_TICKERS:
+            raise ToolError(f"at most {WATCHLIST_MAX_TICKERS} Positions; delete one before adding {ticker}")
         try:
-            if quantity == 0:
-                portfolio.delete(ticker)
-                return {"ticker": ticker, "quantity": 0}
-            if not (math.isfinite(avg_cost) and avg_cost > 0):
-                raise ToolError(f"avg_cost must be a finite number above 0, got {avg_cost}")
-            held = portfolio.load()
-            if ticker not in held and len(held) >= WATCHLIST_MAX_TICKERS:
-                raise ToolError(f"at most {WATCHLIST_MAX_TICKERS} Positions; delete one before adding {ticker}")
-            try:
-                fetcher.fetch_quote(ticker)
-            except Exception:
-                # Bad input, not a dependency failure: no cause, so the audit logs a warning like set_watchlist.
-                raise ToolError(f"unknown ticker, nothing saved: {ticker}") from None
-            portfolio.set(ticker, direction, quantity, avg_cost)
-        except ToolError:
-            raise
-        except Exception as exc:
-            raise ToolError(str(exc)) from exc
+            fetcher.fetch_quote(ticker)
+        except Exception:
+            # Bad input, not a dependency failure: no cause, so the audit logs a warning like set_watchlist.
+            raise ToolError(f"unknown ticker, nothing saved: {ticker}") from None
+        portfolio.set(ticker, direction, quantity, avg_cost)
         return {"ticker": ticker, "direction": direction, "quantity": quantity, "avg_cost": avg_cost}
 
     @audited_tool
     def get_portfolio() -> list[dict]:
         """Every Position with its latest price and Unrealised P&L (amount and percent of cost) in the ticker's own currency; no total across currencies. A Position whose quote fails gets its own error entry."""
-        try:
-            held = portfolio.load()
-        except Exception as exc:
-            raise ToolError(str(exc)) from exc
+        held = portfolio.load()
         results = []
         for ticker, position in held.items():
             entry = {"ticker": ticker, **position}
