@@ -35,7 +35,7 @@ For buy and sell, Targets divided by Targets plus Stops over a set of scored Sig
 _Avoid_: Win rate, accuracy
 
 **Track Record**:
-The Outcome counts and Hit Rates of the current prompt version's Signals, by Confidence band and Verdict, optionally for one ticker or Interval. Shows how Confidence compares with Hit Rate and why the Minimum Confidence sits where it does.
+The Outcome counts and Hit Rates of the current prompt version's Signals, by Confidence band and Verdict, optionally for one ticker, one Interval, or both. Shows how Confidence compares with Hit Rate and why the Minimum Confidence sits where it does.
 _Avoid_: Stats, performance, backtest, scorecard
 
 **Interval**:
