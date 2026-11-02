@@ -90,3 +90,39 @@ def test_prompt_budget_default_and_env_override(monkeypatch):
 
     monkeypatch.setenv("SMM_CLASSIFIER_MAX_STATE_CHARS", "")
     assert len(build_signal_prompt("AAPL", "1y", wide_frame(500))) <= DEFAULT_MAX_STATE_CHARS  # empty env counts as unset
+
+
+def five_minute_frame(rows: int) -> pd.DataFrame:
+    """About a month of 5m bars with OHLCV plus the full indicator column set."""
+    idx = pd.date_range("2024-01-02 09:30", periods=rows, freq="5min", tz="America/New_York", name="Datetime")
+    base = [100.0 + i * 0.01 for i in range(rows)]
+    cols = ["Open", "High", "Low", "Close", "SMA_20", "EMA_20", "RSI_14", "MACD_12_26_9", "MACDh_12_26_9", "MACDs_12_26_9", "BBL_20_2.0", "BBM_20_2.0", "BBU_20_2.0", "ATRr_14", "OBV", "VWAP_D"]
+    return pd.DataFrame({c: base for c in cols} | {"Volume": list(range(rows))}, index=idx)
+
+
+def test_prompt_for_a_month_of_5m_bars_builds_fast():
+    import time
+
+    start = time.perf_counter()
+    prompt = build_signal_prompt("AAPL", "1mo", five_minute_frame(1600), interval="5m")
+    elapsed = time.perf_counter() - start
+
+    assert len(prompt) <= DEFAULT_MAX_STATE_CHARS
+    assert elapsed < 1.0  # loose bound for CI; the old row-at-a-time loop took seconds
+
+
+@pytest.mark.parametrize("max_chars", [100, 500, 2_000, 8_000])
+def test_prompt_keeps_the_longest_run_of_newest_rows_that_fits(max_chars):
+    df = wide_frame(300)
+
+    payload = json.loads(build_signal_prompt("AAPL", "1y", df, max_chars=max_chars))
+    kept = len(payload["rows"])
+
+    assert kept >= 1
+    assert payload["rows"][-1]["Close"] == pytest.approx(399.0)
+    # One more older row would push the prompt over the budget.
+    longer = json.loads(build_signal_prompt("AAPL", "1y", df, max_chars=1_000_000))
+    longer["rows"] = longer["rows"][-(kept + 1):]
+    assert len(json.dumps(longer)) > max_chars or kept == 300
+    if kept > 1:
+        assert len(json.dumps(payload)) <= max_chars
