@@ -6,12 +6,10 @@ from datetime import UTC, datetime
 from fakes import (
     FakeClassifier,
     FakeFetcher,
-    NoCloseFakeFetcher,
-    ScanFakeFetcher,
-    SignalFakeFetcher,
     audit_lines,
     call_tool,
     daily_bars,
+    fake_history,
     five_minute_bars,
     text_of,
 )
@@ -22,7 +20,7 @@ def error_records(caplog):
 
 
 async def test_validation_error_logs_warning_without_traceback(server_url, app_log):
-    result = await call_tool(server_url(SignalFakeFetcher()), "get_signal", {"ticker": "AAPL", "period": "5y"})
+    result = await call_tool(server_url(FakeFetcher(history=fake_history())), "get_signal", {"ticker": "AAPL", "period": "5y"})
 
     assert result.is_error
     [record] = error_records(app_log)
@@ -46,7 +44,7 @@ async def test_fetcher_exception_logs_error_with_its_traceback(server_url, app_l
 
 async def test_classifier_exception_logs_error_with_its_traceback(server_url, app_log):
     boom = RuntimeError("openrouter timeout")
-    url = server_url(SignalFakeFetcher(), classifier=FakeClassifier(error=boom))
+    url = server_url(FakeFetcher(history=fake_history()), classifier=FakeClassifier(error=boom))
     result = await call_tool(url, "get_signal", {"ticker": "AAPL"})
 
     assert text_of(result) == "Error executing tool get_signal: openrouter timeout"
@@ -70,7 +68,7 @@ async def test_bad_database_file_logs_error_with_its_traceback(server_url, app_l
 
 
 async def test_unexpected_exception_logs_error_with_its_traceback(server_url, app_log):
-    result = await call_tool(server_url(NoCloseFakeFetcher()), "get_signal", {"ticker": "AAPL"})
+    result = await call_tool(server_url(FakeFetcher(history=fake_history().drop(columns="Close"))), "get_signal", {"ticker": "AAPL"})
 
     assert result.is_error
     [record] = error_records(app_log)
@@ -84,7 +82,7 @@ async def test_unexpected_exception_logs_error_with_its_traceback(server_url, ap
 
 async def test_scan_logs_a_failing_ticker_at_error_and_still_returns_ok(server_url, app_log):
     boom = RuntimeError("yahoo is down")
-    fetcher = ScanFakeFetcher(
+    fetcher = FakeFetcher(history=
         {
             "BBCA.JK": {"1d": daily_bars([100.0 + i for i in range(30)], last="2024-03-14"), "5m": five_minute_bars({}, [])},
             "BAD": {"1d": boom},
@@ -110,6 +108,6 @@ async def test_scan_logs_a_failing_ticker_at_error_and_still_returns_ok(server_u
 
 
 async def test_unexpected_exception_message_reaches_the_caller(server_url):
-    result = await call_tool(server_url(NoCloseFakeFetcher()), "get_signal", {"ticker": "AAPL"})
+    result = await call_tool(server_url(FakeFetcher(history=fake_history().drop(columns="Close"))), "get_signal", {"ticker": "AAPL"})
 
     assert text_of(result) == "Error executing tool get_signal: 'Close'"

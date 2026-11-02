@@ -1,14 +1,27 @@
-"""Signal log: one row per fresh classifier answer in the server database (ADR-0003)."""
+"""Signal log: one row per fresh classifier answer in the server database (ADR-0003), and the Trade Plan maths, default plan included."""
 
+import math
 import os
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import cast
+from typing import Literal, cast
 
 import pandas as pd
 
+from stock_market_mcp.bars import last_value
+from stock_market_mcp.classifier import PROMPT_VERSION
 from stock_market_mcp.db import transaction
+from stock_market_mcp.errors import InputError
+
+Direction = Literal["long", "short"]
+# Verdict -> Trade Plan Direction; hold has no plan.
+VERDICT_DIRECTION: dict[str, Direction] = {"buy": "long", "sell": "short"}
+
+PLAN_ATR_MULTIPLE = 2.0
+PLAN_REWARD_RATIO = 2.0
+# Hit Rate a default Trade Plan must beat to break even: a Target gains PLAN_REWARD_RATIO times what a Stop loses.
+BREAK_EVEN_HIT_RATE = 1 / (1 + PLAN_REWARD_RATIO)
 
 # Bars after a Signal's own bar within which it gets an Outcome.
 OUTCOME_BARS = 20
@@ -55,12 +68,31 @@ class SignalLog:
                 conn.execute("ALTER TABLE signals ADD COLUMN cut_loss INTEGER")
             yield conn
 
-    def add(self, **signal: object) -> None:
-        """Store one Signal; keys are the column names, Outcome and scored-at left null."""
-        columns = ", ".join(signal)
-        marks = ", ".join(f":{k}" for k in signal)
+    def record(
+        self, ticker: str, interval: str, signal: dict, history: pd.DataFrame, price: float, cut_loss: bool | None
+    ) -> None:
+        """Store one pending Signal made on history's last bar, with both default Trade Plans at price."""
+        long_stop, long_target = _default_plan(history, price, "long")
+        short_stop, short_target = _default_plan(history, price, "short")
         with self._open() as conn:
-            conn.execute(f"INSERT INTO signals ({columns}) VALUES ({marks})", signal)
+            conn.execute(
+                "INSERT INTO signals (ticker, interval, prompt_version, data_date, verdict, confidence, price, "
+                "long_stop, long_target, short_stop, short_target, cut_loss) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    ticker,
+                    interval,
+                    PROMPT_VERSION,
+                    cast("pd.Timestamp", history.index[-1]).isoformat(),
+                    signal["verdict"],
+                    signal["confidence"],
+                    price,
+                    long_stop,
+                    long_target,
+                    short_stop,
+                    short_target,
+                    cut_loss,
+                ),
+            )
 
     def score(self, ticker: str, interval: str, history: pd.DataFrame, scored_at: str) -> None:
         """Give pending Signals for the ticker and Interval an Outcome from the bars after their own.
@@ -89,8 +121,8 @@ class SignalLog:
                         "UPDATE signals SET outcome = ?, scored_at = ? WHERE id = ?", (outcome, scored_at, id_)
                     )
 
-    def hit_rate(self, ticker: str, interval: str, prompt_version: int, verdict: str) -> float | None:
-        """Hit Rate of this prompt version's Signals of the verdict's kind; None under HIT_RATE_MIN_SCORED.
+    def hit_rate(self, ticker: str, interval: str, verdict: str) -> float | None:
+        """Hit Rate of the current prompt version's Signals of the verdict's kind; None under HIT_RATE_MIN_SCORED.
 
         Buy/sell: Targets / (Targets + Stops). Hold: Quiet / scored holds.
         """
@@ -101,17 +133,17 @@ class SignalLog:
                 "SELECT COUNT(*) FILTER (WHERE outcome = ?), COUNT(*) FILTER (WHERE outcome = ?) "
                 "FROM signals WHERE ticker = ? AND interval = ? AND prompt_version = ? "
                 f"AND verdict {'=' if hold else '!='} 'hold'",
-                (hits, misses, ticker, interval, prompt_version),
+                (hits, misses, ticker, interval, PROMPT_VERSION),
             ).fetchone()
         if right + wrong < HIT_RATE_MIN_SCORED:
             return None
         return right / (right + wrong)
 
-    def min_confidence(self, prompt_version: int, break_even: float) -> float | None:
-        """Lowest 0.1 Confidence band of this prompt version whose buy/sell Hit Rate is above break_even.
+    def min_confidence(self) -> float | None:
+        """Lowest 0.1 Confidence band of the current prompt version whose buy/sell Hit Rate is above BREAK_EVEN_HIT_RATE.
 
         Only bands with BAND_MIN_SCORED Targets plus Stops count: MIN_CONFIDENCE while none has that many,
-        None when some do but none is above break_even.
+        None when some do but none is above BREAK_EVEN_HIT_RATE.
         """
         with self._open() as conn:
             bands = conn.execute(
@@ -119,23 +151,23 @@ class SignalLog:
                 "SELECT CAST(confidence * 10 + 1e-9 AS INTEGER) AS band, "
                 "COUNT(*) FILTER (WHERE outcome = 'target'), COUNT(*) FILTER (WHERE outcome = 'stop') "
                 "FROM signals WHERE prompt_version = ? AND verdict IN ('buy', 'sell') GROUP BY band ORDER BY band",
-                (prompt_version,),
+                (PROMPT_VERSION,),
             ).fetchall()
         for band, targets, stops in bands:
-            if targets + stops >= BAND_MIN_SCORED and targets / (targets + stops) > break_even:
+            if targets + stops >= BAND_MIN_SCORED and targets / (targets + stops) > BREAK_EVEN_HIT_RATE:
                 return band / 10
         if any(targets + stops >= BAND_MIN_SCORED for _, targets, stops in bands):
             return None
         return MIN_CONFIDENCE
 
-    def cut_loss_hit_rate(self, prompt_version: int) -> float | None:
-        """Targets / (Targets + Stops) over this prompt version's Signals stored with cut_loss = 1, all tickers and
+    def cut_loss_hit_rate(self) -> float | None:
+        """Targets / (Targets + Stops) over the current prompt version's Signals stored with cut_loss = 1, all tickers and
         Intervals; None under CUT_LOSS_MIN_SCORED."""
         with self._open() as conn:
             targets, stops = conn.execute(
                 "SELECT COUNT(*) FILTER (WHERE outcome = 'target'), COUNT(*) FILTER (WHERE outcome = 'stop') "
                 "FROM signals WHERE prompt_version = ? AND cut_loss = 1",
-                (prompt_version,),
+                (PROMPT_VERSION,),
             ).fetchone()
         if targets + stops < CUT_LOSS_MIN_SCORED:
             return None
@@ -153,6 +185,42 @@ class SignalLog:
             return None
         verdict, confidence, outcome = row
         return {"verdict": verdict, "confidence": confidence, "outcome": outcome or "pending"}
+
+
+def trade_plan(
+    history: pd.DataFrame, entry: float, direction: Direction, atr_multiple: float, reward_ratio: float
+) -> dict:
+    """Stop and Target around entry (the Price) from the last ATR(14) of history."""
+    atr = last_value("atr", history)
+    if not math.isfinite(atr):
+        raise InputError(f"latest row has a non-finite ATR (atr={atr})")
+    sign = 1 if direction == "long" else -1
+    stop = entry - sign * atr_multiple * atr
+    # Same line for both Directions: short Target = Entry - ratio * (Stop - Entry).
+    target = entry + reward_ratio * (entry - stop)
+    if stop <= 0 or target <= 0:
+        raise InputError(
+            f"plan has non-positive prices (stop={stop}, target={target}); "
+            "ATR is too large relative to the last close"
+        )
+    return {
+        "direction": direction,
+        "entry": entry,
+        "stop": stop,
+        "target": target,
+        "atr": atr,
+        "atr_multiple": atr_multiple,
+        "reward_ratio": reward_ratio,
+    }
+
+
+def _default_plan(history: pd.DataFrame, entry: float, direction: Direction) -> tuple[float | None, float | None]:
+    """Stop and Target of the default Trade Plan stored with a Signal; nulls when that plan can't be made."""
+    try:
+        plan = trade_plan(history, entry, direction, PLAN_ATR_MULTIPLE, PLAN_REWARD_RATIO)
+    except InputError:
+        return None, None
+    return plan["stop"], plan["target"]
 
 
 def _outcome(later: pd.DataFrame, stop: float | None, target: float | None, *, long: bool) -> str | None:

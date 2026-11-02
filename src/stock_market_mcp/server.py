@@ -3,44 +3,39 @@
 import functools
 import inspect
 import logging
-import math
 import os
-import re
 import time
 from collections.abc import Callable
+from dataclasses import asdict
 from datetime import UTC, datetime
-from typing import Annotated, Literal, NamedTuple, cast
+from typing import Annotated, cast
 
 import numpy as np
 import pandas as pd
-import pandas_ta as ta
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import Strict
 
+from stock_market_mcp.bars import Interval, finite, last_value
 from stock_market_mcp.cache import (
     FUNDAMENTALS_TTL_SECONDS,
     HISTORY_TTL_SECONDS,
     QUOTE_TTL_SECONDS,
     SIGNAL_TTL_SECONDS,
     CachingFetcher,
-    TTLCache,
 )
 from stock_market_mcp.classifier import (
-    PROMPT_VERSION,
     EnforcingClassifier,
     OpenRouterClassifier,
     SignalClassifier,
 )
 from stock_market_mcp.data import DataFetcher
 from stock_market_mcp.db import DEFAULT_DB_PATH
+from stock_market_mcp.errors import InputError
 from stock_market_mcp.portfolio import PortfolioStore
-from stock_market_mcp.prompt import build_signal_prompt, with_previous_signal
-from stock_market_mcp.signals import SignalLog
-from stock_market_mcp.watchlists import (
-    WATCHLIST_MAX_TICKERS,
-    WatchlistStore,
-)
+from stock_market_mcp.signal_maker import SignalMaker
+from stock_market_mcp.signals import PLAN_ATR_MULTIPLE, PLAN_REWARD_RATIO, Direction
+from stock_market_mcp.watchlists import WatchlistStore, normalise_tickers
 
 log = logging.getLogger(__name__)
 
@@ -52,6 +47,7 @@ def _error_line(tool: str, exc: BaseException) -> str:
 def _audited[**P, R](tool: Callable[P, R]) -> Callable[P, R]:
     """Log one audit line per call: tool name, arguments, ms and outcome, even when the tool raises.
 
+    An InputError becomes a ToolError with no cause, logged like one the tool raised itself.
     Any other exception becomes a ToolError with it as the cause, so the caller sees its message.
     """
     signature = inspect.signature(tool)
@@ -74,6 +70,9 @@ def _audited[**P, R](tool: Callable[P, R]) -> Callable[P, R]:
             else:
                 log.warning(_error_line(tool.__name__, exc))
             raise
+        except InputError as exc:
+            log.warning(_error_line(tool.__name__, exc))
+            raise ToolError(str(exc)) from None
         except Exception as exc:
             log.exception(_error_line(tool.__name__, exc))
             raise ToolError(str(exc)) from exc
@@ -84,162 +83,8 @@ def _audited[**P, R](tool: Callable[P, R]) -> Callable[P, R]:
     return wrapper
 
 
-def _suffixed_frame(ind: pd.Series | None) -> pd.DataFrame | None:
-    """Frame a single-output indicator; pandas-ta returns None on insufficient rows."""
-    if ind is None:
-        return None
-    return ind.to_frame()
-
-
-# Dispatch table: indicator name -> handler producing the indicator frame(s),
-# or None when the history is too short for that indicator (loud error path).
-_INDICATOR_DISPATCH = {
-    "sma": lambda df: _suffixed_frame(ta.sma(cast("pd.Series", df["Close"]))),
-    "ema": lambda df: _suffixed_frame(ta.ema(cast("pd.Series", df["Close"]))),
-    "rsi": lambda df: _suffixed_frame(ta.rsi(cast("pd.Series", df["Close"]))),
-    "macd": lambda df: ta.macd(cast("pd.Series", df["Close"])),
-    "bbands": lambda df: ta.bbands(cast("pd.Series", df["Close"])),
-    "atr": lambda df: _suffixed_frame(
-        ta.atr(
-            cast("pd.Series", df["High"]),
-            cast("pd.Series", df["Low"]),
-            cast("pd.Series", df["Close"]),
-        )
-    ),
-    "adx": lambda df: ta.adx(
-        cast("pd.Series", df["High"]),
-        cast("pd.Series", df["Low"]),
-        cast("pd.Series", df["Close"]),
-    ),
-    "vwap": lambda df: _suffixed_frame(
-        ta.vwap(
-            cast("pd.Series", df["High"]),
-            cast("pd.Series", df["Low"]),
-            cast("pd.Series", df["Close"]),
-            cast("pd.Series", df["Volume"]),
-        )
-    ),
-}
-
-
-PLAN_ATR_MULTIPLE = 2.0
-PLAN_REWARD_RATIO = 2.0
-PLAN_ARG_MAX = 10
-# Hit Rate a default Trade Plan must beat to break even: a Target gains PLAN_REWARD_RATIO times what a Stop loses.
-BREAK_EVEN_HIT_RATE = 1 / (1 + PLAN_REWARD_RATIO)
-
 # Strict: JSON numbers only; true and "2" are rejected, not coerced.
 StrictNumber = Annotated[float, Strict()]
-
-Direction = Literal["long", "short"]
-
-Interval = Literal["1m", "5m", "15m", "1h", "1d"]
-
-# Every period Yahoo knows, as yfinance lists them.
-_YAHOO_PERIODS = ("1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "5y", "10y", "ytd", "max")
-
-
-class _Periods(NamedTuple):
-    default: str
-    # Yahoo's history limit and the periods that fit inside it; daily bars have none and pass any period on.
-    limit: str | None
-    allowed: tuple[str, ...]
-
-
-_PERIODS: dict[Interval, _Periods] = {
-    "1m": _Periods("5d", "7 days", ("1d", "5d")),
-    "5m": _Periods("1mo", "60 days", ("1d", "5d", "1mo")),
-    "15m": _Periods("1mo", "60 days", ("1d", "5d", "1mo")),
-    "1h": _Periods("6mo", "730 days", ("1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "ytd")),
-    "1d": _Periods("1y", None, ()),
-}
-
-
-def _period(interval: Interval, period: str | None) -> str:
-    """The period to fetch: the Interval's default, or the caller's once it fits the Interval."""
-    periods = _PERIODS[interval]
-    if period is None:
-        return periods.default
-    if periods.limit is None or period in periods.allowed:
-        return period
-    if period in _YAHOO_PERIODS:
-        reason = f"is longer than Yahoo keeps for {interval} bars ({periods.limit})"
-    else:
-        reason = f"is not a valid period for {interval} bars"
-    raise ToolError(f"period {period!r} {reason}; use one of {', '.join(periods.allowed)}")
-
-
-def _tickers(tickers: list[str]) -> list[str]:
-    """Upper-cased and de-duplicated in order; one Scan or Watchlist takes at most WATCHLIST_MAX_TICKERS."""
-    names = list(dict.fromkeys(t.upper() for t in tickers))
-    if len(names) > WATCHLIST_MAX_TICKERS:
-        raise ToolError(f"at most {WATCHLIST_MAX_TICKERS} tickers, got {len(names)}")
-    return names
-
-
-def _last_value(name: str, df: pd.DataFrame) -> float:
-    """Last value of a single-column indicator over df."""
-    return float(_INDICATOR_DISPATCH[name](df).iloc[-1, 0])
-
-
-# Verdict -> Trade Plan Direction; hold has no plan.
-_VERDICT_DIRECTION: dict[str, Direction] = {"buy": "long", "sell": "short"}
-
-
-def _trade_plan(
-    df: pd.DataFrame, entry: float, direction: Direction, atr_multiple: float, reward_ratio: float
-) -> dict:
-    """Stop and Target around entry (the Price) from the last ATR(14) of df."""
-    atr = _last_value("atr", df)
-    if not math.isfinite(atr):
-        raise ToolError(f"latest row has a non-finite ATR (atr={atr})")
-    sign = 1 if direction == "long" else -1
-    stop = entry - sign * atr_multiple * atr
-    # Same line for both Directions: short Target = Entry - ratio * (Stop - Entry).
-    target = entry + reward_ratio * (entry - stop)
-    if stop <= 0 or target <= 0:
-        raise ToolError(
-            f"plan has non-positive prices (stop={stop}, target={target}); "
-            "ATR is too large relative to the last close"
-        )
-    return {
-        "direction": direction,
-        "entry": entry,
-        "stop": stop,
-        "target": target,
-        "atr": atr,
-        "atr_multiple": atr_multiple,
-        "reward_ratio": reward_ratio,
-    }
-
-
-def _default_plan(df: pd.DataFrame, entry: float, direction: Direction) -> tuple[float | None, float | None]:
-    """Stop and Target of the default Trade Plan stored with a Signal; nulls when that plan can't be made."""
-    try:
-        plan = _trade_plan(df, entry, direction, PLAN_ATR_MULTIPLE, PLAN_REWARD_RATIO)
-    except ToolError:
-        return None, None
-    return plan["stop"], plan["target"]
-
-
-def _finite(value: float) -> float | None:
-    """JSON has no NaN; an indicator without a value is null."""
-    return value if math.isfinite(value) else None
-
-
-def _unrealised_pnl(position: dict, price: float) -> dict:
-    """Unrealised P&L of a Position at price, as an amount and a percent of cost; null when non-finite."""
-    sign = 1 if position["direction"] == "long" else -1
-    pnl = sign * (price - position["avg_cost"]) * position["quantity"]
-    return {
-        "unrealised_pnl": _finite(pnl),
-        "unrealised_pnl_pct": _finite(pnl / (position["avg_cost"] * position["quantity"]) * 100),
-    }
-
-
-def _losing(pnl: dict) -> bool:
-    """Whether an Unrealised P&L is a loss; break-even and a non-finite (null) amount are not."""
-    return pnl["unrealised_pnl"] is not None and pnl["unrealised_pnl"] < 0
 
 
 def _scan_daily(df: pd.DataFrame, now: datetime) -> dict:
@@ -252,16 +97,16 @@ def _scan_daily(df: pd.DataFrame, now: datetime) -> dict:
     prev = before.iloc[-1]
     prev_close = float(prev["Close"])
     # Completed bars only, so today's forming bar can't move ATR or RSI.
-    atr = _last_value("atr", before)
-    rsi = _last_value("rsi", before)
+    atr = last_value("atr", before)
+    rsi = last_value("rsi", before)
     return {
         "price": float(df["Close"].iloc[-1]),
         "data_date": cast("pd.Timestamp", index[-1]).isoformat(),
         "prev_high": float(prev["High"]),
         "prev_low": float(prev["Low"]),
         "prev_close": prev_close,
-        "atr_pct": _finite(atr / prev_close * 100),
-        "rsi": _finite(rsi),
+        "atr_pct": finite(atr / prev_close * 100),
+        "rsi": finite(rsi),
     }
 
 
@@ -291,7 +136,7 @@ def _scan_intraday(df: pd.DataFrame, now: datetime, price: float, prev_close: fl
     volume = df["Volume"].to_numpy(dtype=float)
     if not in_session.any():
         pre_market = close[(days == today) & ~regular]
-        gap = _finite(_pct(float(pre_market[-1]), prev_close)) if len(pre_market) else None
+        gap = finite(_pct(float(pre_market[-1]), prev_close)) if len(pre_market) else None
         return {"gap_pct": gap, "relative_volume": None, "vwap_distance_pct": None}
 
     session_volume = float(volume[in_session].sum())
@@ -302,9 +147,9 @@ def _scan_intraday(df: pd.DataFrame, now: datetime, price: float, prev_close: fl
     typical = (df["High"].to_numpy(dtype=float) + df["Low"].to_numpy(dtype=float) + close) / 3
     vwap = float((typical * volume)[in_session].sum()) / session_volume if session_volume else None
     return {
-        "gap_pct": _finite(_pct(float(df["Open"].to_numpy(dtype=float)[in_session][0]), prev_close)),
-        "relative_volume": _finite(session_volume / average) if average else None,
-        "vwap_distance_pct": _finite(_pct(price, vwap)) if vwap else None,
+        "gap_pct": finite(_pct(float(df["Open"].to_numpy(dtype=float)[in_session][0]), prev_close)),
+        "relative_volume": finite(session_volume / average) if average else None,
+        "vwap_distance_pct": finite(_pct(price, vwap)) if vwap else None,
     }
 
 
@@ -332,11 +177,10 @@ def build_server(
         fundamentals_ttl=fundamentals_ttl,
     )
     signal_classifier = EnforcingClassifier(classifier if classifier is not None else OpenRouterClassifier())
-    signal_cache = TTLCache()
     db_path = db_path or os.environ.get("SMM_DB_PATH", DEFAULT_DB_PATH)
     watchlists = WatchlistStore(db_path)
-    signals = SignalLog(db_path)
     portfolio = PortfolioStore(db_path)
+    signal_maker = SignalMaker(fetcher, signal_classifier, db_path, signal_ttl, now)
     mcp = MCPServer("stock-market-mcp")
 
     def audited_tool[F: Callable](fn: F) -> F:
@@ -362,77 +206,7 @@ def build_server(
         reward_ratio: StrictNumber = PLAN_REWARD_RATIO,
     ) -> dict:
         """Advisory buy/sell/hold Signal from price history and indicators on bars of one Interval, with the Price (last close), the Hit Rate of past Signals of its kind (buy/sell or hold) for this ticker and Interval (null until enough are scored), the Minimum Confidence applied as min_confidence (set by the server from buy/sell Hit Rates per 0.1 Confidence band, a fixed default until enough are scored), and for buy or sell at or above min_confidence a Trade Plan (Entry, Stop, Target), else null; min_confidence null means no band beats break-even, so no buy or sell gets a Trade Plan; for a held ticker a position key with the Position, its Unrealised P&L (amount and percent of cost) at the Price, and cut_loss: true when the Verdict points against the Position (sell on a long, buy on a short) at or above min_confidence while its Unrealised P&L is negative, else false (the Trade Plan is unchanged), and cut_loss_hit_rate: Targets / (Targets + Stops) over scored past Signals that pointed against a losing Position at any Confidence, across all tickers and Intervals (null until enough are scored); position is absent when not held; input only, never acts on it."""
-        for name, value in (("atr_multiple", atr_multiple), ("reward_ratio", reward_ratio)):
-            if not 0 < value <= PLAN_ARG_MAX:
-                raise ToolError(f"{name} must be in (0, {PLAN_ARG_MAX}], got {value}")
-        period = _period(interval, period)
-        df = fetcher.fetch_history(ticker, period, interval)
-        for name, handler in sorted(_INDICATOR_DISPATCH.items()):
-            ind = handler(df)
-            if ind is None:
-                raise ToolError(f"not enough history rows for indicator: {name}")
-            df = df.join(ind)
-        # Read outside the classifier cache, so cached Signals get a fresh Price and plan.
-        price = float(df["Close"].iloc[-1])
-        if not math.isfinite(price):
-            raise ToolError(f"latest row has a non-finite close (close={price})")
-        ticker = ticker.upper()
-        # Read before the classifier, so a broken Portfolio file fails before a classifier call.
-        position = portfolio.load().get(ticker)
-        # Quantity stays out, so size doesn't sway the Verdict or bust the cache (ADR-0005).
-        held = pnl = None
-        if position is not None:
-            pnl = _unrealised_pnl(position, price)
-            pct = pnl["unrealised_pnl_pct"]
-            held = {"direction": position["direction"], "avg_cost": position["avg_cost"], "unrealised_pnl_pct": pct}
-        # The prompt without the previous Signal is the cache key, so storing a Signal doesn't defeat the cache.
-        prompt = build_signal_prompt(ticker, period, df, interval=interval, position=held)
-        signals.score(ticker, interval, df, now().isoformat())
-        signal = signal_cache.get(prompt, signal_ttl)
-        fresh = signal is None
-        if fresh:
-            previous = signals.latest(ticker, interval)
-            signal = signal_classifier.classify(prompt if previous is None else with_previous_signal(prompt, previous))
-        # After the cache, so a cached Signal gets the current Minimum Confidence; a new pending Signal changes neither read.
-        min_confidence = signals.min_confidence(PROMPT_VERSION, BREAK_EVEN_HIT_RATE)
-        hit_rate = signals.hit_rate(ticker, interval, PROMPT_VERSION, signal["verdict"])
-        confident = min_confidence is not None and signal["confidence"] >= min_confidence
-        direction = _VERDICT_DIRECTION.get(signal["verdict"]) if confident else None
-        # Before the Signal is stored, so a plan error doesn't fail a call that already logged.
-        plan = _trade_plan(df, price, direction, atr_multiple, reward_ratio) if direction else None
-        # Stored at any Confidence for the Cut Loss Hit Rate; the reply's cut_loss also needs the Minimum Confidence.
-        opposes_losing = None
-        if position is not None and pnl is not None:
-            opposes = _VERDICT_DIRECTION.get(signal["verdict"]) not in (None, position["direction"])
-            opposes_losing = opposes and _losing(pnl)
-        if fresh:
-            long_stop, long_target = _default_plan(df, price, "long")
-            short_stop, short_target = _default_plan(df, price, "short")
-            signals.add(
-                ticker=ticker,
-                interval=interval,
-                prompt_version=PROMPT_VERSION,
-                data_date=cast("pd.Timestamp", df.index[-1]).isoformat(),
-                verdict=signal["verdict"],
-                confidence=signal["confidence"],
-                price=price,
-                long_stop=long_stop,
-                long_target=long_target,
-                short_stop=short_stop,
-                short_target=short_target,
-                cut_loss=opposes_losing,
-            )
-            # Cached only once stored, so a failed store is retried instead of served from the cache.
-            signal_cache.put(prompt, signal)
-        reply = {**signal, "price": price, "hit_rate": hit_rate, "min_confidence": min_confidence, "trade_plan": plan}
-        if position is not None and pnl is not None:
-            reply["position"] = {
-                **position,
-                **pnl,
-                "cut_loss": confident and opposes_losing,
-                "cut_loss_hit_rate": signals.cut_loss_hit_rate(PROMPT_VERSION),
-            }
-        return reply
+        return signal_maker.make(ticker, interval, period, atr_multiple, reward_ratio)
 
     @audited_tool
     def scan(watchlist: str | None = None, tickers: list[str] | None = None) -> list[dict]:
@@ -444,7 +218,7 @@ def build_server(
             if watchlist not in lists:
                 raise ToolError(f"no Watchlist named {watchlist!r}")
             tickers = lists[watchlist]
-        names = _tickers(cast("list[str]", tickers))
+        names = normalise_tickers(cast("list[str]", tickers))
         results = []
         for ticker in names:
             try:
@@ -466,9 +240,7 @@ def build_server(
     @audited_tool
     def set_watchlist(name: str, tickers: list[str]) -> dict:
         """Save a named Watchlist (each ticker checked with a quote), replacing its tickers; an empty list deletes it."""
-        if not re.fullmatch(r"[A-Za-z0-9_-]{1,32}", name):
-            raise ToolError("Watchlist name must be 1-32 letters, digits, '-' or '_'")
-        tickers = _tickers(tickers)
+        tickers = normalise_tickers(tickers)
         bad = []
         for ticker in tickers:
             try:
@@ -489,16 +261,10 @@ def build_server(
     def set_position(ticker: str, direction: Direction, quantity: StrictNumber, avg_cost: StrictNumber) -> dict:
         """Save the Position for a ticker (checked with a quote), replacing any held one; quantity 0 deletes it and replies with just the ticker and quantity 0. Direction long or short, quantity at least 0, avg_cost above 0; as many Positions as a Watchlist has tickers. Records only, never places orders."""
         ticker = ticker.upper()
-        if not (math.isfinite(quantity) and quantity >= 0):
-            raise ToolError(f"quantity must be a finite number of at least 0, got {quantity}")
+        # Deleting needs no quote; the store checks everything else.
         if quantity == 0:
             portfolio.delete(ticker)
             return {"ticker": ticker, "quantity": 0}
-        if not (math.isfinite(avg_cost) and avg_cost > 0):
-            raise ToolError(f"avg_cost must be a finite number above 0, got {avg_cost}")
-        held = portfolio.load()
-        if ticker not in held and len(held) >= WATCHLIST_MAX_TICKERS:
-            raise ToolError(f"at most {WATCHLIST_MAX_TICKERS} Positions; delete one before adding {ticker}")
         try:
             fetcher.fetch_quote(ticker)
         except Exception:
@@ -513,11 +279,11 @@ def build_server(
         held = portfolio.load()
         results = []
         for ticker, position in held.items():
-            entry = {"ticker": ticker, **position}
+            entry = {"ticker": ticker, **asdict(position)}
             try:
                 quote = fetcher.fetch_quote(ticker)
                 price = float(quote["price"])
-                entry |= {"price": _finite(price), "currency": quote["currency"], **_unrealised_pnl(position, price)}
+                entry |= {"price": finite(price), "currency": quote["currency"], **position.unrealised_pnl(price)}
             except Exception as exc:
                 log.exception(_error_line(f"get_portfolio ticker={ticker}", exc))
                 entry["error"] = str(exc)
