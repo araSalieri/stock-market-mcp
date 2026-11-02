@@ -5,6 +5,8 @@ import os
 from dataclasses import dataclass
 
 from stock_market_mcp.db import transaction
+from stock_market_mcp.errors import InputError
+from stock_market_mcp.watchlists import WATCHLIST_MAX_TICKERS
 
 SCHEMA = """CREATE TABLE IF NOT EXISTS positions (
     ticker TEXT PRIMARY KEY,
@@ -59,8 +61,15 @@ class PortfolioStore:
             return {t: Position(d, q, c) for t, d, q, c in rows}
 
     def set(self, ticker: str, direction: str, quantity: float, avg_cost: float) -> None:
-        """Replace the ticker's Position."""
+        """Replace the ticker's Position; as many Positions as a Watchlist has tickers."""
+        if not (math.isfinite(quantity) and quantity >= 0):
+            raise InputError(f"quantity must be a finite number of at least 0, got {quantity}")
+        if not (math.isfinite(avg_cost) and avg_cost > 0):
+            raise InputError(f"avg_cost must be a finite number above 0, got {avg_cost}")
         with transaction(self.path, SCHEMA) as conn:
+            held = conn.execute("SELECT count(*), sum(ticker = ?) FROM positions", (ticker,)).fetchone()
+            if not held[1] and held[0] >= WATCHLIST_MAX_TICKERS:
+                raise InputError(f"at most {WATCHLIST_MAX_TICKERS} Positions; delete one before adding {ticker}")
             conn.execute("INSERT OR REPLACE INTO positions VALUES (?, ?, ?, ?)", (ticker, direction, quantity, avg_cost))
 
     def delete(self, ticker: str) -> None:
