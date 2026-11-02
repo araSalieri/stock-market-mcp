@@ -1,4 +1,4 @@
-"""Signal log: one row per fresh classifier answer in the server database (ADR-0003)."""
+"""Signal log: one row per fresh classifier answer in the server database (ADR-0003), and the Trade Plan maths, default plan included."""
 
 import math
 import os
