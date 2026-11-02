@@ -3,7 +3,7 @@
 import json
 
 import pytest
-from fakes import FakeClassifier, FlatFakeFetcher, call_tool, text_of
+from fakes import FakeClassifier, FlatFakeFetcher, call_tool, seed_signals, text_of
 
 
 class QuotedFlatFetcher(FlatFakeFetcher):
@@ -54,6 +54,7 @@ async def test_held_position_rides_on_the_signal_with_pnl_at_its_price(server_ur
         "avg_cost": 90.0,
         "unrealised_pnl": pytest.approx(pnl),
         "unrealised_pnl_pct": pytest.approx(pct),
+        "cut_loss": False,
     }
 
 
@@ -84,6 +85,7 @@ async def test_cached_signal_shows_the_current_position(server_url, tmp_path):
         "avg_cost": 90.0,
         "unrealised_pnl": pytest.approx(40.0),
         "unrealised_pnl_pct": pytest.approx(40 / 360 * 100),
+        "cut_loss": False,
     }
     assert len(classifier.prompts) == 1
 
@@ -140,3 +142,57 @@ async def test_position_survives_row_trimming(server_url, tmp_path, monkeypatch)
     prompt = _prompt(classifier)
     assert len(prompt["rows"]) < 60  # rows were dropped to fit
     assert prompt["position"]["direction"] == "short"
+
+
+async def _cut_loss_reply(server_url, tmp_path, signal, direction="long", avg_cost=110.0, seed=False) -> dict:
+    """get_signal reply for a held AAPL at flat close 100; seed=True makes the Minimum Confidence null."""
+    db = tmp_path / "smm.db"
+    fetcher = QuotedFlatFetcher()
+    url = server_url(fetcher, classifier=FakeClassifier(signal), db_path=db)
+    if seed:  # 30 scored in the 0.9 band at under break-even, so no band qualifies
+        seed_signals(db, ["target"] * 10 + ["stop"] * 20, confidence=0.9)
+    await set_position(url, "AAPL", direction, avg_cost=avg_cost)
+    return await get_signal(url, fetcher)
+
+
+@pytest.mark.parametrize(("direction", "verdict", "avg_cost"), [("long", "sell", 110.0), ("short", "buy", 90.0)])
+async def test_opposing_verdict_on_a_losing_position_is_a_cut_loss(server_url, tmp_path, direction, verdict, avg_cost):
+    # No scored Signals, so the Minimum Confidence is the 0.6 default; 0.6 itself counts.
+    payload = await _cut_loss_reply(server_url, tmp_path, _signal(verdict, 0.6), direction, avg_cost)
+
+    assert payload["min_confidence"] == 0.6
+    assert payload["position"]["cut_loss"] is True
+
+
+@pytest.mark.parametrize(
+    ("direction", "verdict", "confidence", "avg_cost"),
+    [
+        ("long", "sell", 0.7, 90.0),  # profitable
+        ("short", "buy", 0.7, 110.0),  # profitable short
+        ("long", "sell", 0.7, 100.0),  # break-even
+        ("long", "hold", 0.7, 110.0),
+        ("long", "buy", 0.7, 110.0),  # agreeing
+        ("short", "sell", 0.7, 90.0),  # agreeing
+        ("long", "sell", 0.59, 110.0),  # below the Minimum Confidence
+    ],
+)
+async def test_not_a_cut_loss(server_url, tmp_path, direction, verdict, confidence, avg_cost):
+    payload = await _cut_loss_reply(server_url, tmp_path, _signal(verdict, confidence), direction, avg_cost)
+
+    assert payload["position"]["cut_loss"] is False
+
+
+async def test_null_minimum_confidence_is_never_a_cut_loss(server_url, tmp_path):
+    payload = await _cut_loss_reply(server_url, tmp_path, _signal("sell", 1.0), seed=True)
+
+    assert payload["min_confidence"] is None
+    assert payload["position"]["cut_loss"] is False
+
+
+async def test_cut_loss_sell_keeps_its_short_trade_plan(server_url, tmp_path):
+    payload = await _cut_loss_reply(server_url, tmp_path, _signal("sell", 0.7))
+
+    assert payload["position"]["cut_loss"] is True
+    assert payload["trade_plan"]["direction"] == "short"
+    assert payload["trade_plan"]["stop"] > payload["trade_plan"]["entry"] > payload["trade_plan"]["target"]
+
