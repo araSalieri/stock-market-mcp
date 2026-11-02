@@ -5,7 +5,6 @@ import inspect
 import logging
 import math
 import os
-import re
 import time
 from collections.abc import Callable
 from dataclasses import asdict
@@ -37,10 +36,7 @@ from stock_market_mcp.errors import InputError
 from stock_market_mcp.portfolio import PortfolioStore
 from stock_market_mcp.signal_maker import SignalMaker
 from stock_market_mcp.signals import PLAN_ATR_MULTIPLE, PLAN_REWARD_RATIO, Direction
-from stock_market_mcp.watchlists import (
-    WATCHLIST_MAX_TICKERS,
-    WatchlistStore,
-)
+from stock_market_mcp.watchlists import WatchlistStore, normalise_tickers
 
 log = logging.getLogger(__name__)
 
@@ -90,14 +86,6 @@ def _audited[**P, R](tool: Callable[P, R]) -> Callable[P, R]:
 
 # Strict: JSON numbers only; true and "2" are rejected, not coerced.
 StrictNumber = Annotated[float, Strict()]
-
-def _tickers(tickers: list[str]) -> list[str]:
-    """Upper-cased and de-duplicated in order; one Scan or Watchlist takes at most WATCHLIST_MAX_TICKERS."""
-    names = list(dict.fromkeys(t.upper() for t in tickers))
-    if len(names) > WATCHLIST_MAX_TICKERS:
-        raise ToolError(f"at most {WATCHLIST_MAX_TICKERS} tickers, got {len(names)}")
-    return names
-
 
 def _finite(value: float) -> float | None:
     """JSON has no NaN; an indicator without a value is null."""
@@ -235,7 +223,7 @@ def build_server(
             if watchlist not in lists:
                 raise ToolError(f"no Watchlist named {watchlist!r}")
             tickers = lists[watchlist]
-        names = _tickers(cast("list[str]", tickers))
+        names = normalise_tickers(cast("list[str]", tickers))
         results = []
         for ticker in names:
             try:
@@ -257,9 +245,7 @@ def build_server(
     @audited_tool
     def set_watchlist(name: str, tickers: list[str]) -> dict:
         """Save a named Watchlist (each ticker checked with a quote), replacing its tickers; an empty list deletes it."""
-        if not re.fullmatch(r"[A-Za-z0-9_-]{1,32}", name):
-            raise ToolError("Watchlist name must be 1-32 letters, digits, '-' or '_'")
-        tickers = _tickers(tickers)
+        tickers = normalise_tickers(tickers)
         bad = []
         for ticker in tickers:
             try:
@@ -280,16 +266,10 @@ def build_server(
     def set_position(ticker: str, direction: Direction, quantity: StrictNumber, avg_cost: StrictNumber) -> dict:
         """Save the Position for a ticker (checked with a quote), replacing any held one; quantity 0 deletes it and replies with just the ticker and quantity 0. Direction long or short, quantity at least 0, avg_cost above 0; as many Positions as a Watchlist has tickers. Records only, never places orders."""
         ticker = ticker.upper()
-        if not (math.isfinite(quantity) and quantity >= 0):
-            raise ToolError(f"quantity must be a finite number of at least 0, got {quantity}")
+        # Deleting needs no quote; the store checks everything else.
         if quantity == 0:
             portfolio.delete(ticker)
             return {"ticker": ticker, "quantity": 0}
-        if not (math.isfinite(avg_cost) and avg_cost > 0):
-            raise ToolError(f"avg_cost must be a finite number above 0, got {avg_cost}")
-        held = portfolio.load()
-        if ticker not in held and len(held) >= WATCHLIST_MAX_TICKERS:
-            raise ToolError(f"at most {WATCHLIST_MAX_TICKERS} Positions; delete one before adding {ticker}")
         try:
             fetcher.fetch_quote(ticker)
         except Exception:

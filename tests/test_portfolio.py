@@ -7,6 +7,7 @@ import pytest
 
 from fakes import FakeFetcher, call_tool, text_of
 
+from stock_market_mcp.errors import InputError
 from stock_market_mcp.portfolio import PortfolioStore, Position
 
 # Store tests call PortfolioStore directly: the spec (#57) puts a storage seam under the tools, and an
@@ -57,6 +58,42 @@ def test_store_file_that_is_not_a_database_errors_naming_its_path(tmp_path):
     with pytest.raises(ValueError, match=re.escape(str(path))):
         PortfolioStore(path).load()
     assert path.read_text() == "{not a database"
+
+
+@pytest.mark.parametrize(
+    ("quantity", "avg_cost", "message"),
+    [
+        (-1, 1.0, "quantity must be a finite number of at least 0, got -1"),
+        (float("inf"), 1.0, "quantity must be a finite number of at least 0, got inf"),
+        (float("nan"), 1.0, "quantity must be a finite number of at least 0, got nan"),
+        (1, 0, "avg_cost must be a finite number above 0, got 0"),
+        (1, -5.0, "avg_cost must be a finite number above 0, got -5.0"),
+        (1, float("inf"), "avg_cost must be a finite number above 0, got inf"),
+        (1, float("nan"), "avg_cost must be a finite number above 0, got nan"),
+    ],
+)
+def test_store_rejects_bad_amounts_with_nothing_saved(tmp_path, quantity, avg_cost, message):
+    store = PortfolioStore(tmp_path / "smm.db")
+    store.set("AAPL", "long", 10, 180.0)
+
+    with pytest.raises(InputError, match=re.escape(message)):
+        store.set("AAPL", "short", quantity, avg_cost)
+    assert store.load() == {"AAPL": Position("long", 10, 180.0)}
+
+
+def test_store_caps_positions_at_15_but_replaces_a_held_one(tmp_path):
+    store = PortfolioStore(tmp_path / "smm.db")
+    tickers = [f"T{i}" for i in range(16)]
+    for ticker in tickers[:15]:
+        store.set(ticker, "long", 1, 1.0)
+
+    with pytest.raises(InputError, match=re.escape("at most 15 Positions; delete one before adding T15")):
+        store.set("T15", "long", 1, 1.0)
+    store.set("T0", "short", 1, 2.0)
+
+    held = store.load()
+    assert sorted(held) == sorted(tickers[:15])
+    assert held["T0"] == Position("short", 1, 2.0)
 
 
 QUOTES = {
@@ -122,12 +159,6 @@ async def test_portfolio_prices_each_position_in_its_own_currency(server_url, tm
         {"ticker": "NOPE"},
         {"direction": "flat"},
         {"quantity": -1},
-        {"quantity": float("inf")},
-        {"quantity": float("nan")},
-        {"avg_cost": 0},
-        {"avg_cost": -5.0},
-        {"avg_cost": float("inf")},
-        {"avg_cost": float("nan")},
     ],
 )
 async def test_bad_position_is_rejected_with_nothing_saved(server_url, tmp_path, args):
@@ -146,23 +177,6 @@ async def test_unknown_ticker_error_names_it(server_url, tmp_path):
 
     assert result.is_error
     assert "NOPE" in text_of(result)
-
-
-async def test_sixteenth_position_is_rejected_but_replacing_a_held_one_works(server_url, tmp_path):
-    tickers = [f"T{i}" for i in range(16)]
-    url = start(server_url, tmp_path, quotes={t: {"price": 1.0, "currency": "USD"} for t in tickers})
-    for ticker in tickers[:15]:
-        assert not (await set_position(url, ticker)).is_error
-
-    rejected = await set_position(url, tickers[15])
-    replaced = await set_position(url, tickers[0], "short", 1, 2.0)
-
-    assert rejected.is_error
-    assert "15" in text_of(rejected)
-    assert not replaced.is_error, text_of(replaced)
-    held = await get_portfolio(url)
-    assert [e["ticker"] for e in held] == sorted(tickers[:15])
-    assert held[0]["direction"] == "short"
 
 
 async def test_quantity_zero_deletes_and_deleting_one_not_held_succeeds(server_url, tmp_path):
