@@ -18,14 +18,13 @@ from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import Strict
 
-from stock_market_mcp.bars import Interval, fetch_period, history, last_value
+from stock_market_mcp.bars import Interval, last_value
 from stock_market_mcp.cache import (
     FUNDAMENTALS_TTL_SECONDS,
     HISTORY_TTL_SECONDS,
     QUOTE_TTL_SECONDS,
     SIGNAL_TTL_SECONDS,
     CachingFetcher,
-    TTLCache,
 )
 from stock_market_mcp.classifier import (
     EnforcingClassifier,
@@ -36,8 +35,8 @@ from stock_market_mcp.data import DataFetcher
 from stock_market_mcp.db import DEFAULT_DB_PATH
 from stock_market_mcp.errors import InputError
 from stock_market_mcp.portfolio import PortfolioStore
-from stock_market_mcp.prompt import build_signal_prompt, with_previous_signal
-from stock_market_mcp.signals import PLAN_ATR_MULTIPLE, PLAN_REWARD_RATIO, Direction, SignalLog, trade_plan
+from stock_market_mcp.signal_maker import SignalMaker
+from stock_market_mcp.signals import PLAN_ATR_MULTIPLE, PLAN_REWARD_RATIO, Direction
 from stock_market_mcp.watchlists import (
     WATCHLIST_MAX_TICKERS,
     WatchlistStore,
@@ -89,8 +88,6 @@ def _audited[**P, R](tool: Callable[P, R]) -> Callable[P, R]:
     return wrapper
 
 
-PLAN_ARG_MAX = 10
-
 # Strict: JSON numbers only; true and "2" are rejected, not coerced.
 StrictNumber = Annotated[float, Strict()]
 
@@ -100,10 +97,6 @@ def _tickers(tickers: list[str]) -> list[str]:
     if len(names) > WATCHLIST_MAX_TICKERS:
         raise ToolError(f"at most {WATCHLIST_MAX_TICKERS} tickers, got {len(names)}")
     return names
-
-
-# Verdict -> Trade Plan Direction; hold has no plan.
-_VERDICT_DIRECTION: dict[str, Direction] = {"buy": "long", "sell": "short"}
 
 
 def _finite(value: float) -> float | None:
@@ -201,11 +194,10 @@ def build_server(
         fundamentals_ttl=fundamentals_ttl,
     )
     signal_classifier = EnforcingClassifier(classifier if classifier is not None else OpenRouterClassifier())
-    signal_cache = TTLCache()
     db_path = db_path or os.environ.get("SMM_DB_PATH", DEFAULT_DB_PATH)
     watchlists = WatchlistStore(db_path)
-    signals = SignalLog(db_path)
     portfolio = PortfolioStore(db_path)
+    signal_maker = SignalMaker(fetcher, signal_classifier, db_path, signal_ttl, now)
     mcp = MCPServer("stock-market-mcp")
 
     def audited_tool[F: Callable](fn: F) -> F:
@@ -231,49 +223,7 @@ def build_server(
         reward_ratio: StrictNumber = PLAN_REWARD_RATIO,
     ) -> dict:
         """Advisory buy/sell/hold Signal from price history and indicators on bars of one Interval, with the Price (last close), the Hit Rate of past Signals of its kind (buy/sell or hold) for this ticker and Interval (null until enough are scored), the Minimum Confidence applied as min_confidence (set by the server from buy/sell Hit Rates per 0.1 Confidence band, a fixed default until enough are scored), and for buy or sell at or above min_confidence a Trade Plan (Entry, Stop, Target), else null; min_confidence null means no band beats break-even, so no buy or sell gets a Trade Plan; for a held ticker a position key with the Position, its Unrealised P&L (amount and percent of cost) at the Price, and cut_loss: true when the Verdict points against the Position (sell on a long, buy on a short) at or above min_confidence while its Unrealised P&L is negative, else false (the Trade Plan is unchanged), and cut_loss_hit_rate: Targets / (Targets + Stops) over scored past Signals that pointed against a losing Position at any Confidence, across all tickers and Intervals (null until enough are scored); position is absent when not held; input only, never acts on it."""
-        for name, value in (("atr_multiple", atr_multiple), ("reward_ratio", reward_ratio)):
-            if not 0 < value <= PLAN_ARG_MAX:
-                raise ToolError(f"{name} must be in (0, {PLAN_ARG_MAX}], got {value}")
-        df = history(fetcher, ticker, interval, period)
-        # Read outside the classifier cache, so cached Signals get a fresh Price and plan.
-        price = float(df["Close"].iloc[-1])
-        if not math.isfinite(price):
-            raise ToolError(f"latest row has a non-finite close (close={price})")
-        ticker = ticker.upper()
-        period = fetch_period(interval, period)
-        # Read before the classifier, so a broken Portfolio file fails before a classifier call.
-        position = portfolio.load().get(ticker)
-        held = position.classifier_view(price) if position is not None else None
-        # The prompt without the previous Signal is the cache key, so storing a Signal doesn't defeat the cache.
-        prompt = build_signal_prompt(ticker, period, df, interval=interval, position=held)
-        signals.score(ticker, interval, df, now().isoformat())
-        signal = signal_cache.get(prompt, signal_ttl)
-        fresh = signal is None
-        if fresh:
-            previous = signals.latest(ticker, interval)
-            signal = signal_classifier.classify(prompt if previous is None else with_previous_signal(prompt, previous))
-        # After the cache, so a cached Signal gets the current Minimum Confidence; a new pending Signal changes neither read.
-        min_confidence = signals.min_confidence()
-        hit_rate = signals.hit_rate(ticker, interval, signal["verdict"])
-        confident = min_confidence is not None and signal["confidence"] >= min_confidence
-        direction = _VERDICT_DIRECTION.get(signal["verdict"]) if confident else None
-        # Before the Signal is stored, so a plan error doesn't fail a call that already logged.
-        plan = trade_plan(df, price, direction, atr_multiple, reward_ratio) if direction else None
-        # Stored at any Confidence for the Cut Loss Hit Rate; the reply's cut_loss also needs the Minimum Confidence.
-        opposes_losing = position.opposes_losing(signal["verdict"], price) if position is not None else None
-        if fresh:
-            signals.record(ticker, interval, signal, df, price, opposes_losing)
-            # Cached only once stored, so a failed store is retried instead of served from the cache.
-            signal_cache.put(prompt, signal)
-        reply = {**signal, "price": price, "hit_rate": hit_rate, "min_confidence": min_confidence, "trade_plan": plan}
-        if position is not None:
-            reply["position"] = {
-                **asdict(position),
-                **position.unrealised_pnl(price),
-                "cut_loss": confident and opposes_losing,
-                "cut_loss_hit_rate": signals.cut_loss_hit_rate(),
-            }
-        return reply
+        return signal_maker.make(ticker, interval, period, atr_multiple, reward_ratio)
 
     @audited_tool
     def scan(watchlist: str | None = None, tickers: list[str] | None = None) -> list[dict]:

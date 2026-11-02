@@ -2,12 +2,15 @@
 
 import logging
 import threading
+from datetime import UTC, datetime
 import time
 
 import pytest
 from uvicorn import Config, Server
 
+from stock_market_mcp.cache import SIGNAL_TTL_SECONDS
 from stock_market_mcp.server import build_server
+from stock_market_mcp.signal_maker import SignalMaker
 
 
 @pytest.fixture
@@ -41,3 +44,13 @@ def app_log(caplog):
     """caplog capturing our own INFO lines and up."""
     caplog.set_level(logging.INFO, logger="stock_market_mcp")
     return caplog
+
+
+@pytest.fixture
+def signal_maker(tmp_path):
+    """Factory for a SignalMaker over a fetcher and classifier; db_path defaults to tmp_path / "server.db"."""
+
+    def make(fetcher, classifier, *, db_path=None, ttl=SIGNAL_TTL_SECONDS):
+        return SignalMaker(fetcher, classifier, db_path or tmp_path / "server.db", ttl, lambda: datetime.now(UTC))
+
+    return make

@@ -1,43 +1,33 @@
-"""Tests for the Position on get_signal (#59): the held Position and its Unrealised P&L at the Signal's Price, over MCP."""
+"""Tests for the Position on a Signal (#59): SignalMaker adds the held Position and its Unrealised P&L at the Signal's Price."""
 
 import json
 import sqlite3
 from contextlib import closing
 
 import pytest
-from fakes import FakeClassifier, FakeFetcher, call_tool, flat_history, seed_signals, text_of
+from fakes import FakeClassifier, FakeFetcher, flat_history, seed_signals
 
-
-def quoted_flat_fetcher() -> FakeFetcher:
-    """Flat history plus a quote, so set_position can check the ticker; get_signal must still fetch none."""
-    quote = {"price": 100.0, "currency": "USD"}
-    return FakeFetcher(quotes={"AAPL": quote, "MSFT": quote}, history=flat_history())
+from stock_market_mcp.portfolio import PortfolioStore
 
 
 def _signal(verdict="sell", confidence=0.7):
     return {"verdict": verdict, "confidence": confidence, "rationale": "test", "data_date": "2024-02-29T00:00:00"}
 
 
-async def get_signal(url, fetcher: FakeFetcher) -> dict:
-    quotes_before = len(fetcher.quote_calls)
-    result = await call_tool(url, "get_signal", {"ticker": "aapl"})
-    assert not result.is_error, text_of(result)
-    assert len(fetcher.quote_calls) == quotes_before
-    return json.loads(text_of(result))
+def _maker(signal_maker, tmp_path, classifier):
+    """SignalMaker over flat close 100 on tmp_path / "smm.db"; its fetcher has no quotes, so quoting fails loudly."""
+    return signal_maker(FakeFetcher(history=flat_history()), classifier, db_path=tmp_path / "smm.db")
 
 
-async def set_position(url, ticker, direction="long", quantity: float = 10, avg_cost: float = 90.0):
-    args = {"ticker": ticker, "direction": direction, "quantity": quantity, "avg_cost": avg_cost}
-    result = await call_tool(url, "set_position", args)
-    assert not result.is_error, text_of(result)
+def set_position(tmp_path, ticker, direction="long", quantity: float = 10, avg_cost: float = 90.0):
+    PortfolioStore(tmp_path / "smm.db").set(ticker, direction, quantity, avg_cost)
 
 
-async def test_held_position_rides_on_the_signal_with_pnl_at_its_price(server_url, tmp_path):
+def test_held_position_rides_on_the_signal_with_pnl_at_its_price(signal_maker, tmp_path):
     # Flat close 100, Position 10 @ 90: up 100 on a cost of 900.
-    fetcher = quoted_flat_fetcher()
-    url = server_url(fetcher, classifier=FakeClassifier(_signal()), db_path=tmp_path / "smm.db")
-    await set_position(url, "AAPL")
-    payload = await get_signal(url, fetcher)
+    maker = _maker(signal_maker, tmp_path, FakeClassifier(_signal()))
+    set_position(tmp_path, "AAPL")
+    payload = maker.make("aapl")
 
     assert payload["price"] == 100.0
     assert payload["position"] == {
@@ -51,25 +41,23 @@ async def test_held_position_rides_on_the_signal_with_pnl_at_its_price(server_ur
     }
 
 
-async def test_ticker_not_held_has_no_position_key(server_url, tmp_path):
-    fetcher = quoted_flat_fetcher()
-    url = server_url(fetcher, classifier=FakeClassifier(_signal()), db_path=tmp_path / "smm.db")
-    await set_position(url, "MSFT")
-    payload = await get_signal(url, fetcher)
+def test_ticker_not_held_has_no_position_key(signal_maker, tmp_path):
+    maker = _maker(signal_maker, tmp_path, FakeClassifier(_signal()))
+    set_position(tmp_path, "MSFT")
+    payload = maker.make("aapl")
 
     assert "position" not in payload
     assert payload["verdict"] == "sell"
 
 
-async def test_cached_signal_shows_the_current_position(server_url, tmp_path):
-    fetcher = quoted_flat_fetcher()
+def test_cached_signal_shows_the_current_position(signal_maker, tmp_path):
     classifier = FakeClassifier(_signal())
-    url = server_url(fetcher, classifier=classifier, db_path=tmp_path / "smm.db")
-    await set_position(url, "AAPL")
+    maker = _maker(signal_maker, tmp_path, classifier)
+    set_position(tmp_path, "AAPL")
 
-    first = await get_signal(url, fetcher)
-    await set_position(url, "AAPL", quantity=4)
-    second = await get_signal(url, fetcher)
+    first = maker.make("aapl")
+    set_position(tmp_path, "AAPL", quantity=4)
+    second = maker.make("aapl")
 
     assert first["position"]["quantity"] == 10
     assert second["position"] == {
@@ -84,18 +72,21 @@ async def test_cached_signal_shows_the_current_position(server_url, tmp_path):
     assert len(classifier.prompts) == 1
 
 
-@pytest.mark.parametrize("change", [{"avg_cost": 95.0}, {"direction": "short"}, {"quantity": 0}])
-async def test_changing_the_position_beyond_quantity_reclassifies(server_url, tmp_path, change):
-    fetcher, classifier = quoted_flat_fetcher(), FakeClassifier(_signal())
-    url = server_url(fetcher, classifier=classifier, db_path=tmp_path / "smm.db")
-    await set_position(url, "AAPL")
+@pytest.mark.parametrize("change", [{"avg_cost": 95.0}, {"direction": "short"}, "deleted"])
+def test_changing_the_position_beyond_quantity_reclassifies(signal_maker, tmp_path, change):
+    classifier = FakeClassifier(_signal())
+    maker = _maker(signal_maker, tmp_path, classifier)
+    set_position(tmp_path, "AAPL")
 
-    await get_signal(url, fetcher)
-    await set_position(url, "AAPL", **change)
-    second = await get_signal(url, fetcher)
+    maker.make("aapl")
+    if change == "deleted":
+        PortfolioStore(tmp_path / "smm.db").delete("AAPL")
+    else:
+        set_position(tmp_path, "AAPL", **change)
+    second = maker.make("aapl")
 
     assert len(classifier.prompts) == 2
-    if change == {"quantity": 0}:
+    if change == "deleted":
         assert "position" not in second
 
 
@@ -103,11 +94,11 @@ def _prompt(classifier, n=-1) -> dict:
     return json.loads(classifier.prompts[n])
 
 
-async def test_prompt_carries_the_held_position_without_quantity(server_url, tmp_path):
-    fetcher, classifier = quoted_flat_fetcher(), FakeClassifier(_signal())
-    url = server_url(fetcher, classifier=classifier, db_path=tmp_path / "smm.db")
-    await set_position(url, "AAPL")
-    await get_signal(url, fetcher)
+def test_prompt_carries_the_held_position_without_quantity(signal_maker, tmp_path):
+    classifier = FakeClassifier(_signal())
+    maker = _maker(signal_maker, tmp_path, classifier)
+    set_position(tmp_path, "AAPL")
+    maker.make("aapl")
 
     assert _prompt(classifier)["position"] == {
         "direction": "long",
@@ -116,64 +107,63 @@ async def test_prompt_carries_the_held_position_without_quantity(server_url, tmp
     }
 
 
-async def test_prompt_says_no_position_for_an_unheld_ticker(server_url, tmp_path):
-    fetcher, classifier = quoted_flat_fetcher(), FakeClassifier(_signal())
-    url = server_url(fetcher, classifier=classifier, db_path=tmp_path / "smm.db")
-    await set_position(url, "MSFT")
-    await get_signal(url, fetcher)
+def test_prompt_says_no_position_for_an_unheld_ticker(signal_maker, tmp_path):
+    classifier = FakeClassifier(_signal())
+    maker = _maker(signal_maker, tmp_path, classifier)
+    set_position(tmp_path, "MSFT")
+    maker.make("aapl")
 
     prompt = _prompt(classifier)
     assert "position" in prompt
     assert prompt["position"] is None
 
 
-async def test_position_survives_row_trimming(server_url, tmp_path, monkeypatch):
+def test_position_survives_row_trimming(signal_maker, tmp_path, monkeypatch):
     monkeypatch.setenv("SMM_CLASSIFIER_MAX_STATE_CHARS", "3000")
-    fetcher, classifier = quoted_flat_fetcher(), FakeClassifier(_signal())
-    url = server_url(fetcher, classifier=classifier, db_path=tmp_path / "smm.db")
-    await set_position(url, "AAPL", "short")
-    await get_signal(url, fetcher)
+    classifier = FakeClassifier(_signal())
+    maker = _maker(signal_maker, tmp_path, classifier)
+    set_position(tmp_path, "AAPL", "short")
+    maker.make("aapl")
 
     prompt = _prompt(classifier)
     assert len(prompt["rows"]) < 60  # rows were dropped to fit
     assert prompt["position"]["direction"] == "short"
 
 
-async def _cut_loss_reply(server_url, tmp_path, signal, direction="long", avg_cost=110.0, seed=False) -> dict:
-    """get_signal reply for a held AAPL at flat close 100; seed=True makes the Minimum Confidence null."""
+def _cut_loss_reply(signal_maker, tmp_path, signal, direction="long", avg_cost=110.0, seed=False) -> dict:
+    """SignalMaker reply for a held AAPL at flat close 100; seed=True makes the Minimum Confidence null."""
     db = tmp_path / "smm.db"
-    fetcher = quoted_flat_fetcher()
-    url = server_url(fetcher, classifier=FakeClassifier(signal), db_path=db)
+    maker = _maker(signal_maker, tmp_path, FakeClassifier(signal))
     if seed:  # 30 scored in the 0.9 band at under break-even, so no band qualifies
         seed_signals(db, ["target"] * 10 + ["stop"] * 20, confidence=0.9)
-    await set_position(url, "AAPL", direction, avg_cost=avg_cost)
-    return await get_signal(url, fetcher)
+    set_position(tmp_path, "AAPL", direction, avg_cost=avg_cost)
+    return maker.make("aapl")
 
 
-async def test_opposing_verdict_on_a_losing_position_is_a_cut_loss(server_url, tmp_path):
+def test_opposing_verdict_on_a_losing_position_is_a_cut_loss(signal_maker, tmp_path):
     # No scored Signals, so the Minimum Confidence is the 0.6 default; 0.6 itself counts.
-    payload = await _cut_loss_reply(server_url, tmp_path, _signal("sell", 0.6))
+    payload = _cut_loss_reply(signal_maker, tmp_path, _signal("sell", 0.6))
 
     assert payload["min_confidence"] == 0.6
     assert payload["position"]["cut_loss"] is True
 
 
-async def test_below_the_minimum_confidence_is_not_a_cut_loss(server_url, tmp_path):
+def test_below_the_minimum_confidence_is_not_a_cut_loss(signal_maker, tmp_path):
     # Which Verdicts oppose a losing Position is tested on Position; this is the Confidence gate.
-    payload = await _cut_loss_reply(server_url, tmp_path, _signal("sell", 0.59))
+    payload = _cut_loss_reply(signal_maker, tmp_path, _signal("sell", 0.59))
 
     assert payload["position"]["cut_loss"] is False
 
 
-async def test_null_minimum_confidence_is_never_a_cut_loss(server_url, tmp_path):
-    payload = await _cut_loss_reply(server_url, tmp_path, _signal("sell", 1.0), seed=True)
+def test_null_minimum_confidence_is_never_a_cut_loss(signal_maker, tmp_path):
+    payload = _cut_loss_reply(signal_maker, tmp_path, _signal("sell", 1.0), seed=True)
 
     assert payload["min_confidence"] is None
     assert payload["position"]["cut_loss"] is False
 
 
-async def test_cut_loss_sell_keeps_its_short_trade_plan(server_url, tmp_path):
-    payload = await _cut_loss_reply(server_url, tmp_path, _signal("sell", 0.7))
+def test_cut_loss_sell_keeps_its_short_trade_plan(signal_maker, tmp_path):
+    payload = _cut_loss_reply(signal_maker, tmp_path, _signal("sell", 0.7))
 
     assert payload["position"]["cut_loss"] is True
     assert payload["trade_plan"]["direction"] == "short"
@@ -195,18 +185,17 @@ def _stored_cut_loss(db) -> list:
         ("MSFT", "sell", 0.7, 110.0, None),  # AAPL not held
     ],
 )
-async def test_fresh_signal_stores_cut_loss(server_url, tmp_path, held, verdict, confidence, avg_cost, stored):
+def test_fresh_signal_stores_cut_loss(signal_maker, tmp_path, held, verdict, confidence, avg_cost, stored):
     db = tmp_path / "smm.db"
-    fetcher = quoted_flat_fetcher()
-    url = server_url(fetcher, classifier=FakeClassifier(_signal(verdict, confidence)), db_path=db)
-    await set_position(url, held, avg_cost=avg_cost)
-    await get_signal(url, fetcher)
+    maker = _maker(signal_maker, tmp_path, FakeClassifier(_signal(verdict, confidence)))
+    set_position(tmp_path, held, avg_cost=avg_cost)
+    maker.make("aapl")
 
     assert _stored_cut_loss(db) == [stored]
 
 
-async def test_old_signals_schema_is_upgraded_on_open(server_url, tmp_path):
-    # A file written before cut_loss existed; built by hand since no tool can make one.
+def test_old_signals_schema_is_upgraded_on_open(signal_maker, tmp_path):
+    # A file written before cut_loss existed; built by hand since no module writes the old schema.
     db = tmp_path / "smm.db"
     with closing(sqlite3.connect(db)) as conn, conn:
         conn.execute(
@@ -219,10 +208,9 @@ async def test_old_signals_schema_is_upgraded_on_open(server_url, tmp_path):
             "INSERT INTO signals (ticker, interval, prompt_version, data_date, verdict, confidence, price, outcome) "
             "VALUES ('MSFT', '1d', 1, '2023-01-01T00:00:00', 'buy', 0.8, 50.0, 'target')"
         )
-    fetcher = quoted_flat_fetcher()
-    url = server_url(fetcher, classifier=FakeClassifier(_signal("sell", 0.7)), db_path=db)
-    await set_position(url, "AAPL", avg_cost=110.0)
-    payload = await get_signal(url, fetcher)
+    maker = _maker(signal_maker, tmp_path, FakeClassifier(_signal("sell", 0.7)))
+    set_position(tmp_path, "AAPL", avg_cost=110.0)
+    payload = maker.make("aapl")
 
     assert payload["position"]["cut_loss"] is True
     assert _stored_cut_loss(db) == [None, 1]
@@ -231,23 +219,22 @@ async def test_old_signals_schema_is_upgraded_on_open(server_url, tmp_path):
         assert old.fetchone() == ("MSFT", 1, "buy", 0.8, "target")
 
 
-async def _cut_loss_hit_rate(server_url, tmp_path, seed) -> float | None:
+def _cut_loss_hit_rate(signal_maker, tmp_path, seed) -> float | None:
     db = tmp_path / "smm.db"
     seed(db)
-    fetcher = quoted_flat_fetcher()
-    url = server_url(fetcher, classifier=FakeClassifier(_signal("buy")), db_path=db)
-    await set_position(url, "AAPL")
-    return (await get_signal(url, fetcher))["position"]["cut_loss_hit_rate"]
+    maker = _maker(signal_maker, tmp_path, FakeClassifier(_signal("buy")))
+    set_position(tmp_path, "AAPL")
+    return maker.make("aapl")["position"]["cut_loss_hit_rate"]
 
 
-async def test_cut_loss_hit_rate_is_null_under_30_scored(server_url, tmp_path):
+def test_cut_loss_hit_rate_is_null_under_30_scored(signal_maker, tmp_path):
     def seed(db):
         seed_signals(db, ["target"] * 29 + ["expired"] * 5, cut_loss=1)
 
-    assert await _cut_loss_hit_rate(server_url, tmp_path, seed) is None
+    assert _cut_loss_hit_rate(signal_maker, tmp_path, seed) is None
 
 
-async def test_cut_loss_hit_rate_pools_scored_cut_loss_signals_of_this_prompt_version(server_url, tmp_path):
+def test_cut_loss_hit_rate_pools_scored_cut_loss_signals_of_this_prompt_version(signal_maker, tmp_path):
     def seed(db):
         seed_signals(db, ["target"] * 20, cut_loss=1, ticker="MSFT", interval="1d")
         seed_signals(db, ["stop"] * 5, cut_loss=1, ticker="NVDA", interval="5m", verdict="sell")
@@ -257,4 +244,4 @@ async def test_cut_loss_hit_rate_pools_scored_cut_loss_signals_of_this_prompt_ve
         seed_signals(db, ["stop"] * 30)  # not held
         seed_signals(db, ["stop"] * 30, cut_loss=1, prompt_version=1)
 
-    assert await _cut_loss_hit_rate(server_url, tmp_path, seed) == pytest.approx(20 / 30)
+    assert _cut_loss_hit_rate(signal_maker, tmp_path, seed) == pytest.approx(20 / 30)
