@@ -99,3 +99,7 @@ _Avoid_: Holding, lot
 **Unrealised P&L**:
 A Position's profit or loss if closed at a given price: the price minus the average cost, times the quantity, sign flipped for short. In the ticker's currency, also given as a percent of cost.
 _Avoid_: Gain, return, open P&L
+
+**Cut Loss**:
+A Signal whose Verdict points against a held Position (sell on a long, buy on a short) while that Position's Unrealised P&L at the Price is negative. Advisory only; the server never closes the Position.
+_Avoid_: Stop out, exit signal, bail
