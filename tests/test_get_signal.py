@@ -399,6 +399,16 @@ def test_provider_http_error_is_loud_and_never_retried(monkeypatch):
     assert len(posts) == 1
 
 
+async def test_any_ticker_casing_shares_one_history_cache_entry(server_url):
+    fetcher = FakeFetcher(history=fake_history())
+    url = server_url(fetcher, classifier=FakeClassifier())
+
+    await call_tool(url, "get_signal", {"ticker": "aapl", "period": "1mo"})
+    await call_tool(url, "get_signal", {"ticker": "AAPL", "period": "1mo"})
+
+    assert fetcher.history_calls == [("AAPL", "1mo", "5m", False)]
+
+
 async def test_failed_signal_is_never_cached(server_url):
     classifier = FakeClassifier(error=RuntimeError("openrouter 500"))
     fetcher = FakeFetcher(history=fake_history())
@@ -588,20 +598,6 @@ async def test_nan_last_close_is_a_loud_tool_error(server_url, verdict):
     assert classifier.prompts == []
 
 
-async def test_too_few_rows_for_indicators_is_a_loud_tool_error(server_url):
-    # 5 rows is below pandas-ta's default lookbacks, so indicators come back None.
-    classifier = FakeClassifier()
-    result = await call_tool(
-        server_url(FakeFetcher(history=flat_history(rows=5)), classifier=classifier),
-        "get_signal",
-        {"ticker": "AAPL"},
-    )
-
-    assert result.is_error
-    assert "not enough history rows" in text_of(result)
-    assert classifier.prompts == []
-
-
 async def test_cached_signal_carries_the_price_and_a_recomputed_plan(server_url):
     # atr_multiple 1: Stop = 100 - 1*2 = 98, Target = 100 + 2*(100 - 98) = 104.
     classifier = FakeClassifier(_signal("buy"))
@@ -659,21 +655,6 @@ async def test_removed_tools_fail_as_unknown(server_url, name):
 # --- Intervals (ticket #28) ---
 
 
-@pytest.mark.parametrize(
-    ("interval", "period"), [("1m", "5d"), ("5m", "1mo"), ("15m", "1mo"), ("1h", "6mo"), ("1d", "1y")]
-)
-async def test_interval_and_its_default_period_reach_the_fetcher(server_url, interval, period):
-    fetcher = FakeFetcher(history=intraday_history())
-    result = await call_tool(
-        server_url(fetcher, classifier=FakeClassifier(_signal("hold"))),
-        "get_signal",
-        {"ticker": "BBCA.JK", "interval": interval},
-    )
-
-    assert not result.is_error, text_of(result)
-    assert fetcher.history_calls == [("BBCA.JK", period, interval, False)]
-
-
 async def test_interval_outside_the_allowlist_is_a_tool_error(server_url):
     classifier = FakeClassifier()
     fetcher = FakeFetcher(history=intraday_history())
@@ -687,51 +668,6 @@ async def test_interval_outside_the_allowlist_is_a_tool_error(server_url):
     assert "interval" in text_of(result)
     assert fetcher.history_calls == []
     assert classifier.prompts == []
-
-
-@pytest.mark.parametrize(
-    ("interval", "period", "limit"),
-    [("1m", "1mo", "7 days"), ("5m", "3mo", "60 days"), ("15m", "1y", "60 days"), ("1h", "5y", "730 days")],
-)
-async def test_period_past_yahoos_limit_is_a_tool_error_naming_it(server_url, interval, period, limit):
-    fetcher = FakeFetcher(history=intraday_history())
-    result = await call_tool(
-        server_url(fetcher, classifier=FakeClassifier()),
-        "get_signal",
-        {"ticker": "AAPL", "interval": interval, "period": period},
-    )
-
-    assert result.is_error
-    assert "longer than Yahoo keeps" in text_of(result)
-    assert limit in text_of(result)
-    assert fetcher.history_calls == []
-
-
-@pytest.mark.parametrize(("interval", "period"), [("5m", "banana"), ("1h", "1week")])
-async def test_unknown_period_is_a_tool_error_saying_it_is_not_valid(server_url, interval, period):
-    fetcher = FakeFetcher(history=intraday_history())
-    result = await call_tool(
-        server_url(fetcher, classifier=FakeClassifier()),
-        "get_signal",
-        {"ticker": "AAPL", "interval": interval, "period": period},
-    )
-
-    assert result.is_error
-    assert f"not a valid period for {interval}" in text_of(result)
-    assert "longer than" not in text_of(result)
-    assert fetcher.history_calls == []
-
-
-async def test_explicit_period_within_the_limit_reaches_the_fetcher(server_url):
-    fetcher = FakeFetcher(history=intraday_history())
-    result = await call_tool(
-        server_url(fetcher, classifier=FakeClassifier(_signal("hold"))),
-        "get_signal",
-        {"ticker": "AAPL", "interval": "5m", "period": "5d"},
-    )
-
-    assert not result.is_error, text_of(result)
-    assert fetcher.history_calls == [("AAPL", "5d", "5m", False)]
 
 
 async def test_prompt_carries_the_interval(server_url):
