@@ -31,7 +31,9 @@ def test_non_finite_unrealised_pnl_is_null(price):
 
 
 def test_classifier_view_leaves_quantity_out():
-    assert Position("short", 10, 90.0).classifier_view(100.0) == {
+    position = Position("short", 10, 90.0)
+
+    assert position.classifier_view(position.unrealised_pnl(100.0)) == {
         "direction": "short",
         "avg_cost": 90.0,
         "unrealised_pnl_pct": pytest.approx(-100 / 9),
@@ -53,8 +55,12 @@ def test_classifier_view_leaves_quantity_out():
     ],
 )
 def test_opposes_losing_at_a_price_of_100(direction, verdict, avg_cost, expected):
-    assert Position(direction, 10, avg_cost).opposes_losing(verdict, 100.0) is expected
+    position = Position(direction, 10, avg_cost)
+
+    assert position.opposes_losing(verdict, position.unrealised_pnl(100.0)) is expected
 
 
 def test_a_non_finite_unrealised_pnl_is_not_losing():
-    assert Position("long", 10, 110.0).opposes_losing("sell", math.nan) is False
+    position = Position("long", 10, 110.0)
+
+    assert position.opposes_losing("sell", position.unrealised_pnl(math.nan)) is False

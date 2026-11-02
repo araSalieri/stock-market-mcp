@@ -165,3 +165,13 @@ async def test_history_cache_keeps_prepost_apart(server_url):
         ("AAPL", "3mo", "1d", False),
         ("AAPL", "1mo", "5m", True),
     ]
+
+
+async def test_history_cache_ignores_ticker_case(server_url):
+    fetcher = counting_fetcher()
+    url = server_url(fetcher, classifier=FakeClassifier())
+
+    await call_tool(url, "get_signal", {"ticker": "aapl", "period": "1mo"})
+    await call_tool(url, "get_signal", {"ticker": "AAPL", "period": "1mo"})
+
+    assert fetcher.history_calls == [("AAPL", "1mo", "5m", False)]  # both casings share one cache entry

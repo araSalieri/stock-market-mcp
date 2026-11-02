@@ -8,6 +8,7 @@ import pytest
 from fakes import FakeClassifier, FakeFetcher, flat_history, seed_signals
 
 from stock_market_mcp.portfolio import PortfolioStore
+from stock_market_mcp.signals import Direction
 
 
 def _signal(verdict="sell", confidence=0.7):
@@ -19,7 +20,7 @@ def _maker(signal_maker, tmp_path, classifier):
     return signal_maker(FakeFetcher(history=flat_history()), classifier, db_path=tmp_path / "smm.db")
 
 
-def set_position(tmp_path, ticker, direction="long", quantity: float = 10, avg_cost: float = 90.0):
+def set_position(tmp_path, ticker, direction: Direction = "long", quantity: float = 10, avg_cost: float = 90.0):
     PortfolioStore(tmp_path / "smm.db").set(ticker, direction, quantity, avg_cost)
 
 
@@ -130,7 +131,7 @@ def test_position_survives_row_trimming(signal_maker, tmp_path, monkeypatch):
     assert prompt["position"]["direction"] == "short"
 
 
-def _cut_loss_reply(signal_maker, tmp_path, signal, direction="long", avg_cost=110.0, seed=False) -> dict:
+def _cut_loss_reply(signal_maker, tmp_path, signal, direction: Direction = "long", avg_cost=110.0, seed=False) -> dict:
     """SignalMaker reply for a held AAPL at flat close 100; seed=True makes the Minimum Confidence null."""
     db = tmp_path / "smm.db"
     maker = _maker(signal_maker, tmp_path, FakeClassifier(signal))

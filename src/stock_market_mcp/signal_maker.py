@@ -13,12 +13,9 @@ from stock_market_mcp.data import DataFetcher
 from stock_market_mcp.errors import InputError
 from stock_market_mcp.portfolio import PortfolioStore
 from stock_market_mcp.prompt import build_signal_prompt, with_previous_signal
-from stock_market_mcp.signals import PLAN_ATR_MULTIPLE, PLAN_REWARD_RATIO, Direction, SignalLog, trade_plan
+from stock_market_mcp.signals import PLAN_ATR_MULTIPLE, PLAN_REWARD_RATIO, VERDICT_DIRECTION, SignalLog, trade_plan
 
 PLAN_ARG_MAX = 10
-
-# Verdict -> Trade Plan Direction; hold has no plan.
-_VERDICT_DIRECTION: dict[str, Direction] = {"buy": "long", "sell": "short"}
 
 
 class SignalMaker:
@@ -59,7 +56,10 @@ class SignalMaker:
         period = fetch_period(interval, period)
         # Read before the classifier, so a broken Portfolio file fails before a classifier call.
         position = self._portfolio.load().get(ticker)
-        held = position.classifier_view(price) if position is not None else None
+        held = pnl = None
+        if position is not None:
+            pnl = position.unrealised_pnl(price)
+            held = position.classifier_view(pnl)
         # The prompt without the previous Signal is the cache key, so storing a Signal doesn't defeat the cache.
         prompt = build_signal_prompt(ticker, period, df, interval=interval, position=held)
         self._signals.score(ticker, interval, df, self._now().isoformat())
@@ -72,20 +72,20 @@ class SignalMaker:
         min_confidence = self._signals.min_confidence()
         hit_rate = self._signals.hit_rate(ticker, interval, signal["verdict"])
         confident = min_confidence is not None and signal["confidence"] >= min_confidence
-        direction = _VERDICT_DIRECTION.get(signal["verdict"]) if confident else None
+        direction = VERDICT_DIRECTION.get(signal["verdict"]) if confident else None
         # Before the Signal is stored, so a plan error doesn't fail a call that already logged.
         plan = trade_plan(df, price, direction, atr_multiple, reward_ratio) if direction else None
         # Stored at any Confidence for the Cut Loss Hit Rate; the reply's cut_loss also needs the Minimum Confidence.
-        opposes_losing = position.opposes_losing(signal["verdict"], price) if position is not None else None
+        opposes_losing = position.opposes_losing(signal["verdict"], pnl) if position is not None and pnl is not None else None
         if fresh:
             self._signals.record(ticker, interval, signal, df, price, opposes_losing)
             # Cached only once stored, so a failed store is retried instead of served from the cache.
             self._cache.put(prompt, signal)
         reply = {**signal, "price": price, "hit_rate": hit_rate, "min_confidence": min_confidence, "trade_plan": plan}
-        if position is not None:
+        if position is not None and pnl is not None:
             reply["position"] = {
                 **asdict(position),
-                **position.unrealised_pnl(price),
+                **pnl,
                 "cut_loss": confident and opposes_losing,
                 "cut_loss_hit_rate": self._signals.cut_loss_hit_rate(),
             }

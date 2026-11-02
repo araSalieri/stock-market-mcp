@@ -4,8 +4,10 @@ import math
 import os
 from dataclasses import dataclass
 
+from stock_market_mcp.bars import finite
 from stock_market_mcp.db import transaction
 from stock_market_mcp.errors import InputError
+from stock_market_mcp.signals import VERDICT_DIRECTION, Direction
 from stock_market_mcp.watchlists import WATCHLIST_MAX_TICKERS
 
 SCHEMA = """CREATE TABLE IF NOT EXISTS positions (
@@ -16,14 +18,9 @@ SCHEMA = """CREATE TABLE IF NOT EXISTS positions (
 )"""
 
 
-def _finite(value: float) -> float | None:
-    """JSON has no NaN; a non-finite amount is null."""
-    return value if math.isfinite(value) else None
-
-
 @dataclass(frozen=True)
 class Position:
-    direction: str
+    direction: Direction
     quantity: float
     avg_cost: float
 
@@ -32,22 +29,22 @@ class Position:
         sign = 1 if self.direction == "long" else -1
         pnl = sign * (price - self.avg_cost) * self.quantity
         return {
-            "unrealised_pnl": _finite(pnl),
-            "unrealised_pnl_pct": _finite(pnl / (self.avg_cost * self.quantity) * 100),
+            "unrealised_pnl": finite(pnl),
+            "unrealised_pnl_pct": finite(pnl / (self.avg_cost * self.quantity) * 100),
         }
 
-    def classifier_view(self, price: float) -> dict:
+    def classifier_view(self, pnl: dict) -> dict:
         """The Position as the classifier sees it: quantity stays out, so size doesn't sway the Verdict or bust the cache (ADR-0005)."""
         return {
             "direction": self.direction,
             "avg_cost": self.avg_cost,
-            "unrealised_pnl_pct": self.unrealised_pnl(price)["unrealised_pnl_pct"],
+            "unrealised_pnl_pct": pnl["unrealised_pnl_pct"],
         }
 
-    def opposes_losing(self, verdict: str, price: float) -> bool:
-        """Whether the Verdict points against this Position while it loses at price; break-even and null P&L don't lose."""
-        pnl = self.unrealised_pnl(price)["unrealised_pnl"]
-        return verdict == {"long": "sell", "short": "buy"}[self.direction] and pnl is not None and pnl < 0
+    def opposes_losing(self, verdict: str, pnl: dict) -> bool:
+        """Whether the Verdict points against this Position while its Unrealised P&L loses; break-even and null don't lose."""
+        amount = pnl["unrealised_pnl"]
+        return VERDICT_DIRECTION.get(verdict) not in (None, self.direction) and amount is not None and amount < 0
 
 
 class PortfolioStore:
@@ -60,10 +57,13 @@ class PortfolioStore:
             rows = conn.execute("SELECT ticker, direction, quantity, avg_cost FROM positions ORDER BY ticker")
             return {t: Position(d, q, c) for t, d, q, c in rows}
 
-    def set(self, ticker: str, direction: str, quantity: float, avg_cost: float) -> None:
+    def set(self, ticker: str, direction: Direction, quantity: float, avg_cost: float) -> None:
         """Replace the ticker's Position; as many Positions as a Watchlist has tickers."""
         if not (math.isfinite(quantity) and quantity >= 0):
             raise InputError(f"quantity must be a finite number of at least 0, got {quantity}")
+        # Separate from the check above, whose text set_position replies with; the tool deletes on 0 instead.
+        if quantity == 0:
+            raise InputError("quantity 0 is no Position; delete it instead")
         if not (math.isfinite(avg_cost) and avg_cost > 0):
             raise InputError(f"avg_cost must be a finite number above 0, got {avg_cost}")
         with transaction(self.path, SCHEMA) as conn:
