@@ -101,5 +101,9 @@ A Position's profit or loss if closed at a given price: the price minus the aver
 _Avoid_: Gain, return, open P&L
 
 **Cut Loss**:
-A Signal whose Verdict points against a held Position (sell on a long, buy on a short) while that Position's Unrealised P&L at the Price is negative. Advisory only; the server never closes the Position.
+A Signal, made with the held Position in view, whose Verdict points against that Position (sell on a long, buy on a short) at or above the Minimum Confidence while the Position's Unrealised P&L at the Price is negative. Advisory only; the server never closes the Position.
 _Avoid_: Stop out, exit signal, bail
+
+**Cut Loss Hit Rate**:
+The Hit Rate over every scored Signal that pointed against a losing Position, across all tickers and Intervals and at any Confidence. Measures whether cutting was right.
+_Avoid_: Exit accuracy, cut rate
