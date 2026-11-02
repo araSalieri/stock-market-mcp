@@ -332,13 +332,18 @@ def test_unexpected_answer_type_retried_once_then_loud(monkeypatch):
     assert len(posts) == 2
 
 
-def test_choice_outside_buy_sell_hold_retried_once_then_loud(monkeypatch):
+@pytest.mark.parametrize(
+    "answer",
+    [
+        {"type": "choice", "choice": "maybe", "confidence": 0.9},
+        {"type": "choice", "choice": "maybe", "probabilities": {"buy": 0.1, "sell": 0.7, "hold": 0.2}},
+        {"type": "choice", "choice": "maybe"},
+    ],
+    ids=["confidence", "probabilities-only", "neither"],
+)
+def test_choice_outside_buy_sell_hold_retried_once_then_loud(monkeypatch, answer):
     classifier, posts = _real_transport_with_bodies(
-        monkeypatch,
-        [
-            _decisions_body(_choice_answer(choice="maybe")),
-            _decisions_body(_choice_answer(choice="maybe")),
-        ],
+        monkeypatch, [_decisions_body(answer), _decisions_body(answer)]
     )
 
     with pytest.raises(SignalContractError) as exc_info:

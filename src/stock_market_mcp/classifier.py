@@ -147,11 +147,8 @@ class OpenRouterClassifier:
         # error, never a default.
         if not isinstance(answer, dict) or answer.get("type") != "choice":
             raise SignalContractError(f"answer for 'verdict' has unexpected type: {answer!r}")
+        # The Verdict itself is checked once, by validate_signal in EnforcingClassifier.
         choice = answer.get("choice")
-        if choice not in _VALID_VERDICTS:
-            raise SignalContractError(
-                f"verdict must be one of buy/sell/hold, got: {choice!r}"
-            )
         probabilities = answer.get("probabilities")
         confidence = answer.get("confidence")
         # confidence and probabilities are schema-optional; read through presence
