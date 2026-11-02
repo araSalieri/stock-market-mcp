@@ -16,6 +16,8 @@ OUTCOME_BARS = 20
 HIT_RATE_MIN_SCORED = 10
 # Targets plus Stops a Confidence band needs before its Hit Rate can set the Minimum Confidence.
 BAND_MIN_SCORED = 30
+# Targets plus Stops among Cut Loss Signals needed before the Cut Loss Hit Rate is reported.
+CUT_LOSS_MIN_SCORED = 30
 # Minimum Confidence until a band has BAND_MIN_SCORED.
 MIN_CONFIDENCE = 0.6
 
@@ -125,6 +127,19 @@ class SignalLog:
         if any(targets + stops >= BAND_MIN_SCORED for _, targets, stops in bands):
             return None
         return MIN_CONFIDENCE
+
+    def cut_loss_hit_rate(self, prompt_version: int) -> float | None:
+        """Targets / (Targets + Stops) over this prompt version's Signals stored with cut_loss = 1, all tickers and
+        Intervals; None under CUT_LOSS_MIN_SCORED."""
+        with self._open() as conn:
+            targets, stops = conn.execute(
+                "SELECT COUNT(*) FILTER (WHERE outcome = 'target'), COUNT(*) FILTER (WHERE outcome = 'stop') "
+                "FROM signals WHERE prompt_version = ? AND cut_loss = 1",
+                (prompt_version,),
+            ).fetchone()
+        if targets + stops < CUT_LOSS_MIN_SCORED:
+            return None
+        return targets / (targets + stops)
 
     def latest(self, ticker: str, interval: str) -> dict | None:
         """The most recent Signal for the ticker and Interval as the classifier sees it, or None."""

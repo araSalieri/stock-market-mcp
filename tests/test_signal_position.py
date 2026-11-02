@@ -57,6 +57,7 @@ async def test_held_position_rides_on_the_signal_with_pnl_at_its_price(server_ur
         "unrealised_pnl": pytest.approx(pnl),
         "unrealised_pnl_pct": pytest.approx(pct),
         "cut_loss": False,
+        "cut_loss_hit_rate": None,
     }
 
 
@@ -88,6 +89,7 @@ async def test_cached_signal_shows_the_current_position(server_url, tmp_path):
         "unrealised_pnl": pytest.approx(40.0),
         "unrealised_pnl_pct": pytest.approx(40 / 360 * 100),
         "cut_loss": False,
+        "cut_loss_hit_rate": None,
     }
     assert len(classifier.prompts) == 1
 
@@ -249,3 +251,32 @@ async def test_old_signals_schema_is_upgraded_on_open(server_url, tmp_path):
     with closing(sqlite3.connect(db)) as conn:
         old = conn.execute("SELECT ticker, prompt_version, verdict, confidence, outcome FROM signals WHERE id = 1")
         assert old.fetchone() == ("MSFT", 1, "buy", 0.8, "target")
+
+
+async def _cut_loss_hit_rate(server_url, tmp_path, seed) -> float | None:
+    db = tmp_path / "smm.db"
+    seed(db)
+    fetcher = QuotedFlatFetcher()
+    url = server_url(fetcher, classifier=FakeClassifier(_signal("buy")), db_path=db)
+    await set_position(url, "AAPL")
+    return (await get_signal(url, fetcher))["position"]["cut_loss_hit_rate"]
+
+
+async def test_cut_loss_hit_rate_is_null_under_30_scored(server_url, tmp_path):
+    def seed(db):
+        seed_signals(db, ["target"] * 29 + ["expired"] * 5, cut_loss=1)
+
+    assert await _cut_loss_hit_rate(server_url, tmp_path, seed) is None
+
+
+async def test_cut_loss_hit_rate_pools_scored_cut_loss_signals_of_this_prompt_version(server_url, tmp_path):
+    def seed(db):
+        seed_signals(db, ["target"] * 20, cut_loss=1, ticker="MSFT", interval="1d")
+        seed_signals(db, ["stop"] * 5, cut_loss=1, ticker="NVDA", interval="5m", verdict="sell")
+        seed_signals(db, ["stop"] * 5, cut_loss=1, confidence=0.2)  # below the Minimum Confidence
+        seed_signals(db, ["expired"] * 10, cut_loss=1)
+        seed_signals(db, ["stop"] * 30, cut_loss=0)
+        seed_signals(db, ["stop"] * 30)  # not held
+        seed_signals(db, ["stop"] * 30, cut_loss=1, prompt_version=1)
+
+    assert await _cut_loss_hit_rate(server_url, tmp_path, seed) == pytest.approx(20 / 30)
