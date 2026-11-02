@@ -2,6 +2,7 @@
 
 import threading
 import time
+from collections.abc import Callable
 from typing import Any
 
 import pandas as pd
@@ -58,29 +59,29 @@ class CachingFetcher:
         self._fundamentals = TTLCache()
 
     def fetch_quote(self, ticker: str) -> dict:
-        cached = self._quotes.get(ticker, self._quote_ttl)
-        if cached is not None:
-            return cached
-        result = self._fetcher.fetch_quote(ticker)
-        self._quotes.put(ticker, result)
-        return result
+        return _cached(self._quotes, ticker, self._quote_ttl, lambda: self._fetcher.fetch_quote(ticker))
 
     def fetch_fundamentals(self, ticker: str) -> dict:
-        cached = self._fundamentals.get(ticker, self._fundamentals_ttl)
-        if cached is not None:
-            return cached
-        result = self._fetcher.fetch_fundamentals(ticker)
-        self._fundamentals.put(ticker, result)
-        return result
+        return _cached(
+            self._fundamentals, ticker, self._fundamentals_ttl, lambda: self._fetcher.fetch_fundamentals(ticker)
+        )
 
     def fetch_history(
         self, ticker: str, period: str, interval: str = "1d", prepost: bool = False
     ) -> pd.DataFrame:
-        key = (ticker, period, interval, prepost)
-        cached = self._histories.get(key, self._history_ttl)
-        if cached is not None:
-            return cached
-        result = self._fetcher.fetch_history(ticker, period, interval, prepost)
-        self._histories.put(key, result)
-        return result
+        return _cached(
+            self._histories,
+            (ticker, period, interval, prepost),
+            self._history_ttl,
+            lambda: self._fetcher.fetch_history(ticker, period, interval, prepost),
+        )
 
+
+def _cached[T](cache: TTLCache, key: Any, ttl: float, fetch: Callable[[], T]) -> T:
+    """Cached value within ttl, else fetch and store; a raising fetch stores nothing."""
+    cached = cache.get(key, ttl)
+    if cached is not None:
+        return cached
+    result = fetch()
+    cache.put(key, result)
+    return result

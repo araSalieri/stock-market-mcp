@@ -121,10 +121,6 @@ _INDICATOR_DISPATCH = {
     ),
 }
 
-# Curated allowlist: the indicators get_signal joins for the classifier.
-# Derived from the dispatch table so adding a branch extends the allowlist too.
-INDICATOR_ALLOWLIST = frozenset(_INDICATOR_DISPATCH)
-
 
 PLAN_ATR_MULTIPLE = 2.0
 PLAN_REWARD_RATIO = 2.0
@@ -189,7 +185,7 @@ def _trade_plan(
     df: pd.DataFrame, entry: float, direction: Direction, atr_multiple: float, reward_ratio: float
 ) -> dict:
     """Stop and Target around entry (the Price) from the last ATR(14) of df."""
-    atr = float(_indicator_frame("atr", df).iloc[-1, 0])
+    atr = float(_INDICATOR_DISPATCH["atr"](df).iloc[-1, 0])
     if not math.isfinite(atr):
         raise ToolError(f"latest row has a non-finite ATR (atr={atr})")
     sign = 1 if direction == "long" else -1
@@ -221,15 +217,6 @@ def _default_plan(df: pd.DataFrame, entry: float, direction: Direction) -> tuple
     return plan["stop"], plan["target"]
 
 
-def _indicator_frame(name: str, df: pd.DataFrame) -> pd.DataFrame:
-    """Indicator values for one allowed name, keyed by pandas-ta's own column names."""
-    handler = _INDICATOR_DISPATCH.get(name)
-    if handler is None:
-        raise ToolError(f"unsupported indicator: {name}")
-    return handler(df)
-
-
-
 def _finite(value: float) -> float | None:
     """JSON has no NaN; an indicator without a value is null."""
     return value if math.isfinite(value) else None
@@ -255,8 +242,8 @@ def _scan_daily(df: pd.DataFrame, now: datetime) -> dict:
     prev = before.iloc[-1]
     prev_close = float(prev["Close"])
     # Completed bars only, so today's forming bar can't move ATR or RSI.
-    atr = float(_indicator_frame("atr", before).iloc[-1, 0])
-    rsi = float(_indicator_frame("rsi", before).iloc[-1, 0])
+    atr = float(_INDICATOR_DISPATCH["atr"](before).iloc[-1, 0])
+    rsi = float(_INDICATOR_DISPATCH["rsi"](before).iloc[-1, 0])
     return {
         "price": float(df["Close"].iloc[-1]),
         "data_date": cast("pd.Timestamp", index[-1]).isoformat(),
@@ -370,8 +357,8 @@ def build_server(
                 raise ToolError(f"{name} must be in (0, {PLAN_ARG_MAX}], got {value}")
         period = _period(interval, period)
         df = fetcher.fetch_history(ticker, period, interval)
-        for name in sorted(INDICATOR_ALLOWLIST):
-            ind = _indicator_frame(name, df)
+        for name, handler in sorted(_INDICATOR_DISPATCH.items()):
+            ind = handler(df)
             if ind is None:
                 raise ToolError(f"not enough history rows for indicator: {name}")
             df = df.join(ind)
