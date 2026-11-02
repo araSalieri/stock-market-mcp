@@ -88,6 +88,7 @@ async def test_hold_is_stored_with_both_default_plans_whatever_the_caller_asked(
         "short_target": pytest.approx(92.0),
         "outcome": None,
         "scored_at": None,
+        "cut_loss": None,
     }
 
 

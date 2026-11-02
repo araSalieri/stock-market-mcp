@@ -356,7 +356,7 @@ def build_server(
         atr_multiple: StrictNumber = PLAN_ATR_MULTIPLE,
         reward_ratio: StrictNumber = PLAN_REWARD_RATIO,
     ) -> dict:
-        """Advisory buy/sell/hold Signal from price history and indicators on bars of one Interval, with the Price (last close), the Hit Rate of past Signals of its kind (buy/sell or hold) for this ticker and Interval (null until enough are scored), the Minimum Confidence applied as min_confidence (set by the server from buy/sell Hit Rates per 0.1 Confidence band, a fixed default until enough are scored), and for buy or sell at or above min_confidence a Trade Plan (Entry, Stop, Target), else null; min_confidence null means no band beats break-even, so no buy or sell gets a Trade Plan; for a held ticker a position key with the Position, its Unrealised P&L (amount and percent of cost) at the Price, and cut_loss: true when the Verdict points against the Position (sell on a long, buy on a short) at or above min_confidence while its Unrealised P&L is negative, else false (the Trade Plan is unchanged); position is absent when not held; input only, never acts on it."""
+        """Advisory buy/sell/hold Signal from price history and indicators on bars of one Interval, with the Price (last close), the Hit Rate of past Signals of its kind (buy/sell or hold) for this ticker and Interval (null until enough are scored), the Minimum Confidence applied as min_confidence (set by the server from buy/sell Hit Rates per 0.1 Confidence band, a fixed default until enough are scored), and for buy or sell at or above min_confidence a Trade Plan (Entry, Stop, Target), else null; min_confidence null means no band beats break-even, so no buy or sell gets a Trade Plan; for a held ticker a position key with the Position, its Unrealised P&L (amount and percent of cost) at the Price, and cut_loss: true when the Verdict points against the Position (sell on a long, buy on a short) at or above min_confidence while its Unrealised P&L is negative, else false (the Trade Plan is unchanged), and cut_loss_hit_rate: Targets / (Targets + Stops) over scored past Signals that pointed against a losing Position at any Confidence, across all tickers and Intervals (null until enough are scored); position is absent when not held; input only, never acts on it."""
         for name, value in (("atr_multiple", atr_multiple), ("reward_ratio", reward_ratio)):
             if not 0 < value <= PLAN_ARG_MAX:
                 raise ToolError(f"{name} must be in (0, {PLAN_ARG_MAX}], got {value}")
@@ -394,6 +394,12 @@ def build_server(
         direction = _VERDICT_DIRECTION.get(signal["verdict"]) if confident else None
         # Before the Signal is stored, so a plan error doesn't fail a call that already logged.
         plan = _trade_plan(df, price, direction, atr_multiple, reward_ratio) if direction else None
+        # Stored at any Confidence for the Cut Loss Hit Rate; the reply's cut_loss also needs the Minimum Confidence.
+        against_loss = None
+        if position is not None:
+            sign = 1 if position["direction"] == "long" else -1
+            opposes = _VERDICT_DIRECTION.get(signal["verdict"]) not in (None, position["direction"])
+            against_loss = opposes and sign * (price - position["avg_cost"]) < 0
         if fresh:
             long_stop, long_target = _default_plan(df, price, "long")
             short_stop, short_target = _default_plan(df, price, "short")
@@ -409,15 +415,18 @@ def build_server(
                 long_target=long_target,
                 short_stop=short_stop,
                 short_target=short_target,
+                cut_loss=against_loss,
             )
             # Cached only once stored, so a failed store is retried instead of served from the cache.
             signal_cache.put(prompt, signal)
         reply = {**signal, "price": price, "hit_rate": hit_rate, "min_confidence": min_confidence, "trade_plan": plan}
         if position is not None:
-            sign = 1 if position["direction"] == "long" else -1
-            opposes = _VERDICT_DIRECTION.get(signal["verdict"]) not in (None, position["direction"])
-            cut_loss = confident and opposes and sign * (price - position["avg_cost"]) < 0
-            reply["position"] = {**position, **_unrealised_pnl(position, price), "cut_loss": cut_loss}
+            reply["position"] = {
+                **position,
+                **_unrealised_pnl(position, price),
+                "cut_loss": confident and against_loss,
+                "cut_loss_hit_rate": signals.cut_loss_hit_rate(PROMPT_VERSION),
+            }
         return reply
 
     @audited_tool
