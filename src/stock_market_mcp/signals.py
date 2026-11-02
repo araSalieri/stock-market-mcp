@@ -15,6 +15,8 @@ from stock_market_mcp.db import transaction
 from stock_market_mcp.errors import InputError
 
 Direction = Literal["long", "short"]
+# Verdict -> Trade Plan Direction; hold has no plan.
+VERDICT_DIRECTION: dict[str, Direction] = {"buy": "long", "sell": "short"}
 
 PLAN_ATR_MULTIPLE = 2.0
 PLAN_REWARD_RATIO = 2.0

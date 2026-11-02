@@ -13,12 +13,9 @@ from stock_market_mcp.data import DataFetcher
 from stock_market_mcp.errors import InputError
 from stock_market_mcp.portfolio import PortfolioStore
 from stock_market_mcp.prompt import build_signal_prompt, with_previous_signal
-from stock_market_mcp.signals import PLAN_ATR_MULTIPLE, PLAN_REWARD_RATIO, Direction, SignalLog, trade_plan
+from stock_market_mcp.signals import PLAN_ATR_MULTIPLE, PLAN_REWARD_RATIO, VERDICT_DIRECTION, SignalLog, trade_plan
 
 PLAN_ARG_MAX = 10
-
-# Verdict -> Trade Plan Direction; hold has no plan.
-_VERDICT_DIRECTION: dict[str, Direction] = {"buy": "long", "sell": "short"}
 
 
 class SignalMaker:
@@ -72,7 +69,7 @@ class SignalMaker:
         min_confidence = self._signals.min_confidence()
         hit_rate = self._signals.hit_rate(ticker, interval, signal["verdict"])
         confident = min_confidence is not None and signal["confidence"] >= min_confidence
-        direction = _VERDICT_DIRECTION.get(signal["verdict"]) if confident else None
+        direction = VERDICT_DIRECTION.get(signal["verdict"]) if confident else None
         # Before the Signal is stored, so a plan error doesn't fail a call that already logged.
         plan = trade_plan(df, price, direction, atr_multiple, reward_ratio) if direction else None
         # Stored at any Confidence for the Cut Loss Hit Rate; the reply's cut_loss also needs the Minimum Confidence.

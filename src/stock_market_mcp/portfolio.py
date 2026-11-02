@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from stock_market_mcp.bars import finite
 from stock_market_mcp.db import transaction
 from stock_market_mcp.errors import InputError
+from stock_market_mcp.signals import VERDICT_DIRECTION, Direction
 from stock_market_mcp.watchlists import WATCHLIST_MAX_TICKERS
 
 SCHEMA = """CREATE TABLE IF NOT EXISTS positions (
@@ -19,7 +20,7 @@ SCHEMA = """CREATE TABLE IF NOT EXISTS positions (
 
 @dataclass(frozen=True)
 class Position:
-    direction: str
+    direction: Direction
     quantity: float
     avg_cost: float
 
@@ -43,7 +44,7 @@ class Position:
     def opposes_losing(self, verdict: str, price: float) -> bool:
         """Whether the Verdict points against this Position while it loses at price; break-even and null P&L don't lose."""
         pnl = self.unrealised_pnl(price)["unrealised_pnl"]
-        return verdict == {"long": "sell", "short": "buy"}[self.direction] and pnl is not None and pnl < 0
+        return VERDICT_DIRECTION.get(verdict) not in (None, self.direction) and pnl is not None and pnl < 0
 
 
 class PortfolioStore:
@@ -56,7 +57,7 @@ class PortfolioStore:
             rows = conn.execute("SELECT ticker, direction, quantity, avg_cost FROM positions ORDER BY ticker")
             return {t: Position(d, q, c) for t, d, q, c in rows}
 
-    def set(self, ticker: str, direction: str, quantity: float, avg_cost: float) -> None:
+    def set(self, ticker: str, direction: Direction, quantity: float, avg_cost: float) -> None:
         """Replace the ticker's Position; as many Positions as a Watchlist has tickers."""
         if not (math.isfinite(quantity) and quantity >= 0):
             raise InputError(f"quantity must be a finite number of at least 0, got {quantity}")
