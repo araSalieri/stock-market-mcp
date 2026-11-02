@@ -372,10 +372,15 @@ def build_server(
         if not math.isfinite(price):
             raise ToolError(f"latest row has a non-finite close (close={price})")
         ticker = ticker.upper()
-        # The prompt without the previous Signal is the cache key, so storing a Signal doesn't defeat the cache.
-        prompt = build_signal_prompt(ticker, period, df, interval=interval)
-        # Read before the classifier, so a broken Portfolio file fails before a classifier call; the prompt never sees it (ADR-0004).
+        # Read before the classifier, so a broken Portfolio file fails before a classifier call.
         position = portfolio.load().get(ticker)
+        # Quantity stays out, so size doesn't sway the Verdict or bust the cache (ADR-0005).
+        held = None
+        if position is not None:
+            pct = _unrealised_pnl(position, price)["unrealised_pnl_pct"]
+            held = {"direction": position["direction"], "avg_cost": position["avg_cost"], "unrealised_pnl_pct": pct}
+        # The prompt without the previous Signal is the cache key, so storing a Signal doesn't defeat the cache.
+        prompt = build_signal_prompt(ticker, period, df, interval=interval, position=held)
         signals.score(ticker, interval, df, now().isoformat())
         signal = signal_cache.get(prompt, signal_ttl)
         fresh = signal is None

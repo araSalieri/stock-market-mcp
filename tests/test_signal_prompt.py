@@ -147,4 +147,4 @@ def test_prompt_keeps_the_longest_run_of_newest_rows_that_fits(max_chars):
 def test_prompt_for_an_empty_frame_has_no_rows():
     payload = json.loads(build_signal_prompt("AAPL", "1mo", prompt_frame().iloc[0:0]))
 
-    assert payload == {"ticker": "AAPL", "period": "1mo", "interval": "1d", "rows": []}
+    assert payload == {"ticker": "AAPL", "period": "1mo", "interval": "1d", "position": None, "rows": []}

@@ -74,35 +74,69 @@ async def test_cached_signal_shows_the_current_position(server_url, tmp_path):
     await set_position(url, "AAPL")
 
     first = await get_signal(url, fetcher)
-    await set_position(url, "AAPL", "short", 4, 110.0)
+    await set_position(url, "AAPL", quantity=4)
     second = await get_signal(url, fetcher)
-    await set_position(url, "AAPL", quantity=0)
-    third = await get_signal(url, fetcher)
 
-    assert first["position"]["direction"] == "long"
+    assert first["position"]["quantity"] == 10
     assert second["position"] == {
-        "direction": "short",
+        "direction": "long",
         "quantity": 4,
-        "avg_cost": 110.0,
+        "avg_cost": 90.0,
         "unrealised_pnl": pytest.approx(40.0),
-        "unrealised_pnl_pct": pytest.approx(40 / 440 * 100),
+        "unrealised_pnl_pct": pytest.approx(40 / 360 * 100),
     }
-    assert "position" not in third
     assert len(classifier.prompts) == 1
 
 
-async def test_prompt_stored_signal_and_scoring_ignore_the_position(server_url, tmp_path):
-    # TTL 0: the second call re-classifies, and its prompt carries the stored previous Signal.
-    async def run(name, held):
-        fetcher, classifier = QuotedFlatFetcher(), FakeClassifier(_signal())
-        url = server_url(fetcher, classifier=classifier, db_path=tmp_path / f"{name}.db", signal_ttl=0)
-        if held:
-            await set_position(url, "AAPL")
-        return classifier, [await get_signal(url, fetcher) for _ in range(2)]
+@pytest.mark.parametrize("change", [{"avg_cost": 95.0}, {"direction": "short"}, {"quantity": 0}])
+async def test_changing_the_position_beyond_quantity_reclassifies(server_url, tmp_path, change):
+    fetcher, classifier = QuotedFlatFetcher(), FakeClassifier(_signal())
+    url = server_url(fetcher, classifier=classifier, db_path=tmp_path / "smm.db")
+    await set_position(url, "AAPL")
 
-    held_classifier, held = await run("held", True)
-    free_classifier, free = await run("free", False)
+    await get_signal(url, fetcher)
+    await set_position(url, "AAPL", **change)
+    await get_signal(url, fetcher)
 
-    assert held_classifier.prompts[0] != held_classifier.prompts[1]  # the second carries the stored Signal
-    assert held_classifier.prompts == free_classifier.prompts
-    assert [{k: v for k, v in reply.items() if k != "position"} for reply in held] == free
+    assert len(classifier.prompts) == 2
+
+
+def _prompt(classifier, n=-1) -> dict:
+    return json.loads(classifier.prompts[n])
+
+
+@pytest.mark.parametrize(("direction", "pct"), [("long", 100 / 900 * 100), ("short", -100 / 900 * 100)])
+async def test_prompt_carries_the_held_position_without_quantity(server_url, tmp_path, direction, pct):
+    fetcher, classifier = QuotedFlatFetcher(), FakeClassifier(_signal())
+    url = server_url(fetcher, classifier=classifier, db_path=tmp_path / "smm.db")
+    await set_position(url, "AAPL", direction)
+    await get_signal(url, fetcher)
+
+    assert _prompt(classifier)["position"] == {
+        "direction": direction,
+        "avg_cost": 90.0,
+        "unrealised_pnl_pct": pytest.approx(pct),
+    }
+
+
+async def test_prompt_says_no_position_for_an_unheld_ticker(server_url, tmp_path):
+    fetcher, classifier = QuotedFlatFetcher(), FakeClassifier(_signal())
+    url = server_url(fetcher, classifier=classifier, db_path=tmp_path / "smm.db")
+    await set_position(url, "MSFT")
+    await get_signal(url, fetcher)
+
+    prompt = _prompt(classifier)
+    assert "position" in prompt
+    assert prompt["position"] is None
+
+
+async def test_position_survives_row_trimming(server_url, tmp_path, monkeypatch):
+    monkeypatch.setenv("SMM_CLASSIFIER_MAX_STATE_CHARS", "3000")
+    fetcher, classifier = QuotedFlatFetcher(), FakeClassifier(_signal())
+    url = server_url(fetcher, classifier=classifier, db_path=tmp_path / "smm.db")
+    await set_position(url, "AAPL", "short")
+    await get_signal(url, fetcher)
+
+    prompt = _prompt(classifier)
+    assert len(prompt["rows"]) < 60  # rows were dropped to fit
+    assert prompt["position"]["direction"] == "short"

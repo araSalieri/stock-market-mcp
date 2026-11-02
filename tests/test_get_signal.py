@@ -284,7 +284,14 @@ def test_decisions_answer_maps_to_strict_signal(monkeypatch):
     assert request["state"] == PROMPT
     question = request["questions"]["verdict"]
     assert question["type"] == "choice"
-    assert set(question["criteria"]) == {"buy", "sell", "hold"}
+    assert question["criteria"] == {
+        "buy": "Bullish momentum or trend evidence in the supplied data.",
+        "sell": "Bearish momentum or trend evidence in the supplied data.",
+        "hold": "Mixed or insufficient evidence in the supplied data.",
+    }
+    assert question["instructions"].endswith(
+        "If a position is supplied, judge it too: sell on a held long or buy on a held short means close it."
+    )
     assert kwargs["headers"]["Authorization"] == "Bearer test-key"
 
 

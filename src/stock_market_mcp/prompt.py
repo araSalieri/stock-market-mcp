@@ -21,6 +21,7 @@ def build_signal_prompt(
     df: pd.DataFrame,
     *,
     interval: str = "1d",
+    position: dict | None = None,
     max_chars: int | None = None,
 ) -> str:
     """Serialize OHLCV history plus joined indicator columns for the classifier.
@@ -28,6 +29,9 @@ def build_signal_prompt(
     The frame must already carry the indicator columns the tool computed; rows
     are emitted as ISO date strings, with null for NaN (warmup rows of later
     lookbacks).
+
+    position (Direction, average cost, Unrealised P&L %) sits in the head, null when not held,
+    so row trimming never drops it.
 
     If the serialized payload exceeds the character budget, the oldest rows are
     dropped until it fits: recency is the point of a timing signal, so the most
@@ -45,7 +49,7 @@ def build_signal_prompt(
     if payload is None:
         raise ValueError("could not serialize history rows")
     rows = json.loads(payload)
-    head = {"ticker": ticker, "period": period, "interval": interval}
+    head = {"ticker": ticker, "period": period, "interval": interval, "position": position}
     if not rows:
         return json.dumps({**head, "rows": []})
     # Serialize each row once and count back from the newest: json.dumps joins rows with ", ".
