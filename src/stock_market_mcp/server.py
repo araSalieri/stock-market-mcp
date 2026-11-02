@@ -237,6 +237,11 @@ def _unrealised_pnl(position: dict, price: float) -> dict:
     }
 
 
+def _losing(pnl: dict) -> bool:
+    """Whether an Unrealised P&L is a loss; break-even and a non-finite (null) amount are not."""
+    return pnl["unrealised_pnl"] is not None and pnl["unrealised_pnl"] < 0
+
+
 def _scan_daily(df: pd.DataFrame, now: datetime) -> dict:
     """Daily Scan numbers; the previous day is the last bar dated before today in the exchange timezone."""
     index = cast("pd.DatetimeIndex", df.index)
@@ -356,7 +361,7 @@ def build_server(
         atr_multiple: StrictNumber = PLAN_ATR_MULTIPLE,
         reward_ratio: StrictNumber = PLAN_REWARD_RATIO,
     ) -> dict:
-        """Advisory buy/sell/hold Signal from price history and indicators on bars of one Interval, with the Price (last close), the Hit Rate of past Signals of its kind (buy/sell or hold) for this ticker and Interval (null until enough are scored), the Minimum Confidence applied as min_confidence (set by the server from buy/sell Hit Rates per 0.1 Confidence band, a fixed default until enough are scored), and for buy or sell at or above min_confidence a Trade Plan (Entry, Stop, Target), else null; min_confidence null means no band beats break-even, so no buy or sell gets a Trade Plan; for a held ticker a position key with the Position and its Unrealised P&L (amount and percent of cost) at the Price, absent when not held; input only, never acts on it."""
+        """Advisory buy/sell/hold Signal from price history and indicators on bars of one Interval, with the Price (last close), the Hit Rate of past Signals of its kind (buy/sell or hold) for this ticker and Interval (null until enough are scored), the Minimum Confidence applied as min_confidence (set by the server from buy/sell Hit Rates per 0.1 Confidence band, a fixed default until enough are scored), and for buy or sell at or above min_confidence a Trade Plan (Entry, Stop, Target), else null; min_confidence null means no band beats break-even, so no buy or sell gets a Trade Plan; for a held ticker a position key with the Position, its Unrealised P&L (amount and percent of cost) at the Price, and cut_loss: true when the Verdict points against the Position (sell on a long, buy on a short) at or above min_confidence while its Unrealised P&L is negative, else false (the Trade Plan is unchanged), and cut_loss_hit_rate: Targets / (Targets + Stops) over scored past Signals that pointed against a losing Position at any Confidence, across all tickers and Intervals (null until enough are scored); position is absent when not held; input only, never acts on it."""
         for name, value in (("atr_multiple", atr_multiple), ("reward_ratio", reward_ratio)):
             if not 0 < value <= PLAN_ARG_MAX:
                 raise ToolError(f"{name} must be in (0, {PLAN_ARG_MAX}], got {value}")
@@ -372,10 +377,16 @@ def build_server(
         if not math.isfinite(price):
             raise ToolError(f"latest row has a non-finite close (close={price})")
         ticker = ticker.upper()
-        # The prompt without the previous Signal is the cache key, so storing a Signal doesn't defeat the cache.
-        prompt = build_signal_prompt(ticker, period, df, interval=interval)
-        # Read before the classifier, so a broken Portfolio file fails before a classifier call; the prompt never sees it (ADR-0004).
+        # Read before the classifier, so a broken Portfolio file fails before a classifier call.
         position = portfolio.load().get(ticker)
+        # Quantity stays out, so size doesn't sway the Verdict or bust the cache (ADR-0005).
+        held = pnl = None
+        if position is not None:
+            pnl = _unrealised_pnl(position, price)
+            pct = pnl["unrealised_pnl_pct"]
+            held = {"direction": position["direction"], "avg_cost": position["avg_cost"], "unrealised_pnl_pct": pct}
+        # The prompt without the previous Signal is the cache key, so storing a Signal doesn't defeat the cache.
+        prompt = build_signal_prompt(ticker, period, df, interval=interval, position=held)
         signals.score(ticker, interval, df, now().isoformat())
         signal = signal_cache.get(prompt, signal_ttl)
         fresh = signal is None
@@ -389,6 +400,11 @@ def build_server(
         direction = _VERDICT_DIRECTION.get(signal["verdict"]) if confident else None
         # Before the Signal is stored, so a plan error doesn't fail a call that already logged.
         plan = _trade_plan(df, price, direction, atr_multiple, reward_ratio) if direction else None
+        # Stored at any Confidence for the Cut Loss Hit Rate; the reply's cut_loss also needs the Minimum Confidence.
+        opposes_losing = None
+        if position is not None and pnl is not None:
+            opposes = _VERDICT_DIRECTION.get(signal["verdict"]) not in (None, position["direction"])
+            opposes_losing = opposes and _losing(pnl)
         if fresh:
             long_stop, long_target = _default_plan(df, price, "long")
             short_stop, short_target = _default_plan(df, price, "short")
@@ -404,12 +420,18 @@ def build_server(
                 long_target=long_target,
                 short_stop=short_stop,
                 short_target=short_target,
+                cut_loss=opposes_losing,
             )
             # Cached only once stored, so a failed store is retried instead of served from the cache.
             signal_cache.put(prompt, signal)
         reply = {**signal, "price": price, "hit_rate": hit_rate, "min_confidence": min_confidence, "trade_plan": plan}
-        if position is not None:
-            reply["position"] = {**position, **_unrealised_pnl(position, price)}
+        if position is not None and pnl is not None:
+            reply["position"] = {
+                **position,
+                **pnl,
+                "cut_loss": confident and opposes_losing,
+                "cut_loss_hit_rate": signals.cut_loss_hit_rate(PROMPT_VERSION),
+            }
         return reply
 
     @audited_tool

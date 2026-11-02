@@ -77,7 +77,7 @@ async def test_hold_is_stored_with_both_default_plans_whatever_the_caller_asked(
         "id": 1,
         "ticker": "AAPL",
         "interval": "1d",
-        "prompt_version": 1,
+        "prompt_version": 2,
         "data_date": "2024-02-29T00:00:00",
         "verdict": "hold",
         "confidence": 0.4,
@@ -88,6 +88,7 @@ async def test_hold_is_stored_with_both_default_plans_whatever_the_caller_asked(
         "short_target": pytest.approx(92.0),
         "outcome": None,
         "scored_at": None,
+        "cut_loss": None,
     }
 
 

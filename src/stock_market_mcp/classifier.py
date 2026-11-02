@@ -19,7 +19,7 @@ DEFAULT_CLASSIFIER_MODEL = "typesafe/jev-1.13"
 OPENROUTER_DECISIONS_URL = "https://openrouter.ai/api/alpha/decisions"
 
 # Stored with each Signal; bump by hand whenever the prompt or the criteria below change.
-PROMPT_VERSION = 1
+PROMPT_VERSION = 2
 
 # The single question the verdict hinges on. The state supplied by the caller
 # is the prompt builder's serialized OHLCV+indicators payload (the API accepts
@@ -29,7 +29,8 @@ _DECISION_QUESTIONS = {
         "type": "choice",
         "instructions": (
             "Given the supplied price history and indicators, is now the right "
-            "time to buy, sell, or hold this stock? The signal is advisory."
+            "time to buy, sell, or hold this stock? The signal is advisory. "
+            "If a position is supplied, judge it too: sell on a held long or buy on a held short means close it."
         ),
         "criteria": {
             "buy": "Bullish momentum or trend evidence in the supplied data.",
