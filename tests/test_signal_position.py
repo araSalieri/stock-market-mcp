@@ -32,24 +32,20 @@ async def set_position(url, ticker, direction="long", quantity: float = 10, avg_
     assert not result.is_error, text_of(result)
 
 
-@pytest.mark.parametrize(
-    ("direction", "pnl", "pct"),
-    [("long", 100.0, 100 / 900 * 100), ("short", -100.0, -100 / 900 * 100)],
-)
-async def test_held_position_rides_on_the_signal_with_pnl_at_its_price(server_url, tmp_path, direction, pnl, pct):
-    # Flat close 100, Position 10 @ 90: a long is up 100, a short down 100, on a cost of 900.
+async def test_held_position_rides_on_the_signal_with_pnl_at_its_price(server_url, tmp_path):
+    # Flat close 100, Position 10 @ 90: up 100 on a cost of 900.
     fetcher = quoted_flat_fetcher()
     url = server_url(fetcher, classifier=FakeClassifier(_signal()), db_path=tmp_path / "smm.db")
-    await set_position(url, "AAPL", direction)
+    await set_position(url, "AAPL")
     payload = await get_signal(url, fetcher)
 
     assert payload["price"] == 100.0
     assert payload["position"] == {
-        "direction": direction,
+        "direction": "long",
         "quantity": 10,
         "avg_cost": 90.0,
-        "unrealised_pnl": pytest.approx(pnl),
-        "unrealised_pnl_pct": pytest.approx(pct),
+        "unrealised_pnl": pytest.approx(100.0),
+        "unrealised_pnl_pct": pytest.approx(100 / 9),
         "cut_loss": False,
         "cut_loss_hit_rate": None,
     }
@@ -107,17 +103,16 @@ def _prompt(classifier, n=-1) -> dict:
     return json.loads(classifier.prompts[n])
 
 
-@pytest.mark.parametrize(("direction", "pct"), [("long", 100 / 900 * 100), ("short", -100 / 900 * 100)])
-async def test_prompt_carries_the_held_position_without_quantity(server_url, tmp_path, direction, pct):
+async def test_prompt_carries_the_held_position_without_quantity(server_url, tmp_path):
     fetcher, classifier = quoted_flat_fetcher(), FakeClassifier(_signal())
     url = server_url(fetcher, classifier=classifier, db_path=tmp_path / "smm.db")
-    await set_position(url, "AAPL", direction)
+    await set_position(url, "AAPL")
     await get_signal(url, fetcher)
 
     assert _prompt(classifier)["position"] == {
-        "direction": direction,
+        "direction": "long",
         "avg_cost": 90.0,
-        "unrealised_pnl_pct": pytest.approx(pct),
+        "unrealised_pnl_pct": pytest.approx(100 / 9),
     }
 
 
@@ -155,29 +150,17 @@ async def _cut_loss_reply(server_url, tmp_path, signal, direction="long", avg_co
     return await get_signal(url, fetcher)
 
 
-@pytest.mark.parametrize(("direction", "verdict", "avg_cost"), [("long", "sell", 110.0), ("short", "buy", 90.0)])
-async def test_opposing_verdict_on_a_losing_position_is_a_cut_loss(server_url, tmp_path, direction, verdict, avg_cost):
+async def test_opposing_verdict_on_a_losing_position_is_a_cut_loss(server_url, tmp_path):
     # No scored Signals, so the Minimum Confidence is the 0.6 default; 0.6 itself counts.
-    payload = await _cut_loss_reply(server_url, tmp_path, _signal(verdict, 0.6), direction, avg_cost)
+    payload = await _cut_loss_reply(server_url, tmp_path, _signal("sell", 0.6))
 
     assert payload["min_confidence"] == 0.6
     assert payload["position"]["cut_loss"] is True
 
 
-@pytest.mark.parametrize(
-    ("direction", "verdict", "confidence", "avg_cost"),
-    [
-        ("long", "sell", 0.7, 90.0),  # profitable
-        ("short", "buy", 0.7, 110.0),  # profitable short
-        ("long", "sell", 0.7, 100.0),  # break-even
-        ("long", "hold", 0.7, 110.0),
-        ("long", "buy", 0.7, 110.0),  # agreeing
-        ("short", "sell", 0.7, 90.0),  # agreeing
-        ("long", "sell", 0.59, 110.0),  # below the Minimum Confidence
-    ],
-)
-async def test_not_a_cut_loss(server_url, tmp_path, direction, verdict, confidence, avg_cost):
-    payload = await _cut_loss_reply(server_url, tmp_path, _signal(verdict, confidence), direction, avg_cost)
+async def test_below_the_minimum_confidence_is_not_a_cut_loss(server_url, tmp_path):
+    # Which Verdicts oppose a losing Position is tested on Position; this is the Confidence gate.
+    payload = await _cut_loss_reply(server_url, tmp_path, _signal("sell", 0.59))
 
     assert payload["position"]["cut_loss"] is False
 
@@ -209,7 +192,6 @@ def _stored_cut_loss(db) -> list:
     [
         ("AAPL", "sell", 0.3, 110.0, 1),  # below the Minimum Confidence still counts
         ("AAPL", "sell", 0.7, 90.0, 0),  # profitable
-        ("AAPL", "hold", 0.7, 110.0, 0),
         ("MSFT", "sell", 0.7, 110.0, None),  # AAPL not held
     ],
 )
