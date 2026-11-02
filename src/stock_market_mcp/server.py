@@ -177,6 +177,11 @@ def _tickers(tickers: list[str]) -> list[str]:
     return names
 
 
+def _last_value(name: str, df: pd.DataFrame) -> float:
+    """Last value of a single-column indicator over df."""
+    return float(_INDICATOR_DISPATCH[name](df).iloc[-1, 0])
+
+
 # Verdict -> Trade Plan Direction; hold has no plan.
 _VERDICT_DIRECTION: dict[str, Direction] = {"buy": "long", "sell": "short"}
 
@@ -185,7 +190,7 @@ def _trade_plan(
     df: pd.DataFrame, entry: float, direction: Direction, atr_multiple: float, reward_ratio: float
 ) -> dict:
     """Stop and Target around entry (the Price) from the last ATR(14) of df."""
-    atr = float(_INDICATOR_DISPATCH["atr"](df).iloc[-1, 0])
+    atr = _last_value("atr", df)
     if not math.isfinite(atr):
         raise ToolError(f"latest row has a non-finite ATR (atr={atr})")
     sign = 1 if direction == "long" else -1
@@ -242,8 +247,8 @@ def _scan_daily(df: pd.DataFrame, now: datetime) -> dict:
     prev = before.iloc[-1]
     prev_close = float(prev["Close"])
     # Completed bars only, so today's forming bar can't move ATR or RSI.
-    atr = float(_INDICATOR_DISPATCH["atr"](before).iloc[-1, 0])
-    rsi = float(_INDICATOR_DISPATCH["rsi"](before).iloc[-1, 0])
+    atr = _last_value("atr", before)
+    rsi = _last_value("rsi", before)
     return {
         "price": float(df["Close"].iloc[-1]),
         "data_date": cast("pd.Timestamp", index[-1]).isoformat(),

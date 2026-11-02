@@ -34,6 +34,15 @@ class TTLCache:
         with self._lock:
             self._entries[key] = (time.monotonic(), value)
 
+    def get_or_fetch[T](self, key: Any, ttl: float, fetch: Callable[[], T]) -> T:
+        """Cached value within ttl, else fetch and store; a raising fetch stores nothing."""
+        cached = self.get(key, ttl)
+        if cached is not None:
+            return cached
+        result = fetch()
+        self.put(key, result)
+        return result
+
 
 class CachingFetcher:
     """DataFetcher decorator that serves repeated calls from a TTL cache.
@@ -59,29 +68,19 @@ class CachingFetcher:
         self._fundamentals = TTLCache()
 
     def fetch_quote(self, ticker: str) -> dict:
-        return _cached(self._quotes, ticker, self._quote_ttl, lambda: self._fetcher.fetch_quote(ticker))
+        return self._quotes.get_or_fetch(ticker, self._quote_ttl, lambda: self._fetcher.fetch_quote(ticker))
 
     def fetch_fundamentals(self, ticker: str) -> dict:
-        return _cached(
-            self._fundamentals, ticker, self._fundamentals_ttl, lambda: self._fetcher.fetch_fundamentals(ticker)
+        return self._fundamentals.get_or_fetch(
+            ticker, self._fundamentals_ttl, lambda: self._fetcher.fetch_fundamentals(ticker)
         )
 
     def fetch_history(
         self, ticker: str, period: str, interval: str = "1d", prepost: bool = False
     ) -> pd.DataFrame:
-        return _cached(
-            self._histories,
+        return self._histories.get_or_fetch(
             (ticker, period, interval, prepost),
             self._history_ttl,
             lambda: self._fetcher.fetch_history(ticker, period, interval, prepost),
         )
 
-
-def _cached[T](cache: TTLCache, key: Any, ttl: float, fetch: Callable[[], T]) -> T:
-    """Cached value within ttl, else fetch and store; a raising fetch stores nothing."""
-    cached = cache.get(key, ttl)
-    if cached is not None:
-        return cached
-    result = fetch()
-    cache.put(key, result)
-    return result

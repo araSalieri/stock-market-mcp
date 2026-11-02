@@ -115,6 +115,7 @@ def five_minute_frame(rows: int) -> pd.DataFrame:
 
 
 def test_prompt_for_a_month_of_5m_bars_builds_fast():
+    # Called directly: timing over MCP would measure the server round trip, not the builder.
     import time
 
     start = time.perf_counter()
@@ -127,6 +128,7 @@ def test_prompt_for_a_month_of_5m_bars_builds_fast():
 
 @pytest.mark.parametrize("max_chars", [100, 500, 2_000, 8_000])
 def test_prompt_keeps_the_longest_run_of_newest_rows_that_fits(max_chars):
+    # Called directly: no tool argument sets the character budget.
     df = wide_frame(300)
 
     payload = json.loads(build_signal_prompt("AAPL", "1y", df, max_chars=max_chars))
@@ -140,3 +142,9 @@ def test_prompt_keeps_the_longest_run_of_newest_rows_that_fits(max_chars):
     assert len(json.dumps(longer)) > max_chars or kept == 300
     if kept > 1:
         assert len(json.dumps(payload)) <= max_chars
+
+
+def test_prompt_for_an_empty_frame_has_no_rows():
+    payload = json.loads(build_signal_prompt("AAPL", "1mo", prompt_frame().iloc[0:0]))
+
+    assert payload == {"ticker": "AAPL", "period": "1mo", "interval": "1d", "rows": []}
