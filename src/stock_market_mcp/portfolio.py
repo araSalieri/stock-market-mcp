@@ -33,18 +33,18 @@ class Position:
             "unrealised_pnl_pct": finite(pnl / (self.avg_cost * self.quantity) * 100),
         }
 
-    def classifier_view(self, price: float) -> dict:
+    def classifier_view(self, pnl: dict) -> dict:
         """The Position as the classifier sees it: quantity stays out, so size doesn't sway the Verdict or bust the cache (ADR-0005)."""
         return {
             "direction": self.direction,
             "avg_cost": self.avg_cost,
-            "unrealised_pnl_pct": self.unrealised_pnl(price)["unrealised_pnl_pct"],
+            "unrealised_pnl_pct": pnl["unrealised_pnl_pct"],
         }
 
-    def opposes_losing(self, verdict: str, price: float) -> bool:
-        """Whether the Verdict points against this Position while it loses at price; break-even and null P&L don't lose."""
-        pnl = self.unrealised_pnl(price)["unrealised_pnl"]
-        return VERDICT_DIRECTION.get(verdict) not in (None, self.direction) and pnl is not None and pnl < 0
+    def opposes_losing(self, verdict: str, pnl: dict) -> bool:
+        """Whether the Verdict points against this Position while its Unrealised P&L loses; break-even and null don't lose."""
+        amount = pnl["unrealised_pnl"]
+        return VERDICT_DIRECTION.get(verdict) not in (None, self.direction) and amount is not None and amount < 0
 
 
 class PortfolioStore:
