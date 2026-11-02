@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from fakes import FakeClassifier, FlatFakeFetcher, call_tool, seed_signals, text_of
+from fakes import FakeClassifier, FakeFetcher, call_tool, flat_history, seed_signals, text_of
 
 
 def _signal(verdict="buy", confidence=0.7):
@@ -13,7 +13,7 @@ def _signal(verdict="buy", confidence=0.7):
 
 async def test_no_scored_signals_applies_0_6(server_url):
     result = await call_tool(
-        server_url(FlatFakeFetcher(), classifier=FakeClassifier(_signal("buy", 0.6))), "get_signal", {"ticker": "AAPL"}
+        server_url(FakeFetcher(history=flat_history()), classifier=FakeClassifier(_signal("buy", 0.6))), "get_signal", {"ticker": "AAPL"}
     )
 
     assert not result.is_error, text_of(result)
@@ -29,7 +29,7 @@ def _seed(db, targets, stops, expired=0, **kwargs):
 async def _reply(server_url, tmp_path, *seeds, signal=None):
     """get_signal reply after seeding _seed kwargs."""
     db = tmp_path / "s.db"
-    url = server_url(FlatFakeFetcher(), classifier=FakeClassifier(signal or _signal()), db_path=db)
+    url = server_url(FakeFetcher(history=flat_history()), classifier=FakeClassifier(signal or _signal()), db_path=db)
     for seed in seeds:
         _seed(db, **seed)
     result = await call_tool(url, "get_signal", {"ticker": "AAPL"})

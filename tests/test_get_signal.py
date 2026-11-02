@@ -8,13 +8,12 @@ import pytest
 from fakes import (
     FakeClassifier,
     FakeFetcher,
-    FlatFakeFetcher,
-    IntradayFakeFetcher,
-    ScanFakeFetcher,
-    SignalFakeFetcher,
     call_tool,
     daily_bars,
+    fake_history,
     five_minute_bars,
+    flat_history,
+    intraday_history,
     text_of,
 )
 from mcp import ClientSession
@@ -41,7 +40,7 @@ def test_classifier_model_id_default_and_env_override(monkeypatch):
 
 async def test_get_signal_returns_strict_json_signal(server_url):
     classifier = FakeClassifier()
-    fetcher = SignalFakeFetcher()
+    fetcher = FakeFetcher(history=fake_history())
     result = await call_tool(
         server_url(fetcher, classifier=classifier),
         "get_signal",
@@ -73,13 +72,9 @@ async def test_get_signal_returns_strict_json_signal(server_url):
 
 async def test_unknown_ticker_is_a_loud_tool_error(server_url):
     # Spec #19 user story 17: no empty data, and nothing reaches the classifier.
-    class UnknownTickerFetcher(SignalFakeFetcher):
-        def fetch_history(self, ticker, period, interval="1d", prepost=False):
-            raise LookupError(f"no history data for ticker: {ticker}")
-
     classifier = FakeClassifier()
     result = await call_tool(
-        server_url(UnknownTickerFetcher(), classifier=classifier),
+        server_url(FakeFetcher(history={}), classifier=classifier),
         "get_signal",
         {"ticker": "NOPE"},
     )
@@ -97,7 +92,7 @@ async def test_malformed_reply_retried_once_then_loud_error(server_url):
     missing_key = {"verdict": "hold", "confidence": 0.5, "data_date": "2024-01-03"}
     classifier = FakeClassifier(replies=[bad_verdict, missing_key])
     result = await call_tool(
-        server_url(fetcher := SignalFakeFetcher(), classifier=classifier),
+        server_url(fetcher := FakeFetcher(history=fake_history()), classifier=classifier),
         "get_signal",
         {"ticker": "AAPL", "period": "1mo"},
     )
@@ -117,7 +112,7 @@ async def test_single_formatting_slip_recovers_after_one_retry(server_url):
             "rationale": "overbought", "data_date": "2024-01-03"}
     classifier = FakeClassifier(replies=[bad, good])
     result = await call_tool(
-        server_url(SignalFakeFetcher(), classifier=classifier),
+        server_url(FakeFetcher(history=fake_history()), classifier=classifier),
         "get_signal",
         {"ticker": "AAPL", "period": "1mo"},
     )
@@ -137,7 +132,7 @@ async def test_provider_failure_is_loud_and_never_retried(server_url):
     # Transport errors are not formatting slips: loud immediately, no retry call.
     classifier = FakeClassifier(error=RuntimeError("openrouter timeout"))
     result = await call_tool(
-        server_url(SignalFakeFetcher(), classifier=classifier),
+        server_url(FakeFetcher(history=fake_history()), classifier=classifier),
         "get_signal",
         {"ticker": "AAPL", "period": "1mo"},
     )
@@ -156,7 +151,7 @@ async def test_missing_openrouter_key_is_a_loud_tool_error(server_url, monkeypat
         lambda *a, **k: pytest.fail("network I/O attempted despite missing key"),
     )
     result = await call_tool(
-        server_url(SignalFakeFetcher()),  # no classifier injected: real transport
+        server_url(FakeFetcher(history=fake_history())),  # no classifier injected: real transport
         "get_signal",
         {"ticker": "AAPL", "period": "1mo"},
     )
@@ -177,7 +172,7 @@ async def test_other_tools_keep_working_without_openrouter_key(server_url, monke
 
 async def test_second_signal_within_ttl_is_served_from_cache(server_url):
     classifier = FakeClassifier()
-    fetcher = SignalFakeFetcher()
+    fetcher = FakeFetcher(history=fake_history())
     url = server_url(fetcher, classifier=classifier)
 
     first = await call_tool(url, "get_signal", {"ticker": "AAPL", "period": "1mo"})
@@ -191,7 +186,7 @@ async def test_second_signal_within_ttl_is_served_from_cache(server_url):
 
 async def test_signal_after_ttl_expiry_reinvokes_classifier(server_url):
     classifier = FakeClassifier()
-    fetcher = SignalFakeFetcher()
+    fetcher = FakeFetcher(history=fake_history())
     url = server_url(fetcher, classifier=classifier, signal_ttl=TEST_SIGNAL_TTL)
 
     first = await call_tool(url, "get_signal", {"ticker": "AAPL", "period": "1mo"})
@@ -406,7 +401,7 @@ def test_provider_http_error_is_loud_and_never_retried(monkeypatch):
 
 async def test_failed_signal_is_never_cached(server_url):
     classifier = FakeClassifier(error=RuntimeError("openrouter 500"))
-    fetcher = SignalFakeFetcher()
+    fetcher = FakeFetcher(history=fake_history())
     url = server_url(fetcher, classifier=classifier)
 
     first = await call_tool(url, "get_signal", {"ticker": "AAPL", "period": "1mo"})
@@ -430,7 +425,7 @@ def _signal(verdict, confidence=0.7):
 async def test_buy_carries_a_long_trade_plan(server_url):
     # Entry 100, ATR 2: Stop = 100 - 2*2 = 96, Target = 100 + 2*(100 - 96) = 108.
     result = await call_tool(
-        server_url(FlatFakeFetcher(), classifier=FakeClassifier(_signal("buy"))),
+        server_url(FakeFetcher(history=flat_history()), classifier=FakeClassifier(_signal("buy"))),
         "get_signal",
         {"ticker": "AAPL"},
     )
@@ -456,7 +451,7 @@ async def test_buy_carries_a_long_trade_plan(server_url):
 async def test_sell_carries_a_short_trade_plan(server_url):
     # Entry 100, ATR 2: Stop = 100 + 2*2 = 104, Target = 100 - 2*(104 - 100) = 92.
     result = await call_tool(
-        server_url(FlatFakeFetcher(), classifier=FakeClassifier(_signal("sell"))),
+        server_url(FakeFetcher(history=flat_history()), classifier=FakeClassifier(_signal("sell"))),
         "get_signal",
         {"ticker": "AAPL"},
     )
@@ -473,7 +468,7 @@ async def test_sell_carries_a_short_trade_plan(server_url):
 
 async def test_hold_has_no_trade_plan_but_carries_the_price(server_url):
     result = await call_tool(
-        server_url(FlatFakeFetcher(last_close=123.5), classifier=FakeClassifier(_signal("hold"))),
+        server_url(FakeFetcher(history=flat_history(last_close=123.5)), classifier=FakeClassifier(_signal("hold"))),
         "get_signal",
         {"ticker": "AAPL"},
     )
@@ -487,7 +482,7 @@ async def test_hold_has_no_trade_plan_but_carries_the_price(server_url):
 @pytest.mark.parametrize("verdict", ["buy", "sell"])
 async def test_buy_or_sell_below_default_min_confidence_has_no_trade_plan(server_url, verdict):
     result = await call_tool(
-        server_url(FlatFakeFetcher(), classifier=FakeClassifier(_signal(verdict, 0.59))),
+        server_url(FakeFetcher(history=flat_history()), classifier=FakeClassifier(_signal(verdict, 0.59))),
         "get_signal",
         {"ticker": "AAPL"},
     )
@@ -506,7 +501,7 @@ async def test_custom_atr_multiple_and_reward_ratio_change_the_plan_and_are_echo
     server_url, verdict, stop, target
 ):
     result = await call_tool(
-        server_url(FlatFakeFetcher(), classifier=FakeClassifier(_signal(verdict))),
+        server_url(FakeFetcher(history=flat_history()), classifier=FakeClassifier(_signal(verdict))),
         "get_signal",
         {"ticker": "AAPL", "atr_multiple": 1.5, "reward_ratio": 3},
     )
@@ -522,7 +517,7 @@ async def test_custom_atr_multiple_and_reward_ratio_change_the_plan_and_are_echo
 async def test_exactly_ten_is_accepted_and_ints_echo_as_floats(server_url):
     # Entry 100, ATR 2: Stop = 100 - 10*2 = 80; Target = 100 + 10*(100-80) = 300.
     result = await call_tool(
-        server_url(FlatFakeFetcher(), classifier=FakeClassifier(_signal("buy"))),
+        server_url(FakeFetcher(history=flat_history()), classifier=FakeClassifier(_signal("buy"))),
         "get_signal",
         {"ticker": "AAPL", "atr_multiple": 10, "reward_ratio": 10},
     )
@@ -540,7 +535,7 @@ async def test_exactly_ten_is_accepted_and_ints_echo_as_floats(server_url):
 async def test_out_of_bounds_plan_argument_fails_before_the_classifier(server_url, arg, value):
     classifier = FakeClassifier()
     result = await call_tool(
-        server_url(FlatFakeFetcher(), classifier=classifier),
+        server_url(FakeFetcher(history=flat_history()), classifier=classifier),
         "get_signal",
         {"ticker": "AAPL", arg: value},
     )
@@ -556,7 +551,7 @@ async def test_out_of_bounds_plan_argument_fails_before_the_classifier(server_ur
 async def test_non_number_plan_argument_fails_before_the_classifier(server_url, arg, value):
     classifier = FakeClassifier()
     result = await call_tool(
-        server_url(FlatFakeFetcher(), classifier=classifier),
+        server_url(FakeFetcher(history=flat_history()), classifier=classifier),
         "get_signal",
         {"ticker": "AAPL", arg: value},
     )
@@ -570,7 +565,7 @@ async def test_non_number_plan_argument_fails_before_the_classifier(server_url, 
 @pytest.mark.parametrize("verdict", ["buy", "sell"])
 async def test_non_positive_plan_price_is_a_loud_tool_error(server_url, verdict):
     result = await call_tool(
-        server_url(FlatFakeFetcher(close=1.0), classifier=FakeClassifier(_signal(verdict))),
+        server_url(FakeFetcher(history=flat_history(close=1.0)), classifier=FakeClassifier(_signal(verdict))),
         "get_signal",
         {"ticker": "AAPL"},
     )
@@ -583,7 +578,7 @@ async def test_non_positive_plan_price_is_a_loud_tool_error(server_url, verdict)
 async def test_nan_last_close_is_a_loud_tool_error(server_url, verdict):
     classifier = FakeClassifier(_signal(verdict))
     result = await call_tool(
-        server_url(FlatFakeFetcher(last_close=float("nan")), classifier=classifier),
+        server_url(FakeFetcher(history=flat_history(last_close=float("nan"))), classifier=classifier),
         "get_signal",
         {"ticker": "AAPL"},
     )
@@ -597,7 +592,7 @@ async def test_too_few_rows_for_indicators_is_a_loud_tool_error(server_url):
     # 5 rows is below pandas-ta's default lookbacks, so indicators come back None.
     classifier = FakeClassifier()
     result = await call_tool(
-        server_url(FlatFakeFetcher(rows=5), classifier=classifier),
+        server_url(FakeFetcher(history=flat_history(rows=5)), classifier=classifier),
         "get_signal",
         {"ticker": "AAPL"},
     )
@@ -610,7 +605,7 @@ async def test_too_few_rows_for_indicators_is_a_loud_tool_error(server_url):
 async def test_cached_signal_carries_the_price_and_a_recomputed_plan(server_url):
     # atr_multiple 1: Stop = 100 - 1*2 = 98, Target = 100 + 2*(100 - 98) = 104.
     classifier = FakeClassifier(_signal("buy"))
-    url = server_url(FlatFakeFetcher(), classifier=classifier)
+    url = server_url(FakeFetcher(history=flat_history()), classifier=classifier)
 
     first = await call_tool(url, "get_signal", {"ticker": "AAPL"})
     second = await call_tool(url, "get_signal", {"ticker": "AAPL", "atr_multiple": 1})
@@ -630,7 +625,7 @@ async def test_cached_signal_carries_the_price_and_a_recomputed_plan(server_url)
 
 async def test_server_lists_its_tools_and_get_signal_says_advisory_and_price(server_url):
     async with (
-        streamable_http_client(server_url(SignalFakeFetcher())) as (read, write),
+        streamable_http_client(server_url(FakeFetcher(history=fake_history()))) as (read, write),
         ClientSession(read, write) as session,
     ):
         await session.initialize()
@@ -655,7 +650,7 @@ async def test_server_lists_its_tools_and_get_signal_says_advisory_and_price(ser
 
 @pytest.mark.parametrize("name", ["get_plan", "get_history"])
 async def test_removed_tools_fail_as_unknown(server_url, name):
-    result = await call_tool(server_url(SignalFakeFetcher()), name, {"ticker": "AAPL"})
+    result = await call_tool(server_url(FakeFetcher(history=fake_history())), name, {"ticker": "AAPL"})
 
     assert result.is_error
     assert "unknown tool" in text_of(result).lower()
@@ -668,7 +663,7 @@ async def test_removed_tools_fail_as_unknown(server_url, name):
     ("interval", "period"), [("1m", "5d"), ("5m", "1mo"), ("15m", "1mo"), ("1h", "6mo"), ("1d", "1y")]
 )
 async def test_interval_and_its_default_period_reach_the_fetcher(server_url, interval, period):
-    fetcher = IntradayFakeFetcher()
+    fetcher = FakeFetcher(history=intraday_history())
     result = await call_tool(
         server_url(fetcher, classifier=FakeClassifier(_signal("hold"))),
         "get_signal",
@@ -681,7 +676,7 @@ async def test_interval_and_its_default_period_reach_the_fetcher(server_url, int
 
 async def test_interval_outside_the_allowlist_is_a_tool_error(server_url):
     classifier = FakeClassifier()
-    fetcher = IntradayFakeFetcher()
+    fetcher = FakeFetcher(history=intraday_history())
     result = await call_tool(
         server_url(fetcher, classifier=classifier),
         "get_signal",
@@ -699,7 +694,7 @@ async def test_interval_outside_the_allowlist_is_a_tool_error(server_url):
     [("1m", "1mo", "7 days"), ("5m", "3mo", "60 days"), ("15m", "1y", "60 days"), ("1h", "5y", "730 days")],
 )
 async def test_period_past_yahoos_limit_is_a_tool_error_naming_it(server_url, interval, period, limit):
-    fetcher = IntradayFakeFetcher()
+    fetcher = FakeFetcher(history=intraday_history())
     result = await call_tool(
         server_url(fetcher, classifier=FakeClassifier()),
         "get_signal",
@@ -714,7 +709,7 @@ async def test_period_past_yahoos_limit_is_a_tool_error_naming_it(server_url, in
 
 @pytest.mark.parametrize(("interval", "period"), [("5m", "banana"), ("1h", "1week")])
 async def test_unknown_period_is_a_tool_error_saying_it_is_not_valid(server_url, interval, period):
-    fetcher = IntradayFakeFetcher()
+    fetcher = FakeFetcher(history=intraday_history())
     result = await call_tool(
         server_url(fetcher, classifier=FakeClassifier()),
         "get_signal",
@@ -728,7 +723,7 @@ async def test_unknown_period_is_a_tool_error_saying_it_is_not_valid(server_url,
 
 
 async def test_explicit_period_within_the_limit_reaches_the_fetcher(server_url):
-    fetcher = IntradayFakeFetcher()
+    fetcher = FakeFetcher(history=intraday_history())
     result = await call_tool(
         server_url(fetcher, classifier=FakeClassifier(_signal("hold"))),
         "get_signal",
@@ -742,7 +737,7 @@ async def test_explicit_period_within_the_limit_reaches_the_fetcher(server_url):
 async def test_prompt_carries_the_interval(server_url):
     classifier = FakeClassifier(_signal("hold"))
     await call_tool(
-        server_url(IntradayFakeFetcher(), classifier=classifier),
+        server_url(FakeFetcher(history=intraday_history()), classifier=classifier),
         "get_signal",
         {"ticker": "AAPL", "interval": "5m"},
     )
@@ -764,7 +759,7 @@ async def test_intraday_data_date_is_the_latest_bars_timestamp(server_url, monke
     monkeypatch.setenv("SMM_OPENROUTER_API_KEY", "test-key")
     monkeypatch.setattr("stock_market_mcp.classifier.requests.post", fake_post)
     result = await call_tool(
-        server_url(IntradayFakeFetcher()),
+        server_url(FakeFetcher(history=intraday_history())),
         "get_signal",
         {"ticker": "BBCA.JK", "interval": "5m"},
     )
@@ -784,7 +779,7 @@ async def test_daily_data_date_matches_scans_for_the_same_last_bar(server_url, m
     )
     daily = daily_bars([100.0 + i for i in range(60)], last="2024-03-15")
     intraday = five_minute_bars({"2024-03-14 16:10": (158.0, 1000)}, [], tz="Asia/Jakarta")
-    fetcher = ScanFakeFetcher({"BBCA.JK": {"1d": daily, "5m": intraday}})
+    fetcher = FakeFetcher(history={"BBCA.JK": {"1d": daily, "5m": intraday}})
     # 2024-03-15 10:00 WIB, during the IDX session.
     url = server_url(fetcher, now=lambda: datetime(2024, 3, 15, 3, 0, tzinfo=UTC))
 
@@ -801,7 +796,7 @@ async def test_intraday_trade_plan_uses_the_intraday_atr(server_url):
     # 5m bars with High/Low 0.25 from a flat 100 close: ATR(14) is 0.5.
     # Stop = 100 - 2*0.5 = 99, Target = 100 + 2*(100 - 99) = 102.
     result = await call_tool(
-        server_url(IntradayFakeFetcher(), classifier=FakeClassifier(_signal("buy"))),
+        server_url(FakeFetcher(history=intraday_history()), classifier=FakeClassifier(_signal("buy"))),
         "get_signal",
         {"ticker": "BBCA.JK", "interval": "5m"},
     )
@@ -814,7 +809,7 @@ async def test_intraday_trade_plan_uses_the_intraday_atr(server_url):
 
 
 async def test_default_call_uses_5m_bars_over_a_month(server_url):
-    fetcher = FlatFakeFetcher()
+    fetcher = FakeFetcher(history=flat_history())
     classifier = FakeClassifier(_signal("buy"))
     result = await call_tool(server_url(fetcher, classifier=classifier), "get_signal", {"ticker": "AAPL"})
 

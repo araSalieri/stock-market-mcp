@@ -5,26 +5,20 @@ import sqlite3
 from contextlib import closing
 
 import pytest
-from fakes import FakeClassifier, FlatFakeFetcher, call_tool, seed_signals, text_of
+from fakes import FakeClassifier, FakeFetcher, call_tool, flat_history, seed_signals, text_of
 
 
-class QuotedFlatFetcher(FlatFakeFetcher):
+def quoted_flat_fetcher() -> FakeFetcher:
     """Flat history plus a quote, so set_position can check the ticker; get_signal must still fetch none."""
-
-    def __init__(self):
-        super().__init__()
-        self.quote_calls = []
-
-    def fetch_quote(self, ticker):
-        self.quote_calls.append(ticker)
-        return {"price": 100.0, "currency": "USD"}
+    quote = {"price": 100.0, "currency": "USD"}
+    return FakeFetcher(quotes={"AAPL": quote, "MSFT": quote}, history=flat_history())
 
 
 def _signal(verdict="sell", confidence=0.7):
     return {"verdict": verdict, "confidence": confidence, "rationale": "test", "data_date": "2024-02-29T00:00:00"}
 
 
-async def get_signal(url, fetcher: QuotedFlatFetcher) -> dict:
+async def get_signal(url, fetcher: FakeFetcher) -> dict:
     quotes_before = len(fetcher.quote_calls)
     result = await call_tool(url, "get_signal", {"ticker": "aapl"})
     assert not result.is_error, text_of(result)
@@ -44,7 +38,7 @@ async def set_position(url, ticker, direction="long", quantity: float = 10, avg_
 )
 async def test_held_position_rides_on_the_signal_with_pnl_at_its_price(server_url, tmp_path, direction, pnl, pct):
     # Flat close 100, Position 10 @ 90: a long is up 100, a short down 100, on a cost of 900.
-    fetcher = QuotedFlatFetcher()
+    fetcher = quoted_flat_fetcher()
     url = server_url(fetcher, classifier=FakeClassifier(_signal()), db_path=tmp_path / "smm.db")
     await set_position(url, "AAPL", direction)
     payload = await get_signal(url, fetcher)
@@ -62,7 +56,7 @@ async def test_held_position_rides_on_the_signal_with_pnl_at_its_price(server_ur
 
 
 async def test_ticker_not_held_has_no_position_key(server_url, tmp_path):
-    fetcher = QuotedFlatFetcher()
+    fetcher = quoted_flat_fetcher()
     url = server_url(fetcher, classifier=FakeClassifier(_signal()), db_path=tmp_path / "smm.db")
     await set_position(url, "MSFT")
     payload = await get_signal(url, fetcher)
@@ -72,7 +66,7 @@ async def test_ticker_not_held_has_no_position_key(server_url, tmp_path):
 
 
 async def test_cached_signal_shows_the_current_position(server_url, tmp_path):
-    fetcher = QuotedFlatFetcher()
+    fetcher = quoted_flat_fetcher()
     classifier = FakeClassifier(_signal())
     url = server_url(fetcher, classifier=classifier, db_path=tmp_path / "smm.db")
     await set_position(url, "AAPL")
@@ -96,7 +90,7 @@ async def test_cached_signal_shows_the_current_position(server_url, tmp_path):
 
 @pytest.mark.parametrize("change", [{"avg_cost": 95.0}, {"direction": "short"}, {"quantity": 0}])
 async def test_changing_the_position_beyond_quantity_reclassifies(server_url, tmp_path, change):
-    fetcher, classifier = QuotedFlatFetcher(), FakeClassifier(_signal())
+    fetcher, classifier = quoted_flat_fetcher(), FakeClassifier(_signal())
     url = server_url(fetcher, classifier=classifier, db_path=tmp_path / "smm.db")
     await set_position(url, "AAPL")
 
@@ -115,7 +109,7 @@ def _prompt(classifier, n=-1) -> dict:
 
 @pytest.mark.parametrize(("direction", "pct"), [("long", 100 / 900 * 100), ("short", -100 / 900 * 100)])
 async def test_prompt_carries_the_held_position_without_quantity(server_url, tmp_path, direction, pct):
-    fetcher, classifier = QuotedFlatFetcher(), FakeClassifier(_signal())
+    fetcher, classifier = quoted_flat_fetcher(), FakeClassifier(_signal())
     url = server_url(fetcher, classifier=classifier, db_path=tmp_path / "smm.db")
     await set_position(url, "AAPL", direction)
     await get_signal(url, fetcher)
@@ -128,7 +122,7 @@ async def test_prompt_carries_the_held_position_without_quantity(server_url, tmp
 
 
 async def test_prompt_says_no_position_for_an_unheld_ticker(server_url, tmp_path):
-    fetcher, classifier = QuotedFlatFetcher(), FakeClassifier(_signal())
+    fetcher, classifier = quoted_flat_fetcher(), FakeClassifier(_signal())
     url = server_url(fetcher, classifier=classifier, db_path=tmp_path / "smm.db")
     await set_position(url, "MSFT")
     await get_signal(url, fetcher)
@@ -140,7 +134,7 @@ async def test_prompt_says_no_position_for_an_unheld_ticker(server_url, tmp_path
 
 async def test_position_survives_row_trimming(server_url, tmp_path, monkeypatch):
     monkeypatch.setenv("SMM_CLASSIFIER_MAX_STATE_CHARS", "3000")
-    fetcher, classifier = QuotedFlatFetcher(), FakeClassifier(_signal())
+    fetcher, classifier = quoted_flat_fetcher(), FakeClassifier(_signal())
     url = server_url(fetcher, classifier=classifier, db_path=tmp_path / "smm.db")
     await set_position(url, "AAPL", "short")
     await get_signal(url, fetcher)
@@ -153,7 +147,7 @@ async def test_position_survives_row_trimming(server_url, tmp_path, monkeypatch)
 async def _cut_loss_reply(server_url, tmp_path, signal, direction="long", avg_cost=110.0, seed=False) -> dict:
     """get_signal reply for a held AAPL at flat close 100; seed=True makes the Minimum Confidence null."""
     db = tmp_path / "smm.db"
-    fetcher = QuotedFlatFetcher()
+    fetcher = quoted_flat_fetcher()
     url = server_url(fetcher, classifier=FakeClassifier(signal), db_path=db)
     if seed:  # 30 scored in the 0.9 band at under break-even, so no band qualifies
         seed_signals(db, ["target"] * 10 + ["stop"] * 20, confidence=0.9)
@@ -221,7 +215,7 @@ def _stored_cut_loss(db) -> list:
 )
 async def test_fresh_signal_stores_cut_loss(server_url, tmp_path, held, verdict, confidence, avg_cost, stored):
     db = tmp_path / "smm.db"
-    fetcher = QuotedFlatFetcher()
+    fetcher = quoted_flat_fetcher()
     url = server_url(fetcher, classifier=FakeClassifier(_signal(verdict, confidence)), db_path=db)
     await set_position(url, held, avg_cost=avg_cost)
     await get_signal(url, fetcher)
@@ -243,7 +237,7 @@ async def test_old_signals_schema_is_upgraded_on_open(server_url, tmp_path):
             "INSERT INTO signals (ticker, interval, prompt_version, data_date, verdict, confidence, price, outcome) "
             "VALUES ('MSFT', '1d', 1, '2023-01-01T00:00:00', 'buy', 0.8, 50.0, 'target')"
         )
-    fetcher = QuotedFlatFetcher()
+    fetcher = quoted_flat_fetcher()
     url = server_url(fetcher, classifier=FakeClassifier(_signal("sell", 0.7)), db_path=db)
     await set_position(url, "AAPL", avg_cost=110.0)
     payload = await get_signal(url, fetcher)
@@ -258,7 +252,7 @@ async def test_old_signals_schema_is_upgraded_on_open(server_url, tmp_path):
 async def _cut_loss_hit_rate(server_url, tmp_path, seed) -> float | None:
     db = tmp_path / "smm.db"
     seed(db)
-    fetcher = QuotedFlatFetcher()
+    fetcher = quoted_flat_fetcher()
     url = server_url(fetcher, classifier=FakeClassifier(_signal("buy")), db_path=db)
     await set_position(url, "AAPL")
     return (await get_signal(url, fetcher))["position"]["cut_loss_hit_rate"]

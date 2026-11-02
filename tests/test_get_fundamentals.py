@@ -1,27 +1,8 @@
-from fakes import call_tool, text_of
-
-
-class FundamentalsFakeFetcher:
-    """Fake data layer: fundamentals only; the quote seam is never touched."""
-
-    def __init__(self, fundamentals=None, error=None):
-        self.fundamentals = fundamentals or {}
-        self.error = error
-
-    def fetch_quote(self, ticker):
-        raise AssertionError("get_fundamentals must not call fetch_quote")
-
-    def fetch_fundamentals(self, ticker):
-        if self.error is not None:
-            raise self.error
-        info = self.fundamentals.get(ticker.upper())
-        if info is None:
-            raise LookupError(f"unknown ticker: {ticker}")
-        return info
+from fakes import FakeFetcher, call_tool, text_of
 
 
 async def test_get_fundamentals_returns_facts_for_known_ticker(server_url):
-    fetcher = FundamentalsFakeFetcher(
+    fetcher = FakeFetcher(
         fundamentals={
             "AAPL": {
                 "ticker": "AAPL",
@@ -41,7 +22,7 @@ async def test_get_fundamentals_returns_facts_for_known_ticker(server_url):
 
 
 async def test_get_fundamentals_unknown_ticker_is_a_loud_tool_error(server_url):
-    fetcher = FundamentalsFakeFetcher()  # no fundamentals at all
+    fetcher = FakeFetcher(fundamentals={})  # no fundamentals at all
     result = await call_tool(server_url(fetcher), "get_fundamentals", {"ticker": "NOPE"})
 
     assert result.is_error
@@ -49,7 +30,7 @@ async def test_get_fundamentals_unknown_ticker_is_a_loud_tool_error(server_url):
 
 
 async def test_get_fundamentals_provider_failure_is_a_loud_tool_error(server_url):
-    fetcher = FundamentalsFakeFetcher(error=RuntimeError("yahoo is down"))
+    fetcher = FakeFetcher(error=RuntimeError("yahoo is down"))
     result = await call_tool(server_url(fetcher), "get_fundamentals", {"ticker": "AAPL"})
 
     assert result.is_error
