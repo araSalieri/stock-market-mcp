@@ -107,3 +107,9 @@ async def test_scan_logs_a_failing_ticker_at_error_and_still_returns_ok(server_u
     assert record.exc_info[1] is boom
     [audit] = audit_lines(app_log)
     assert audit.getMessage().endswith("outcome=ok")
+
+
+async def test_unexpected_exception_message_reaches_the_caller(server_url):
+    result = await call_tool(server_url(NoCloseFakeFetcher()), "get_signal", {"ticker": "AAPL"})
+
+    assert text_of(result) == "Error executing tool get_signal: 'Close'"
