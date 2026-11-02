@@ -154,7 +154,8 @@ class OpenRouterClassifier:
         # confidence and probabilities are schema-optional; read through presence
         # checks, and with neither there is no schema-valid confidence.
         if confidence is None:
-            if not isinstance(probabilities, dict) or choice not in probabilities:
+            # A non-string choice (e.g. a list) is unhashable, so check it before the lookup.
+            if not isinstance(choice, str) or not isinstance(probabilities, dict) or choice not in probabilities:
                 raise SignalContractError(
                     f"answer has neither confidence nor a probability for '{choice}'"
                 )

@@ -46,6 +46,8 @@ def build_signal_prompt(
         raise ValueError("could not serialize history rows")
     rows = json.loads(payload)
     head = {"ticker": ticker, "period": period, "interval": interval}
+    if not rows:
+        return json.dumps({**head, "rows": []})
     # Serialize each row once and count back from the newest: json.dumps joins rows with ", ".
     size = len(json.dumps({**head, "rows": []})) + len(json.dumps(rows[-1]))
     start = len(rows) - 1

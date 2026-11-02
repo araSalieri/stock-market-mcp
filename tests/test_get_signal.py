@@ -342,10 +342,12 @@ def test_unexpected_answer_type_retried_once_then_loud(monkeypatch):
         {"type": "choice", "choice": "maybe", "confidence": 0.9},
         {"type": "choice", "choice": "maybe", "probabilities": {"buy": 0.1, "sell": 0.7, "hold": 0.2}},
         {"type": "choice", "choice": "maybe"},
+        {"type": "choice", "choice": ["maybe"], "probabilities": {"buy": 0.1, "sell": 0.7, "hold": 0.2}},
     ],
-    ids=["confidence", "probabilities-only", "neither"],
+    ids=["confidence", "probabilities-only", "neither", "non-string"],
 )
 def test_choice_outside_buy_sell_hold_retried_once_then_loud(monkeypatch, answer):
+    # Called directly: a malformed Decisions reply is a transport detail no fake classifier behind a tool can send.
     classifier, posts = _real_transport_with_bodies(
         monkeypatch, [_decisions_body(answer), _decisions_body(answer)]
     )
