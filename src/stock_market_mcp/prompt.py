@@ -47,11 +47,15 @@ def build_signal_prompt(
         raise ValueError("could not serialize history rows")
     rows = json.loads(payload)
     head = {"ticker": ticker, "period": period, "interval": interval}
-    prompt = json.dumps({**head, "rows": rows})
-    while len(prompt) > max_chars and len(rows) > 1:
-        rows = rows[1:]
-        prompt = json.dumps({**head, "rows": rows})
-    return prompt
+    # Serialize each row once and count back from the newest: json.dumps joins rows with ", ".
+    size = len(json.dumps({**head, "rows": []})) + len(json.dumps(rows[-1]))
+    start = len(rows) - 1
+    while start > 0:
+        size += len(json.dumps(rows[start - 1])) + 2
+        if size > max_chars:
+            break
+        start -= 1
+    return json.dumps({**head, "rows": rows[start:]})
 
 
 def with_previous_signal(prompt: str, previous_signal: dict) -> str:
