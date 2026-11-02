@@ -28,8 +28,22 @@ def test_prompt_payload_has_ticker_period_and_iso_dates():
     payload = json.loads(prompt)
     assert payload["ticker"] == "AAPL"
     assert payload["period"] == "1mo"
-    assert payload["rows"][0]["Date"] == "2024-01-01T00:00:00.000"
-    assert payload["rows"][2]["Date"] == "2024-01-01T02:00:00.000"
+    assert payload["rows"][0]["Date"] == "2024-01-01T00:00:00"
+    assert payload["rows"][2]["Date"] == "2024-01-01T02:00:00"
+
+
+@pytest.mark.parametrize(
+    ("interval", "freq", "last_date"),
+    [("1d", "D", "2024-03-12T00:00:00-04:00"), ("5m", "5min", "2024-03-12T09:40:00-04:00")],
+)
+def test_prompt_dates_keep_the_exchanges_offset_on_every_interval(interval, freq, last_date):
+    start = "2024-03-10" if interval == "1d" else "2024-03-12 09:30"
+    idx = pd.date_range(start, periods=3, freq=freq, tz="America/New_York", name="Date")
+    df = prompt_frame().set_axis(idx)
+
+    payload = json.loads(build_signal_prompt("AAPL", "1mo", df, interval=interval))
+
+    assert payload["rows"][-1]["Date"] == last_date
 
 
 def test_prompt_serializes_nan_indicator_values_as_null():
@@ -90,3 +104,47 @@ def test_prompt_budget_default_and_env_override(monkeypatch):
 
     monkeypatch.setenv("SMM_CLASSIFIER_MAX_STATE_CHARS", "")
     assert len(build_signal_prompt("AAPL", "1y", wide_frame(500))) <= DEFAULT_MAX_STATE_CHARS  # empty env counts as unset
+
+
+def five_minute_frame(rows: int) -> pd.DataFrame:
+    """About a month of 5m bars with OHLCV plus the full indicator column set."""
+    idx = pd.date_range("2024-01-02 09:30", periods=rows, freq="5min", tz="America/New_York", name="Datetime")
+    base = [100.0 + i * 0.01 for i in range(rows)]
+    cols = ["Open", "High", "Low", "Close", "SMA_20", "EMA_20", "RSI_14", "MACD_12_26_9", "MACDh_12_26_9", "MACDs_12_26_9", "BBL_20_2.0", "BBM_20_2.0", "BBU_20_2.0", "ATRr_14", "OBV", "VWAP_D"]
+    return pd.DataFrame({c: base for c in cols} | {"Volume": list(range(rows))}, index=idx)
+
+
+def test_prompt_for_a_month_of_5m_bars_builds_fast():
+    # Called directly: timing over MCP would measure the server round trip, not the builder.
+    import time
+
+    start = time.perf_counter()
+    prompt = build_signal_prompt("AAPL", "1mo", five_minute_frame(1600), interval="5m")
+    elapsed = time.perf_counter() - start
+
+    assert len(prompt) <= DEFAULT_MAX_STATE_CHARS
+    assert elapsed < 1.0  # loose bound for CI; the old row-at-a-time loop took seconds
+
+
+@pytest.mark.parametrize("max_chars", [100, 500, 2_000, 8_000])
+def test_prompt_keeps_the_longest_run_of_newest_rows_that_fits(max_chars):
+    # Called directly: no tool argument sets the character budget.
+    df = wide_frame(300)
+
+    payload = json.loads(build_signal_prompt("AAPL", "1y", df, max_chars=max_chars))
+    kept = len(payload["rows"])
+
+    assert kept >= 1
+    assert payload["rows"][-1]["Close"] == pytest.approx(399.0)
+    # One more older row would push the prompt over the budget.
+    longer = json.loads(build_signal_prompt("AAPL", "1y", df, max_chars=1_000_000))
+    longer["rows"] = longer["rows"][-(kept + 1):]
+    assert len(json.dumps(longer)) > max_chars or kept == 300
+    if kept > 1:
+        assert len(json.dumps(payload)) <= max_chars
+
+
+def test_prompt_for_an_empty_frame_has_no_rows():
+    payload = json.loads(build_signal_prompt("AAPL", "1mo", prompt_frame().iloc[0:0]))
+
+    assert payload == {"ticker": "AAPL", "period": "1mo", "interval": "1d", "rows": []}

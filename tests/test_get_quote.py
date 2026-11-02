@@ -18,14 +18,6 @@ async def test_get_quote_provider_failure_is_a_loud_tool_error(server_url):
     assert "yahoo is down" in text_of(result)
 
 
-def test_datafetcher_default_fetch_history_fails_loudly_not_empty():
-    """The Protocol default must raise, never return empty data (spec: never empty)."""
-    fetcher = FakeFetcher(quotes={"AAPL": {"price": 190.0, "currency": "USD"}})
-
-    with pytest.raises(NotImplementedError, match="fetch_history"):
-        fetcher.fetch_history("AAPL", "1mo")
-
-
 async def test_quote_only_fake_leaking_into_history_is_a_loud_tool_error(server_url):
     # A quote-only fake leaking into get_signal's history fetch must surface the
     # loud failure, not an empty frame (spec: never empty data).

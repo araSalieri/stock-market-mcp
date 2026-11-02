@@ -2,6 +2,7 @@
 
 import json
 import time
+from datetime import UTC, datetime
 
 import pytest
 from fakes import (
@@ -9,8 +10,11 @@ from fakes import (
     FakeFetcher,
     FlatFakeFetcher,
     IntradayFakeFetcher,
+    ScanFakeFetcher,
     SignalFakeFetcher,
     call_tool,
+    daily_bars,
+    five_minute_bars,
     text_of,
 )
 from mcp import ClientSession
@@ -332,13 +336,20 @@ def test_unexpected_answer_type_retried_once_then_loud(monkeypatch):
     assert len(posts) == 2
 
 
-def test_choice_outside_buy_sell_hold_retried_once_then_loud(monkeypatch):
+@pytest.mark.parametrize(
+    "answer",
+    [
+        {"type": "choice", "choice": "maybe", "confidence": 0.9},
+        {"type": "choice", "choice": "maybe", "probabilities": {"buy": 0.1, "sell": 0.7, "hold": 0.2}},
+        {"type": "choice", "choice": "maybe"},
+        {"type": "choice", "choice": ["maybe"], "probabilities": {"buy": 0.1, "sell": 0.7, "hold": 0.2}},
+    ],
+    ids=["confidence", "probabilities-only", "neither", "non-string"],
+)
+def test_choice_outside_buy_sell_hold_retried_once_then_loud(monkeypatch, answer):
+    # Called directly: a malformed Decisions reply is a transport detail no fake classifier behind a tool can send.
     classifier, posts = _real_transport_with_bodies(
-        monkeypatch,
-        [
-            _decisions_body(_choice_answer(choice="maybe")),
-            _decisions_body(_choice_answer(choice="maybe")),
-        ],
+        monkeypatch, [_decisions_body(answer), _decisions_body(answer)]
     )
 
     with pytest.raises(SignalContractError) as exc_info:
@@ -754,6 +765,29 @@ async def test_intraday_data_date_is_the_latest_bars_timestamp(server_url, monke
     assert not result.is_error, text_of(result)
     data_date = json.loads(text_of(result))["data_date"]
     assert data_date == "2024-03-01T13:55:00+07:00"
+
+
+async def test_daily_data_date_matches_scans_for_the_same_last_bar(server_url, monkeypatch):
+    # Real transport: data_date comes from the prompt's last row; the 5m bars stop the day
+    # before, so scan's data_date is the daily bar's too.
+    monkeypatch.setenv("SMM_OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(
+        "stock_market_mcp.classifier.requests.post",
+        lambda url, **kwargs: FakeResponse(_decisions_body(_choice_answer(choice="hold"))),
+    )
+    daily = daily_bars([100.0 + i for i in range(60)], last="2024-03-15")
+    intraday = five_minute_bars({"2024-03-14 16:10": (158.0, 1000)}, [], tz="Asia/Jakarta")
+    fetcher = ScanFakeFetcher({"BBCA.JK": {"1d": daily, "5m": intraday}})
+    # 2024-03-15 10:00 WIB, during the IDX session.
+    url = server_url(fetcher, now=lambda: datetime(2024, 3, 15, 3, 0, tzinfo=UTC))
+
+    signal = await call_tool(url, "get_signal", {"ticker": "BBCA.JK", "interval": "1d"})
+    scan = await call_tool(url, "scan", {"tickers": ["BBCA.JK"]})
+
+    assert not signal.is_error, text_of(signal)
+    assert scan.structured_content is not None
+    assert json.loads(text_of(signal))["data_date"] == scan.structured_content["result"][0]["data_date"]
+    assert json.loads(text_of(signal))["data_date"] == "2024-03-15T00:00:00+07:00"
 
 
 async def test_intraday_trade_plan_uses_the_intraday_atr(server_url):

@@ -5,25 +5,16 @@ from typing import Protocol
 import pandas as pd
 
 
-def _unimplemented_fetch_history(
-    self: "DataFetcher", ticker: str, period: str, interval: str = "1d", prepost: bool = False
-) -> pd.DataFrame:
-    """Loud default: the spec forbids empty data, so a quote-only fake must fail loudly."""
-    raise NotImplementedError(f"{type(self).__name__} does not implement fetch_history")
-
-
 class DataFetcher(Protocol):
     def fetch_quote(self, ticker: str) -> dict: ...
 
     def fetch_fundamentals(self, ticker: str) -> dict: ...
 
-    # Default implementation (assigned function, not a raise-only def, so pyright
-    # treats it as concrete) so quote-only fakes stay structurally valid; real
-    # fetchers override this. Raising keeps the "never empty data" rule: a
-    # quote-only fake leaking into history surfaces as a loud failure instead
-    # of an empty frame. The frame's attrs["regular_periods"] holds the regular trading
-    # periods as (start, end) timestamps; the Scan needs it to tell pre-market bars apart.
-    fetch_history = _unimplemented_fetch_history
+    # The frame's attrs["regular_periods"] holds the regular trading periods as (start, end)
+    # timestamps; the Scan needs it to tell pre-market bars apart.
+    def fetch_history(
+        self, ticker: str, period: str, interval: str = "1d", prepost: bool = False
+    ) -> pd.DataFrame: ...
 
 
 class YfinanceFetcher:
