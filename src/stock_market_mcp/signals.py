@@ -33,6 +33,8 @@ BAND_MIN_SCORED = 30
 CUT_LOSS_MIN_SCORED = 30
 # Minimum Confidence until a band has BAND_MIN_SCORED.
 MIN_CONFIDENCE = 0.6
+# 0.1 Confidence band as an integer (6 for 0.6-0.69); the epsilon keeps 0.6 in band 6 despite float error.
+BAND = "CAST(confidence * 10 + 1e-9 AS INTEGER)"
 
 # Outcome is null while pending; plan prices are the default Trade Plans, null when one has non-positive prices.
 # cut_loss: 1 when the Verdict opposed a losing Position at any Confidence, 0 when held otherwise, null when not held.
@@ -135,9 +137,7 @@ class SignalLog:
                 f"AND verdict {'=' if hold else '!='} 'hold'",
                 (hits, misses, ticker, interval, PROMPT_VERSION),
             ).fetchone()
-        if right + wrong < HIT_RATE_MIN_SCORED:
-            return None
-        return right / (right + wrong)
+        return _rate(right, wrong)
 
     def min_confidence(self) -> float | None:
         """Lowest 0.1 Confidence band of the current prompt version whose buy/sell Hit Rate is above BREAK_EVEN_HIT_RATE.
@@ -147,8 +147,7 @@ class SignalLog:
         """
         with self._open() as conn:
             bands = conn.execute(
-                # The epsilon keeps 0.6 in band 6 despite float error.
-                "SELECT CAST(confidence * 10 + 1e-9 AS INTEGER) AS band, "
+                f"SELECT {BAND} AS band, "
                 "COUNT(*) FILTER (WHERE outcome = 'target'), COUNT(*) FILTER (WHERE outcome = 'stop') "
                 "FROM signals WHERE prompt_version = ? AND verdict IN ('buy', 'sell') GROUP BY band ORDER BY band",
                 (PROMPT_VERSION,),
@@ -159,6 +158,48 @@ class SignalLog:
         if any(targets + stops >= BAND_MIN_SCORED for _, targets, stops in bands):
             return None
         return MIN_CONFIDENCE
+
+    def track_record(self, ticker: str | None, interval: str | None) -> list[dict]:
+        """Outcome counts and Hit Rates of the current prompt version's Signals per 0.1 Confidence band and Verdict,
+        optionally for one ticker and/or Interval, bands with Signals only, ascending.
+
+        Leaves out Signals score never scores: buy without a long default plan, sell without a short one,
+        hold without both.
+        """
+        with self._open() as conn:
+            rows = conn.execute(
+                f"SELECT {BAND} AS band, verdict, "
+                "COUNT(*) FILTER (WHERE outcome = 'target'), COUNT(*) FILTER (WHERE outcome = 'stop'), "
+                "COUNT(*) FILTER (WHERE outcome = 'expired'), COUNT(*) FILTER (WHERE outcome = 'quiet'), "
+                "COUNT(*) FILTER (WHERE outcome = 'missed'), COUNT(*) FILTER (WHERE outcome IS NULL) "
+                "FROM signals WHERE prompt_version = ? AND (? IS NULL OR ticker = ?) AND (? IS NULL OR interval = ?) "
+                # Plan prices are null together, so the Target stands for the whole plan.
+                "AND CASE verdict WHEN 'buy' THEN long_target IS NOT NULL WHEN 'sell' THEN short_target IS NOT NULL "
+                "ELSE long_target IS NOT NULL AND short_target IS NOT NULL END "
+                "GROUP BY band, verdict ORDER BY band",
+                (PROMPT_VERSION, ticker, ticker, interval, interval),
+            ).fetchall()
+        bands: dict[int, dict] = {}
+        for band, verdict, target, stop, expired, quiet, missed, pending in rows:
+            entry = bands.setdefault(
+                band,
+                {
+                    "band": band / 10,
+                    **{v: {"target": 0, "stop": 0, "expired": 0, "pending": 0, "hit_rate": None} for v in ("buy", "sell")},
+                    "hold": {"quiet": 0, "missed": 0, "pending": 0, "hit_rate": None},
+                },
+            )
+            if verdict == "hold":
+                entry["hold"] = {"quiet": quiet, "missed": missed, "pending": pending, "hit_rate": _rate(quiet, missed)}
+            else:
+                entry[verdict] = {
+                    "target": target,
+                    "stop": stop,
+                    "expired": expired,
+                    "pending": pending,
+                    "hit_rate": _rate(target, stop),
+                }
+        return list(bands.values())
 
     def cut_loss_hit_rate(self) -> float | None:
         """Targets / (Targets + Stops) over the current prompt version's Signals stored with cut_loss = 1, all tickers and
@@ -185,6 +226,13 @@ class SignalLog:
             return None
         verdict, confidence, outcome = row
         return {"verdict": verdict, "confidence": confidence, "outcome": outcome or "pending"}
+
+
+def _rate(hits: int, misses: int) -> float | None:
+    """hits / (hits + misses); None under HIT_RATE_MIN_SCORED."""
+    if hits + misses < HIT_RATE_MIN_SCORED:
+        return None
+    return hits / (hits + misses)
 
 
 def trade_plan(

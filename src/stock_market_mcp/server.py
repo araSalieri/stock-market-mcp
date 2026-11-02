@@ -25,6 +25,7 @@ from stock_market_mcp.cache import (
     CachingFetcher,
 )
 from stock_market_mcp.classifier import (
+    PROMPT_VERSION,
     EnforcingClassifier,
     OpenRouterClassifier,
     SignalClassifier,
@@ -34,7 +35,7 @@ from stock_market_mcp.db import DEFAULT_DB_PATH
 from stock_market_mcp.errors import InputError
 from stock_market_mcp.portfolio import PortfolioStore
 from stock_market_mcp.signal_maker import SignalMaker
-from stock_market_mcp.signals import PLAN_ATR_MULTIPLE, PLAN_REWARD_RATIO, Direction
+from stock_market_mcp.signals import PLAN_ATR_MULTIPLE, PLAN_REWARD_RATIO, Direction, SignalLog
 from stock_market_mcp.watchlists import WatchlistStore, normalise_tickers
 
 log = logging.getLogger(__name__)
@@ -180,6 +181,7 @@ def build_server(
     db_path = db_path or os.environ.get("SMM_DB_PATH", DEFAULT_DB_PATH)
     watchlists = WatchlistStore(db_path)
     portfolio = PortfolioStore(db_path)
+    signal_log = SignalLog(db_path)
     signal_maker = SignalMaker(fetcher, signal_classifier, db_path, signal_ttl, now)
     mcp = MCPServer("stock-market-mcp")
 
@@ -207,6 +209,17 @@ def build_server(
     ) -> dict:
         """Advisory buy/sell/hold Signal from price history and indicators on bars of one Interval, with the Price (last close), the Hit Rate of past Signals of its kind (buy/sell or hold) for this ticker and Interval (null until enough are scored), the Minimum Confidence applied as min_confidence (set by the server from buy/sell Hit Rates per 0.1 Confidence band, a fixed default until enough are scored), and for buy or sell at or above min_confidence a Trade Plan (Entry, Stop, Target), else null; min_confidence null means no band beats break-even, so no buy or sell gets a Trade Plan; for a held ticker a position key with the Position, its Unrealised P&L (amount and percent of cost) at the Price, and cut_loss: true when the Verdict points against the Position (sell on a long, buy on a short) at or above min_confidence while its Unrealised P&L is negative, else false (the Trade Plan is unchanged), and cut_loss_hit_rate: Targets / (Targets + Stops) over scored past Signals that pointed against a losing Position at any Confidence, across all tickers and Intervals (null until enough are scored); position is absent when not held; input only, never acts on it."""
         return signal_maker.make(ticker, interval, period, atr_multiple, reward_ratio)
+
+    @audited_tool
+    def get_track_record(ticker: str | None = None, interval: Interval | None = None) -> dict:
+        """Track Record: how the current prompt version's Signals turned out, from the server's Signal log; no market data or classifier call. ticker and/or interval narrow it; both are echoed back (null when not given) with prompt_version. bands lists each 0.1 Confidence band that has Signals, ascending, as band (its lower bound: 0.6 for 0.6-0.69) with buy and sell each {target, stop, expired, pending, hit_rate: Targets / (Targets + Stops)} and hold {quiet, missed, pending, hit_rate: Quiet / (Quiet + Missed)}; Expired and pending are counted but left out of hit_rate, which is null until enough are scored. Signals that can never be scored (no default Trade Plan) are left out. A filter matching nothing gives an empty bands list."""
+        ticker = ticker.upper() if ticker is not None else None
+        return {
+            "prompt_version": PROMPT_VERSION,
+            "ticker": ticker,
+            "interval": interval,
+            "bands": signal_log.track_record(ticker, interval),
+        }
 
     @audited_tool
     def scan(watchlist: str | None = None, tickers: list[str] | None = None) -> list[dict]:
