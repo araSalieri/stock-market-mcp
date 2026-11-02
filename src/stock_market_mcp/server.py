@@ -8,6 +8,7 @@ import os
 import re
 import time
 from collections.abc import Callable
+from dataclasses import asdict
 from datetime import UTC, datetime
 from typing import Annotated, Literal, cast
 
@@ -153,21 +154,6 @@ def _finite(value: float) -> float | None:
     return value if math.isfinite(value) else None
 
 
-def _unrealised_pnl(position: dict, price: float) -> dict:
-    """Unrealised P&L of a Position at price, as an amount and a percent of cost; null when non-finite."""
-    sign = 1 if position["direction"] == "long" else -1
-    pnl = sign * (price - position["avg_cost"]) * position["quantity"]
-    return {
-        "unrealised_pnl": _finite(pnl),
-        "unrealised_pnl_pct": _finite(pnl / (position["avg_cost"] * position["quantity"]) * 100),
-    }
-
-
-def _losing(pnl: dict) -> bool:
-    """Whether an Unrealised P&L is a loss; break-even and a non-finite (null) amount are not."""
-    return pnl["unrealised_pnl"] is not None and pnl["unrealised_pnl"] < 0
-
-
 def _scan_daily(df: pd.DataFrame, now: datetime) -> dict:
     """Daily Scan numbers; the previous day is the last bar dated before today in the exchange timezone."""
     index = cast("pd.DatetimeIndex", df.index)
@@ -300,12 +286,7 @@ def build_server(
         period = fetch_period(interval, period)
         # Read before the classifier, so a broken Portfolio file fails before a classifier call.
         position = portfolio.load().get(ticker)
-        # Quantity stays out, so size doesn't sway the Verdict or bust the cache (ADR-0005).
-        held = pnl = None
-        if position is not None:
-            pnl = _unrealised_pnl(position, price)
-            pct = pnl["unrealised_pnl_pct"]
-            held = {"direction": position["direction"], "avg_cost": position["avg_cost"], "unrealised_pnl_pct": pct}
+        held = position.classifier_view(price) if position is not None else None
         # The prompt without the previous Signal is the cache key, so storing a Signal doesn't defeat the cache.
         prompt = build_signal_prompt(ticker, period, df, interval=interval, position=held)
         signals.score(ticker, interval, df, now().isoformat())
@@ -322,10 +303,7 @@ def build_server(
         # Before the Signal is stored, so a plan error doesn't fail a call that already logged.
         plan = _trade_plan(df, price, direction, atr_multiple, reward_ratio) if direction else None
         # Stored at any Confidence for the Cut Loss Hit Rate; the reply's cut_loss also needs the Minimum Confidence.
-        opposes_losing = None
-        if position is not None and pnl is not None:
-            opposes = _VERDICT_DIRECTION.get(signal["verdict"]) not in (None, position["direction"])
-            opposes_losing = opposes and _losing(pnl)
+        opposes_losing = position.opposes_losing(signal["verdict"], price) if position is not None else None
         if fresh:
             long_stop, long_target = _default_plan(df, price, "long")
             short_stop, short_target = _default_plan(df, price, "short")
@@ -346,10 +324,10 @@ def build_server(
             # Cached only once stored, so a failed store is retried instead of served from the cache.
             signal_cache.put(prompt, signal)
         reply = {**signal, "price": price, "hit_rate": hit_rate, "min_confidence": min_confidence, "trade_plan": plan}
-        if position is not None and pnl is not None:
+        if position is not None:
             reply["position"] = {
-                **position,
-                **pnl,
+                **asdict(position),
+                **position.unrealised_pnl(price),
                 "cut_loss": confident and opposes_losing,
                 "cut_loss_hit_rate": signals.cut_loss_hit_rate(PROMPT_VERSION),
             }
@@ -434,11 +412,11 @@ def build_server(
         held = portfolio.load()
         results = []
         for ticker, position in held.items():
-            entry = {"ticker": ticker, **position}
+            entry = {"ticker": ticker, **asdict(position)}
             try:
                 quote = fetcher.fetch_quote(ticker)
                 price = float(quote["price"])
-                entry |= {"price": _finite(price), "currency": quote["currency"], **_unrealised_pnl(position, price)}
+                entry |= {"price": _finite(price), "currency": quote["currency"], **position.unrealised_pnl(price)}
             except Exception as exc:
                 log.exception(_error_line(f"get_portfolio ticker={ticker}", exc))
                 entry["error"] = str(exc)
