@@ -90,3 +90,31 @@ async def test_other_prompt_versions_and_signals_that_can_never_be_scored_are_le
     assert (band["buy"]["target"], band["buy"]["stop"]) == (1, 1)
     assert band["sell"]["target"] == 1
     assert band["hold"]["quiet"] == 0
+
+
+@pytest.mark.parametrize(
+    ("args", "echo", "targets"),
+    [
+        ({"ticker": "aapl"}, {"ticker": "AAPL", "interval": None}, 1 + 2),
+        ({"interval": "1h"}, {"ticker": None, "interval": "1h"}, 2 + 4),
+        ({"ticker": "aapl", "interval": "1h"}, {"ticker": "AAPL", "interval": "1h"}, 2),
+        ({"ticker": "nope"}, {"ticker": "NOPE", "interval": None}, None),
+    ],
+)
+async def test_ticker_and_interval_narrow_the_bands_and_are_echoed(server_url, tmp_path, args, echo, targets):
+    seeds = [
+        _seed({"target": 1}, ticker="AAPL", interval="1d"),
+        _seed({"target": 2}, ticker="AAPL", interval="1h"),
+        _seed({"target": 4}, ticker="MSFT", interval="1h"),
+        _seed({"target": 8}, ticker="MSFT", interval="1d"),
+    ]
+    reply = await _track_record(server_url, tmp_path, seeds, args)
+
+    assert {"ticker": reply["ticker"], "interval": reply["interval"]} == echo
+    assert [band["buy"]["target"] for band in reply["bands"]] == ([targets] if targets else [])
+
+
+async def test_a_bad_interval_is_rejected(server_url):
+    result = await call_tool(server_url(FakeFetcher()), "get_track_record", {"interval": "2d"})
+
+    assert result.is_error
