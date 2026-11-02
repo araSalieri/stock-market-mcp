@@ -58,57 +58,73 @@ def fake_history(rows: int = 60) -> pd.DataFrame:
 
 
 class FakeFetcher:
-    def __init__(self, quotes=None, error=None):
-        self.quotes = quotes or {}
+    """Fake data layer that records every call.
+
+    quotes and fundamentals map an upper-cased ticker to its reply; a missing ticker is a LookupError.
+    Without them, fetching one fails loudly, so tests can prove a tool never quotes.
+    history is a frame for every call, a list of frames handed out one per call (the last repeats),
+    or a dict of ticker to {Interval: frame}, where a missing entry is a LookupError and an
+    exception value is raised. Without history, fetch_history fails loudly. error is raised by every fetch.
+    """
+
+    def __init__(self, quotes=None, fundamentals=None, history=None, error=None):
+        self.quotes = quotes
+        self.fundamentals = fundamentals
+        self.history = history
         self.error = error
-        self.quote_calls = []  # asserted on by the TTL-cache ticket
+        self.quote_calls = []
+        self.fundamentals_calls = []
+        self.history_calls = []
 
     def fetch_quote(self, ticker):
         self.quote_calls.append(ticker)
+        return self._reply(self.quotes, "fetch_quote", ticker)
+
+    def fetch_fundamentals(self, ticker):
+        self.fundamentals_calls.append(ticker)
+        return self._reply(self.fundamentals, "fetch_fundamentals", ticker)
+
+    def fetch_history(self, ticker, period, interval="1d", prepost=False):
+        self.history_calls.append((ticker, period, interval, prepost))
         if self.error is not None:
             raise self.error
-        quote = self.quotes.get(ticker.upper())
-        if quote is None:
+        if self.history is None:
+            raise AssertionError("this fake has no history: fetch_history was not expected")
+        if isinstance(self.history, list):
+            frame = self.history[min(len(self.history_calls), len(self.history)) - 1]
+        elif isinstance(self.history, dict):
+            frame = self.history.get(ticker, {}).get(interval)
+            if frame is None:
+                raise LookupError(f"no history data for ticker: {ticker}")
+            if isinstance(frame, Exception):
+                raise frame
+        else:
+            frame = self.history
+        return frame
+
+    def _reply(self, replies, method, ticker):
+        if self.error is not None:
+            raise self.error
+        if replies is None:
+            raise AssertionError(f"this fake has no replies: {method} was not expected")
+        reply = replies.get(ticker.upper())
+        if reply is None:
             raise LookupError(f"unknown ticker: {ticker}")
-        return quote
-
-    def fetch_fundamentals(self, ticker):
-        raise AssertionError("get_quote tests never fetch fundamentals")
-    # No fetch_history: test_get_quote.py checks a quote-only fake reaching get_signal fails loudly.
+        return reply
 
 
-class SignalFakeFetcher:
-    """Fake data layer: history only; quote/fundamentals seams must stay untouched."""
+def flat_history(close: float = 100.0, rows: int = 60, last_close: float | None = None) -> pd.DataFrame:
+    """Flat close with High/Low one unit away: True Range is 2 every row, so ATR(14) is 2.
 
-    def __init__(self):
-        self.history_calls = []
-
-    def fetch_quote(self, ticker) -> dict:
-        raise AssertionError("get_signal tests never fetch quotes")
-
-    def fetch_fundamentals(self, ticker):
-        raise AssertionError("get_signal tests never fetch fundamentals")
-
-    def fetch_history(self, ticker, period, interval="1d", prepost=False):
-        self.history_calls.append((ticker, period, interval, prepost))
-        return fake_history(60)
-
-
-class NoCloseFakeFetcher(SignalFakeFetcher):
-    """History without a Close column: get_signal hits a plain KeyError, a bug path no ToolError wraps."""
-
-    def fetch_history(self, ticker, period, interval="1d", prepost=False):
-        self.history_calls.append((ticker, period, interval, prepost))
-        return fake_history(60).drop(columns="Close")
-
-
-def flat_history(close: float = 100.0, rows: int = 60) -> pd.DataFrame:
-    """Flat close with High/Low one unit away: True Range is 2 every row, so ATR(14) is 2."""
+    last_close (optional) replaces the last row's Close only."""
     idx = pd.date_range("2024-01-01", periods=rows, freq="D", name="Date")
-    return pd.DataFrame(
+    df = pd.DataFrame(
         {"Open": close, "High": close + 1.0, "Low": close - 1.0, "Close": close, "Volume": 1000},
         index=idx,
     )
+    if last_close is not None:
+        df.loc[df.index[-1], "Close"] = last_close
+    return df
 
 
 def intraday_history(
@@ -121,39 +137,6 @@ def intraday_history(
         {"Open": close, "High": close + spread, "Low": close - spread, "Close": close, "Volume": 1000},
         index=idx,
     )
-
-
-class IntradayFakeFetcher(SignalFakeFetcher):
-    def fetch_history(self, ticker, period, interval="1d", prepost=False):
-        self.history_calls.append((ticker, period, interval, prepost))
-        return intraday_history()
-
-
-class FlatFakeFetcher(SignalFakeFetcher):
-    def __init__(self, close: float = 100.0, rows: int = 60, last_close: float | None = None):
-        super().__init__()
-        self.close = close
-        self.rows = rows
-        self.last_close = last_close
-
-    def fetch_history(self, ticker, period, interval="1d", prepost=False):
-        self.history_calls.append((ticker, period, interval, prepost))
-        df = flat_history(self.close, self.rows)
-        if self.last_close is not None:
-            df.loc[df.index[-1], "Close"] = self.last_close
-        return df
-
-
-class SequenceFakeFetcher(SignalFakeFetcher):
-    """History frames handed out one per fetch_history call; the last one repeats."""
-
-    def __init__(self, frames: list[pd.DataFrame]):
-        super().__init__()
-        self.frames = frames
-
-    def fetch_history(self, ticker, period, interval="1d", prepost=False):
-        self.history_calls.append((ticker, period, interval, prepost))
-        return self.frames[min(len(self.history_calls), len(self.frames)) - 1]
 
 
 class FakeClassifier:
@@ -210,26 +193,3 @@ def five_minute_bars(
     )
     df.attrs["regular_periods"] = [(pd.Timestamp(s, tz=tz), pd.Timestamp(e, tz=tz)) for s, e in regular]
     return df
-
-
-class ScanFakeFetcher:
-    """History by ticker, then by Interval ("1d" or "5m"); a value that is an exception is raised."""
-
-    def __init__(self, frames: dict):
-        self.frames = frames
-        self.history_calls = []
-
-    def fetch_quote(self, ticker):
-        raise AssertionError("scan never fetches quotes")
-
-    def fetch_fundamentals(self, ticker):
-        raise AssertionError("scan never fetches fundamentals")
-
-    def fetch_history(self, ticker, period, interval="1d", prepost=False):
-        self.history_calls.append((ticker, period, interval, prepost))
-        frame = self.frames.get(ticker, {}).get(interval)
-        if frame is None:
-            raise LookupError(f"no history data for ticker: {ticker}")
-        if isinstance(frame, Exception):
-            raise frame
-        return frame

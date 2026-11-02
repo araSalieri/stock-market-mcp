@@ -5,7 +5,7 @@ import sqlite3
 from contextlib import closing
 
 import pytest
-from fakes import FakeClassifier, FlatFakeFetcher, call_tool, text_of
+from fakes import FakeClassifier, FakeFetcher, call_tool, flat_history, text_of
 
 
 def _signal(verdict, confidence=0.7):
@@ -14,7 +14,7 @@ def _signal(verdict, confidence=0.7):
 
 async def test_second_call_shows_the_classifier_the_first_signal_as_pending(server_url):
     classifier = FakeClassifier(replies=[_signal("sell", 0.8), _signal("buy")])
-    url = server_url(FlatFakeFetcher(), classifier=classifier, signal_ttl=0)
+    url = server_url(FakeFetcher(history=flat_history()), classifier=classifier, signal_ttl=0)
 
     await call_tool(url, "get_signal", {"ticker": "AAPL"})
     await call_tool(url, "get_signal", {"ticker": "aapl"})
@@ -35,7 +35,7 @@ def _stored(db):
 
 async def test_cache_hit_within_the_ttl_stores_nothing(server_url, tmp_path):
     classifier = FakeClassifier(_signal("buy"))
-    url = server_url(FlatFakeFetcher(), classifier=classifier, db_path=tmp_path / "s.db")
+    url = server_url(FakeFetcher(history=flat_history()), classifier=classifier, db_path=tmp_path / "s.db")
 
     await call_tool(url, "get_signal", {"ticker": "AAPL"})
     second = await call_tool(url, "get_signal", {"ticker": "AAPL"})
@@ -49,26 +49,26 @@ async def _previous_after(server_url, db, failing_url):
     """The previous Signal a working server on db shows the classifier after a failed call on failing_url."""
     assert (await call_tool(failing_url, "get_signal", {"ticker": "AAPL"})).is_error
     classifier = FakeClassifier()
-    await call_tool(server_url(FlatFakeFetcher(), classifier=classifier, db_path=db), "get_signal", {"ticker": "AAPL"})
+    await call_tool(server_url(FakeFetcher(history=flat_history()), classifier=classifier, db_path=db), "get_signal", {"ticker": "AAPL"})
     return json.loads(classifier.prompts[0]).get("previous_signal")
 
 
 async def test_failed_classifier_call_stores_nothing(server_url, tmp_path):
     db = tmp_path / "s.db"
-    failing = server_url(FlatFakeFetcher(), classifier=FakeClassifier(error=RuntimeError("down")), db_path=db)
+    failing = server_url(FakeFetcher(history=flat_history()), classifier=FakeClassifier(error=RuntimeError("down")), db_path=db)
     assert await _previous_after(server_url, db, failing) is None
 
 
 async def test_failed_fetch_stores_nothing(server_url, tmp_path):
     db = tmp_path / "s.db"
-    failing = server_url(FlatFakeFetcher(rows=5), classifier=FakeClassifier(), db_path=db)
+    failing = server_url(FakeFetcher(history=flat_history(rows=5)), classifier=FakeClassifier(), db_path=db)
     assert await _previous_after(server_url, db, failing) is None
 
 
 async def test_hold_is_stored_with_both_default_plans_whatever_the_caller_asked(server_url, tmp_path):
     # Entry 100, ATR 2, defaults 2 ATR and ratio 2: long 96/108, short 104/92.
     classifier = FakeClassifier(_signal("hold", 0.4))
-    url = server_url(FlatFakeFetcher(), classifier=classifier, db_path=tmp_path / "s.db")
+    url = server_url(FakeFetcher(history=flat_history()), classifier=classifier, db_path=tmp_path / "s.db")
 
     await call_tool(url, "get_signal", {"ticker": "aapl", "interval": "1d", "atr_multiple": 1, "reward_ratio": 3})
 
@@ -95,7 +95,7 @@ async def test_hold_is_stored_with_both_default_plans_whatever_the_caller_asked(
 async def test_previous_signal_survives_row_trimming(server_url, monkeypatch):
     monkeypatch.setenv("SMM_CLASSIFIER_MAX_STATE_CHARS", "3000")
     classifier = FakeClassifier(_signal("buy"))
-    url = server_url(FlatFakeFetcher(), classifier=classifier, signal_ttl=0)
+    url = server_url(FakeFetcher(history=flat_history()), classifier=classifier, signal_ttl=0)
 
     await call_tool(url, "get_signal", {"ticker": "AAPL"})
     await call_tool(url, "get_signal", {"ticker": "AAPL"})
@@ -108,7 +108,7 @@ async def test_previous_signal_survives_row_trimming(server_url, monkeypatch):
 async def test_unusable_database_fails_get_signal_loudly(server_url, tmp_path):
     # A directory can't be opened as a SQLite file.
     classifier = FakeClassifier()
-    url = server_url(FlatFakeFetcher(), classifier=classifier, db_path=tmp_path)
+    url = server_url(FakeFetcher(history=flat_history()), classifier=classifier, db_path=tmp_path)
 
     result = await call_tool(url, "get_signal", {"ticker": "AAPL"})
 
@@ -120,7 +120,7 @@ async def test_unusable_database_fails_get_signal_loudly(server_url, tmp_path):
 async def test_invalid_caller_plan_fails_before_the_signal_is_stored(server_url):
     # Close 10, ATR 2: a 5 ATR Stop is 0, but the default 2 ATR plan is valid.
     classifier = FakeClassifier(_signal("buy"))
-    url = server_url(FlatFakeFetcher(close=10.0), classifier=classifier)
+    url = server_url(FakeFetcher(history=flat_history(close=10.0)), classifier=classifier)
 
     failed = await call_tool(url, "get_signal", {"ticker": "AAPL", "interval": "1d", "atr_multiple": 5})
     retry = await call_tool(url, "get_signal", {"ticker": "AAPL", "interval": "1d"})
@@ -133,7 +133,7 @@ async def test_invalid_caller_plan_fails_before_the_signal_is_stored(server_url)
 async def test_failed_store_is_not_cached_so_a_retry_stores_the_signal(server_url, tmp_path):
     db = tmp_path / "s.db"
     classifier = FakeClassifier(_signal("buy"))
-    url = server_url(FlatFakeFetcher(), classifier=classifier, db_path=db)
+    url = server_url(FakeFetcher(history=flat_history()), classifier=classifier, db_path=db)
     await call_tool(url, "get_signal", {"ticker": "MSFT"})  # creates the file
     db.chmod(0o444)  # reads still work, the insert fails
 

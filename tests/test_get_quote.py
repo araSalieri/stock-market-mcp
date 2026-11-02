@@ -3,7 +3,7 @@ from fakes import FakeFetcher, call_tool, text_of
 
 
 async def test_get_quote_unknown_ticker_is_a_loud_tool_error(server_url):
-    fetcher = FakeFetcher()  # no quotes at all
+    fetcher = FakeFetcher(quotes={})  # no quotes at all
     result = await call_tool(server_url(fetcher), "get_quote", {"ticker": "NOPE"})
 
     assert result.is_error

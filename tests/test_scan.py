@@ -3,7 +3,7 @@
 from datetime import UTC, datetime
 
 import pytest
-from fakes import FakeClassifier, ScanFakeFetcher, call_tool, daily_bars, five_minute_bars, text_of
+from fakes import FakeClassifier, FakeFetcher, call_tool, daily_bars, five_minute_bars, text_of
 from mcp.types import CallToolResult
 
 from stock_market_mcp.watchlists import WatchlistStore
@@ -32,7 +32,7 @@ def entries(result: CallToolResult) -> list[dict]:
     [{}, {"watchlist": "idx", "tickers": ["BBCA.JK"]}, {"watchlist": None, "tickers": None}],
 )
 async def test_scan_needs_exactly_one_of_watchlist_or_tickers(server_url, args):
-    result = await call_tool(server_url(ScanFakeFetcher({})), "scan", args)
+    result = await call_tool(server_url(FakeFetcher(history={})), "scan", args)
 
     assert result.is_error
     assert "exactly one" in text_of(result)
@@ -40,9 +40,9 @@ async def test_scan_needs_exactly_one_of_watchlist_or_tickers(server_url, args):
 
 async def test_scan_by_watchlist_scans_its_tickers_like_an_ad_hoc_list(server_url, tmp_path):
     path = tmp_path / "smm.db"
-    # Seeded through the store: ScanFakeFetcher has no quotes, so set_watchlist can't save these.
+    # Seeded through the store: the fake has no quotes, so set_watchlist can't save these.
     WatchlistStore(path).set("idx", ["BBCA.JK", "NOPE"])
-    fetcher = ScanFakeFetcher(
+    fetcher = FakeFetcher(history=
         {"BBCA.JK": {"1d": daily_bars(rising(), last="2024-03-14"), "5m": five_minute_bars({}, [])}}
     )
     url = server_url(fetcher, db_path=path, now=lambda: IN_SESSION)
@@ -58,7 +58,7 @@ async def test_scan_by_watchlist_scans_its_tickers_like_an_ad_hoc_list(server_ur
 async def test_scan_of_an_unknown_watchlist_names_it(server_url, tmp_path):
     path = tmp_path / "smm.db"
     WatchlistStore(path).set("idx", ["BBCA.JK"])
-    fetcher = ScanFakeFetcher({})
+    fetcher = FakeFetcher(history={})
     result = await call_tool(server_url(fetcher, db_path=path), "scan", {"watchlist": "swing"})
 
     assert result.is_error
@@ -69,7 +69,7 @@ async def test_scan_of_an_unknown_watchlist_names_it(server_url, tmp_path):
 async def test_scan_of_a_broken_database_file_errors_like_get_watchlists(server_url, tmp_path):
     path = tmp_path / "smm.db"
     path.write_text("{not a database")
-    url = server_url(ScanFakeFetcher({}), db_path=path)
+    url = server_url(FakeFetcher(history={}), db_path=path)
 
     scanned = await call_tool(url, "scan", {"watchlist": "idx"})
     listed = await call_tool(url, "get_watchlists", {})
@@ -82,7 +82,7 @@ async def test_scan_of_a_broken_database_file_errors_like_get_watchlists(server_
 
 async def test_scan_caps_tickers_at_15(server_url):
     tickers = [f"T{i}" for i in range(16)]
-    fetcher = ScanFakeFetcher({})
+    fetcher = FakeFetcher(history={})
     result = await call_tool(server_url(fetcher), "scan", {"tickers": tickers})
 
     assert result.is_error
@@ -93,7 +93,7 @@ async def test_scan_caps_tickers_at_15(server_url):
 async def test_scan_upper_cases_and_dedupes_tickers_keeping_order(server_url):
     # 16 raw tickers, 15 after de-duplication, so the cap counts unique tickers.
     tickers = ["aapl", "bbca.jk", "AAPL"] + [f"t{i}" for i in range(13)]
-    fetcher = ScanFakeFetcher({})
+    fetcher = FakeFetcher(history={})
     result = await call_tool(server_url(fetcher, now=lambda: IN_SESSION), "scan", {"tickers": tickers})
 
     assert not result.is_error
@@ -112,7 +112,7 @@ async def test_scan_before_the_open_uses_the_last_completed_session(server_url):
     # The 14th's last 5m bar is newer than its daily bar, so it gives the Price. IDX has no
     # pre-market, so there is no Gap yet, and no Relative Volume or VWAP before the open.
     intraday = five_minute_bars({"2024-03-14 16:10": (129.0, 1000)}, [IDX_DAY], tz="Asia/Jakarta")
-    fetcher = ScanFakeFetcher({"BBCA.JK": {"1d": daily_bars(rising(), last="2024-03-14"), "5m": intraday}})
+    fetcher = FakeFetcher(history={"BBCA.JK": {"1d": daily_bars(rising(), last="2024-03-14"), "5m": intraday}})
     result = await call_tool(server_url(fetcher, now=lambda: BEFORE_OPEN), "scan", {"tickers": ["BBCA.JK"]})
 
     assert entries(result) == [
@@ -136,7 +136,7 @@ async def test_scan_in_session_excludes_the_forming_bar_from_the_previous_day(se
     # Today's bar (the 15th, close 129) is still forming; the previous day is the 14th, close 128.
     # The 5m bars stop on the 14th, so the daily bar is newer and gives the Price; no Gap without today's open.
     intraday = five_minute_bars({"2024-03-14 16:10": (128.0, 1000)}, [IDX_DAY], tz="Asia/Jakarta")
-    fetcher = ScanFakeFetcher({"BBCA.JK": {"1d": daily_bars(rising(), last="2024-03-15"), "5m": intraday}})
+    fetcher = FakeFetcher(history={"BBCA.JK": {"1d": daily_bars(rising(), last="2024-03-15"), "5m": intraday}})
     result = await call_tool(server_url(fetcher, now=lambda: IN_SESSION), "scan", {"tickers": ["BBCA.JK"]})
 
     assert entries(result) == [
@@ -158,7 +158,7 @@ async def test_scan_in_session_excludes_the_forming_bar_from_the_previous_day(se
 
 async def test_scan_gives_a_failing_ticker_its_own_error_entry(server_url):
     # Falling closes: no gains, so RSI is 0.
-    fetcher = ScanFakeFetcher(
+    fetcher = FakeFetcher(history=
         {
             "AAPL": {
                 "1d": daily_bars(rising()[::-1], last="2024-03-14", tz="America/New_York"),
@@ -186,7 +186,7 @@ async def test_scan_gives_a_failing_ticker_its_own_error_entry(server_url):
 async def test_scan_makes_no_classifier_call_and_needs_no_openrouter_key(server_url, monkeypatch):
     monkeypatch.delenv("SMM_OPENROUTER_API_KEY", raising=False)
     classifier = FakeClassifier()
-    fetcher = ScanFakeFetcher({"BBCA.JK": {"1d": daily_bars(rising()), "5m": five_minute_bars({}, [])}})
+    fetcher = FakeFetcher(history={"BBCA.JK": {"1d": daily_bars(rising()), "5m": five_minute_bars({}, [])}})
     result = await call_tool(
         server_url(fetcher, classifier=classifier, now=lambda: IN_SESSION), "scan", {"tickers": ["BBCA.JK"]}
     )
@@ -202,7 +202,7 @@ async def test_scan_us_gap_before_the_open_uses_the_latest_pre_market_price(serv
         US_DAYS[:-1],
     )
     daily = daily_bars(rising(), last="2024-03-14", tz="America/New_York")
-    fetcher = ScanFakeFetcher({"AAPL": {"1d": daily, "5m": intraday}})
+    fetcher = FakeFetcher(history={"AAPL": {"1d": daily, "5m": intraday}})
     result = await call_tool(server_url(fetcher, now=lambda: US_PRE_MARKET), "scan", {"tickers": ["AAPL"]})
 
     [entry] = entries(result)
@@ -222,7 +222,7 @@ async def test_scan_in_session_gap_and_vwap_use_regular_session_bars_only(server
         US_DAYS,
     )
     daily = daily_bars(rising(), last="2024-03-15", tz="America/New_York")
-    fetcher = ScanFakeFetcher({"AAPL": {"1d": daily, "5m": intraday}})
+    fetcher = FakeFetcher(history={"AAPL": {"1d": daily, "5m": intraday}})
     result = await call_tool(server_url(fetcher, now=lambda: US_IN_SESSION), "scan", {"tickers": ["AAPL"]})
 
     [entry] = entries(result)
@@ -245,7 +245,7 @@ async def test_scan_relative_volume_compares_10_prior_sessions_at_the_same_time_
     bars["2024-03-15 09:30"] = (100.0, 150)
     bars["2024-03-15 09:35"] = (100.0, 150)
     daily = daily_bars(rising(), last="2024-03-15", tz="America/New_York")
-    fetcher = ScanFakeFetcher({"AAPL": {"1d": daily, "5m": five_minute_bars(bars, US_DAYS)}})
+    fetcher = FakeFetcher(history={"AAPL": {"1d": daily, "5m": five_minute_bars(bars, US_DAYS)}})
     result = await call_tool(server_url(fetcher, now=lambda: US_IN_SESSION), "scan", {"tickers": ["AAPL"]})
 
     [entry] = entries(result)
@@ -255,7 +255,7 @@ async def test_scan_relative_volume_compares_10_prior_sessions_at_the_same_time_
 async def test_scan_atr_and_rsi_ignore_the_forming_bar(server_url):
     # Today's forming bar crashes to 50; on the completed bars ATR is still 2 (2/128 = 1.5625%) and RSI 100.
     daily = daily_bars(rising()[:-1] + [50.0], last="2024-03-15")
-    fetcher = ScanFakeFetcher({"BBCA.JK": {"1d": daily, "5m": five_minute_bars({}, [])}})
+    fetcher = FakeFetcher(history={"BBCA.JK": {"1d": daily, "5m": five_minute_bars({}, [])}})
     result = await call_tool(server_url(fetcher, now=lambda: IN_SESSION), "scan", {"tickers": ["BBCA.JK"]})
 
     [entry] = entries(result)
@@ -269,7 +269,7 @@ async def test_scan_gap_and_vwap_distance_are_null_when_not_finite(server_url):
     intraday = five_minute_bars({"2024-03-15 09:30": (130.0, 100), "2024-03-15 09:35": (140.0, 300)}, US_DAYS)
     intraday.loc[intraday.index[0], ["Open", "High"]] = float("nan")
     daily = daily_bars(rising(), last="2024-03-15", tz="America/New_York")
-    fetcher = ScanFakeFetcher({"AAPL": {"1d": daily, "5m": intraday}})
+    fetcher = FakeFetcher(history={"AAPL": {"1d": daily, "5m": intraday}})
     result = await call_tool(server_url(fetcher, now=lambda: US_IN_SESSION), "scan", {"tickers": ["AAPL"]})
 
     [entry] = entries(result)

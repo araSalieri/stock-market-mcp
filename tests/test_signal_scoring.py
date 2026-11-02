@@ -3,7 +3,7 @@
 import json
 
 import pytest
-from fakes import FakeClassifier, FlatFakeFetcher, SequenceFakeFetcher, call_tool, flat_history, seed_signals, text_of
+from fakes import FakeClassifier, FakeFetcher, call_tool, flat_history, seed_signals, text_of
 
 
 def _signal(verdict, confidence=0.7):
@@ -24,7 +24,7 @@ FLAT = (101.0, 99.0)
 async def _previous_outcome(server_url, verdict, *bars, confidence=0.7):
     # Entry 100, ATR 2, default plans: long Stop 96 / Target 108, short Stop 104 / Target 92.
     classifier = FakeClassifier(replies=[_signal(verdict, confidence), _signal("hold")])
-    url = server_url(SequenceFakeFetcher([flat_history(), _later(*bars)]), classifier=classifier, signal_ttl=0, history_ttl=0)
+    url = server_url(FakeFetcher(history=[flat_history(), _later(*bars)]), classifier=classifier, signal_ttl=0, history_ttl=0)
 
     await call_tool(url, "get_signal", {"ticker": "AAPL", "interval": "1d"})
     await call_tool(url, "get_signal", {"ticker": "AAPL", "interval": "1d"})
@@ -80,7 +80,7 @@ async def test_buy_below_the_minimum_confidence_is_scored_too(server_url):
 async def test_signal_whose_bar_is_outside_the_fetched_history_stays_pending(server_url):
     classifier = FakeClassifier(replies=[_signal("buy"), _signal("hold")])
     # The second history starts on the bar after the Signal's, which reaches the Target.
-    fetcher = SequenceFakeFetcher([flat_history(), _later((109.0, 99.0), *[FLAT] * 59).iloc[60:]])
+    fetcher = FakeFetcher(history=[flat_history(), _later((109.0, 99.0), *[FLAT] * 59).iloc[60:]])
     url = server_url(fetcher, classifier=classifier, signal_ttl=0, history_ttl=0)
 
     await call_tool(url, "get_signal", {"ticker": "AAPL", "interval": "1d"})
@@ -94,7 +94,7 @@ async def test_signal_without_a_default_plan_stays_pending(server_url):
     # Close 1 with ATR 2 puts the long default Stop below zero, so it is stored null.
     # Below the Minimum Confidence, so the call gets no Trade Plan and doesn't fail on it.
     classifier = FakeClassifier(replies=[_signal("buy", 0.3), _signal("hold")])
-    fetcher = SequenceFakeFetcher([flat_history(close=1.0), flat_history(close=1.0, rows=90)])
+    fetcher = FakeFetcher(history=[flat_history(close=1.0), flat_history(close=1.0, rows=90)])
     url = server_url(fetcher, classifier=classifier, signal_ttl=0, history_ttl=0)
 
     await call_tool(url, "get_signal", {"ticker": "AAPL", "interval": "1d"})
@@ -107,7 +107,7 @@ async def test_signal_without_a_default_plan_stays_pending(server_url):
 async def _hit_rate(server_url, tmp_path, *seeds, reply="buy"):
     """hit_rate in the reply after seeding (outcomes, seed_signals kwargs) pairs."""
     db = tmp_path / "s.db"
-    url = server_url(FlatFakeFetcher(), classifier=FakeClassifier(_signal(reply)), db_path=db)
+    url = server_url(FakeFetcher(history=flat_history()), classifier=FakeClassifier(_signal(reply)), db_path=db)
     for outcomes, kwargs in seeds:
         seed_signals(db, outcomes, **kwargs)
     result = await call_tool(url, "get_signal", {"ticker": "AAPL", "interval": "1d"})

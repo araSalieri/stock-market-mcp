@@ -2,9 +2,7 @@
 
 import time
 
-from fakes import FakeClassifier, call_tool, fake_history, text_of
-
-from stock_market_mcp.data import DataFetcher
+from fakes import FakeClassifier, FakeFetcher, call_tool, fake_history, text_of
 
 # Short TTLs so tests can cross the expiry window without waiting on real timeouts.
 TEST_QUOTE_TTL = 0.2
@@ -12,29 +10,16 @@ TEST_HISTORY_TTL = 0.2
 TEST_FUNDAMENTALS_TTL = 0.2
 
 
-class CountingFakeFetcher(DataFetcher):
-    """Fake data layer that records every fetch so tests can count invocations."""
-
-    def __init__(self):
-        self.quote_calls = []
-        self.history_calls = []
-        self.fundamentals_calls = []
-
-    def fetch_quote(self, ticker):
-        self.quote_calls.append(ticker)
-        return {"price": 190.0, "currency": "USD", "ticker": ticker.upper()}
-
-    def fetch_fundamentals(self, ticker):
-        self.fundamentals_calls.append(ticker)
-        return {"ticker": ticker.upper(), "long_name": "Apple Inc."}
-
-    def fetch_history(self, ticker, period, interval="1d", prepost=False):
-        self.history_calls.append((ticker, period, interval, prepost))
-        return fake_history(60)
+def counting_fetcher() -> FakeFetcher:
+    return FakeFetcher(
+        quotes={"AAPL": {"price": 190.0, "currency": "USD", "ticker": "AAPL"}},
+        fundamentals={"AAPL": {"ticker": "AAPL", "long_name": "Apple Inc."}},
+        history=fake_history(),
+    )
 
 
 async def test_second_quote_within_ttl_is_served_from_cache(server_url):
-    fetcher = CountingFakeFetcher()
+    fetcher = counting_fetcher()
     url = server_url(
         fetcher,
         quote_ttl=TEST_QUOTE_TTL,
@@ -52,7 +37,7 @@ async def test_second_quote_within_ttl_is_served_from_cache(server_url):
 
 
 async def test_quote_after_ttl_expiry_refetches(server_url):
-    fetcher = CountingFakeFetcher()
+    fetcher = counting_fetcher()
     url = server_url(
         fetcher,
         quote_ttl=TEST_QUOTE_TTL,
@@ -68,7 +53,7 @@ async def test_quote_after_ttl_expiry_refetches(server_url):
 
 
 async def test_second_history_within_ttl_is_served_from_cache(server_url):
-    fetcher = CountingFakeFetcher()
+    fetcher = counting_fetcher()
     # Default history TTL: two get_signal calls can outlast the short test TTL.
     url = server_url(fetcher, classifier=FakeClassifier())
 
@@ -81,7 +66,7 @@ async def test_second_history_within_ttl_is_served_from_cache(server_url):
 
 
 async def test_history_after_ttl_expiry_refetches(server_url):
-    fetcher = CountingFakeFetcher()
+    fetcher = counting_fetcher()
     url = server_url(
         fetcher,
         classifier=FakeClassifier(),
@@ -98,7 +83,7 @@ async def test_history_after_ttl_expiry_refetches(server_url):
 
 
 async def test_second_fundamentals_within_ttl_is_served_from_cache(server_url):
-    fetcher = CountingFakeFetcher()
+    fetcher = counting_fetcher()
     url = server_url(
         fetcher,
         quote_ttl=TEST_QUOTE_TTL,
@@ -115,7 +100,7 @@ async def test_second_fundamentals_within_ttl_is_served_from_cache(server_url):
 
 
 async def test_fundamentals_after_ttl_expiry_refetches(server_url):
-    fetcher = CountingFakeFetcher()
+    fetcher = counting_fetcher()
     url = server_url(
         fetcher,
         quote_ttl=TEST_QUOTE_TTL,
@@ -143,7 +128,7 @@ class FakeClock:
 async def test_history_is_cached_for_60_seconds_by_default(server_url, monkeypatch):
     clock = FakeClock()
     monkeypatch.setattr("stock_market_mcp.cache.time", clock)
-    fetcher = CountingFakeFetcher()
+    fetcher = counting_fetcher()
     url = server_url(fetcher, classifier=FakeClassifier())
     args = {"ticker": "AAPL", "period": "1mo"}
 
@@ -157,7 +142,7 @@ async def test_history_is_cached_for_60_seconds_by_default(server_url, monkeypat
 
 
 async def test_history_cache_keeps_intervals_apart(server_url):
-    fetcher = CountingFakeFetcher()
+    fetcher = counting_fetcher()
     url = server_url(fetcher, classifier=FakeClassifier())
 
     await call_tool(url, "get_signal", {"ticker": "AAPL", "interval": "5m", "period": "1mo"})
@@ -168,7 +153,7 @@ async def test_history_cache_keeps_intervals_apart(server_url):
 
 async def test_history_cache_keeps_prepost_apart(server_url):
     # get_signal fetches 5m bars without pre-market and scan fetches them with it; a second scan hits the cache.
-    fetcher = CountingFakeFetcher()
+    fetcher = counting_fetcher()
     url = server_url(fetcher, classifier=FakeClassifier())
 
     await call_tool(url, "get_signal", {"ticker": "AAPL", "interval": "5m", "period": "1mo"})
