@@ -9,15 +9,15 @@ import re
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import Annotated, Literal, NamedTuple, cast
+from typing import Annotated, Literal, cast
 
 import numpy as np
 import pandas as pd
-import pandas_ta as ta
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import Strict
 
+from stock_market_mcp.bars import Interval, fetch_period, history, last_value
 from stock_market_mcp.cache import (
     FUNDAMENTALS_TTL_SECONDS,
     HISTORY_TTL_SECONDS,
@@ -34,6 +34,7 @@ from stock_market_mcp.classifier import (
 )
 from stock_market_mcp.data import DataFetcher
 from stock_market_mcp.db import DEFAULT_DB_PATH
+from stock_market_mcp.errors import InputError
 from stock_market_mcp.portfolio import PortfolioStore
 from stock_market_mcp.prompt import build_signal_prompt, with_previous_signal
 from stock_market_mcp.signals import SignalLog
@@ -52,6 +53,7 @@ def _error_line(tool: str, exc: BaseException) -> str:
 def _audited[**P, R](tool: Callable[P, R]) -> Callable[P, R]:
     """Log one audit line per call: tool name, arguments, ms and outcome, even when the tool raises.
 
+    An InputError becomes a ToolError with no cause, logged like one the tool raised itself.
     Any other exception becomes a ToolError with it as the cause, so the caller sees its message.
     """
     signature = inspect.signature(tool)
@@ -74,6 +76,9 @@ def _audited[**P, R](tool: Callable[P, R]) -> Callable[P, R]:
             else:
                 log.warning(_error_line(tool.__name__, exc))
             raise
+        except InputError as exc:
+            log.warning(_error_line(tool.__name__, exc))
+            raise ToolError(str(exc)) from None
         except Exception as exc:
             log.exception(_error_line(tool.__name__, exc))
             raise ToolError(str(exc)) from exc
@@ -82,44 +87,6 @@ def _audited[**P, R](tool: Callable[P, R]) -> Callable[P, R]:
             log.info(" ".join(filter(None, (f"tool={tool.__name__}", fields, f"ms={ms}", f"outcome={outcome}"))))
 
     return wrapper
-
-
-def _suffixed_frame(ind: pd.Series | None) -> pd.DataFrame | None:
-    """Frame a single-output indicator; pandas-ta returns None on insufficient rows."""
-    if ind is None:
-        return None
-    return ind.to_frame()
-
-
-# Dispatch table: indicator name -> handler producing the indicator frame(s),
-# or None when the history is too short for that indicator (loud error path).
-_INDICATOR_DISPATCH = {
-    "sma": lambda df: _suffixed_frame(ta.sma(cast("pd.Series", df["Close"]))),
-    "ema": lambda df: _suffixed_frame(ta.ema(cast("pd.Series", df["Close"]))),
-    "rsi": lambda df: _suffixed_frame(ta.rsi(cast("pd.Series", df["Close"]))),
-    "macd": lambda df: ta.macd(cast("pd.Series", df["Close"])),
-    "bbands": lambda df: ta.bbands(cast("pd.Series", df["Close"])),
-    "atr": lambda df: _suffixed_frame(
-        ta.atr(
-            cast("pd.Series", df["High"]),
-            cast("pd.Series", df["Low"]),
-            cast("pd.Series", df["Close"]),
-        )
-    ),
-    "adx": lambda df: ta.adx(
-        cast("pd.Series", df["High"]),
-        cast("pd.Series", df["Low"]),
-        cast("pd.Series", df["Close"]),
-    ),
-    "vwap": lambda df: _suffixed_frame(
-        ta.vwap(
-            cast("pd.Series", df["High"]),
-            cast("pd.Series", df["Low"]),
-            cast("pd.Series", df["Close"]),
-            cast("pd.Series", df["Volume"]),
-        )
-    ),
-}
 
 
 PLAN_ATR_MULTIPLE = 2.0
@@ -133,53 +100,12 @@ StrictNumber = Annotated[float, Strict()]
 
 Direction = Literal["long", "short"]
 
-Interval = Literal["1m", "5m", "15m", "1h", "1d"]
-
-# Every period Yahoo knows, as yfinance lists them.
-_YAHOO_PERIODS = ("1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "5y", "10y", "ytd", "max")
-
-
-class _Periods(NamedTuple):
-    default: str
-    # Yahoo's history limit and the periods that fit inside it; daily bars have none and pass any period on.
-    limit: str | None
-    allowed: tuple[str, ...]
-
-
-_PERIODS: dict[Interval, _Periods] = {
-    "1m": _Periods("5d", "7 days", ("1d", "5d")),
-    "5m": _Periods("1mo", "60 days", ("1d", "5d", "1mo")),
-    "15m": _Periods("1mo", "60 days", ("1d", "5d", "1mo")),
-    "1h": _Periods("6mo", "730 days", ("1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "ytd")),
-    "1d": _Periods("1y", None, ()),
-}
-
-
-def _period(interval: Interval, period: str | None) -> str:
-    """The period to fetch: the Interval's default, or the caller's once it fits the Interval."""
-    periods = _PERIODS[interval]
-    if period is None:
-        return periods.default
-    if periods.limit is None or period in periods.allowed:
-        return period
-    if period in _YAHOO_PERIODS:
-        reason = f"is longer than Yahoo keeps for {interval} bars ({periods.limit})"
-    else:
-        reason = f"is not a valid period for {interval} bars"
-    raise ToolError(f"period {period!r} {reason}; use one of {', '.join(periods.allowed)}")
-
-
 def _tickers(tickers: list[str]) -> list[str]:
     """Upper-cased and de-duplicated in order; one Scan or Watchlist takes at most WATCHLIST_MAX_TICKERS."""
     names = list(dict.fromkeys(t.upper() for t in tickers))
     if len(names) > WATCHLIST_MAX_TICKERS:
         raise ToolError(f"at most {WATCHLIST_MAX_TICKERS} tickers, got {len(names)}")
     return names
-
-
-def _last_value(name: str, df: pd.DataFrame) -> float:
-    """Last value of a single-column indicator over df."""
-    return float(_INDICATOR_DISPATCH[name](df).iloc[-1, 0])
 
 
 # Verdict -> Trade Plan Direction; hold has no plan.
@@ -190,7 +116,7 @@ def _trade_plan(
     df: pd.DataFrame, entry: float, direction: Direction, atr_multiple: float, reward_ratio: float
 ) -> dict:
     """Stop and Target around entry (the Price) from the last ATR(14) of df."""
-    atr = _last_value("atr", df)
+    atr = last_value("atr", df)
     if not math.isfinite(atr):
         raise ToolError(f"latest row has a non-finite ATR (atr={atr})")
     sign = 1 if direction == "long" else -1
@@ -252,8 +178,8 @@ def _scan_daily(df: pd.DataFrame, now: datetime) -> dict:
     prev = before.iloc[-1]
     prev_close = float(prev["Close"])
     # Completed bars only, so today's forming bar can't move ATR or RSI.
-    atr = _last_value("atr", before)
-    rsi = _last_value("rsi", before)
+    atr = last_value("atr", before)
+    rsi = last_value("rsi", before)
     return {
         "price": float(df["Close"].iloc[-1]),
         "data_date": cast("pd.Timestamp", index[-1]).isoformat(),
@@ -365,18 +291,13 @@ def build_server(
         for name, value in (("atr_multiple", atr_multiple), ("reward_ratio", reward_ratio)):
             if not 0 < value <= PLAN_ARG_MAX:
                 raise ToolError(f"{name} must be in (0, {PLAN_ARG_MAX}], got {value}")
-        period = _period(interval, period)
-        df = fetcher.fetch_history(ticker, period, interval)
-        for name, handler in sorted(_INDICATOR_DISPATCH.items()):
-            ind = handler(df)
-            if ind is None:
-                raise ToolError(f"not enough history rows for indicator: {name}")
-            df = df.join(ind)
+        df = history(fetcher, ticker, interval, period)
         # Read outside the classifier cache, so cached Signals get a fresh Price and plan.
         price = float(df["Close"].iloc[-1])
         if not math.isfinite(price):
             raise ToolError(f"latest row has a non-finite close (close={price})")
         ticker = ticker.upper()
+        period = fetch_period(interval, period)
         # Read before the classifier, so a broken Portfolio file fails before a classifier call.
         position = portfolio.load().get(ticker)
         # Quantity stays out, so size doesn't sway the Verdict or bust the cache (ADR-0005).
