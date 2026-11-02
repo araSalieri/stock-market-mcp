@@ -5,6 +5,7 @@ from mcp import ClientSession, types
 from mcp.client.streamable_http import streamable_http_client
 from mcp.types import CallToolResult
 
+from stock_market_mcp.classifier import PROMPT_VERSION
 from stock_market_mcp.signals import SignalLog
 
 
@@ -25,7 +26,7 @@ def audit_lines(caplog) -> list:
     return [r for r in caplog.records if " outcome=" in r.getMessage()]
 
 
-def seed_signals(db, outcomes, *, verdict="buy", confidence=0.7, prompt_version=1, ticker="AAPL", interval="1d"):
+def seed_signals(db, outcomes, *, verdict="buy", confidence=0.7, prompt_version=PROMPT_VERSION, ticker="AAPL", interval="1d"):
     """Store one Signal per Outcome through SignalLog: scoring dozens of Signals over MCP would take dozens of calls."""
     log = SignalLog(db)
     for outcome in outcomes:
