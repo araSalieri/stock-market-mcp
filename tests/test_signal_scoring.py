@@ -2,8 +2,11 @@
 
 import json
 
+import pandas as pd
 import pytest
 from fakes import FakeClassifier, FakeFetcher, flat_history, seed_signals
+
+from stock_market_mcp.classifier import PROMPT_VERSION
 
 
 def _signal(verdict, confidence=0.7):
@@ -41,8 +44,14 @@ def test_cut_falling_to_its_mirrored_target_first_is_a_target(signal_maker):
     assert _outcome(signal_maker, "cut", FLAT, (101.0, 91.0), (105.0, 99.0)) == "target"
 
 
-def test_pending_sell_from_an_older_prompt_version_is_scored_as_a_cut(signal_maker):
-    assert _outcome(signal_maker, "sell", FLAT, (101.0, 91.0)) == "target"
+def test_pending_sell_from_an_older_prompt_version_is_scored_as_a_cut(signal_maker, tmp_path):
+    seed_signals(tmp_path / "server.db", [None], verdict="sell", prompt_version=PROMPT_VERSION - 1)
+    history = _later((101.0, 91.0))
+    # seed_signals stores its Signals on 2023-01-01: make that the bar before the drop.
+    history.index = pd.date_range(end="2023-01-02", periods=len(history), freq="D", name="Date")
+    classifier = FakeClassifier(replies=[_signal("hold")])
+    signal_maker(FakeFetcher(history=history), classifier, ttl=0).make("AAPL", "1d")
+    assert json.loads(classifier.prompts[0])["previous_signal"]["outcome"] == "target"
 
 
 def test_buy_reaching_its_stop_first_is_a_stop(signal_maker):

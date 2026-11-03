@@ -114,8 +114,8 @@ class SignalLog:
         *,
         fresh: bool,
         cuts_losing: bool | None,
-        atr_multiple: float = PLAN_ATR_MULTIPLE,
-        reward_ratio: float = PLAN_REWARD_RATIO,
+        atr_multiple: float,
+        reward_ratio: float,
     ) -> dict:
         """The reply fields for a Signal made on history's last bar: hit_rate, min_confidence, trade_plan, re_entry_lock when
         locked, and cut_loss and cut_loss_hit_rate when held (cuts_losing not None).
@@ -130,7 +130,7 @@ class SignalLog:
             confident = min_confidence is not None and signal["confidence"] >= min_confidence
             lock = _reentry_lock(conn, ticker, interval, history)
             buys = confident and verdict == "buy" and lock is None
-            plan = trade_plan(history, price, atr_multiple, reward_ratio) if buys else None
+            plan = _trade_plan(history, price, atr_multiple, reward_ratio) if buys else None
             if fresh:
                 _record(conn, ticker, interval, signal, history, price, cuts_losing)
                 if confident and verdict == "cut":
@@ -246,7 +246,7 @@ def _hit_rate(conn: sqlite3.Connection, ticker: str, interval: str, verdict: str
 
 
 def _min_confidence(conn: sqlite3.Connection) -> float | None:
-    """Lowest 0.1 Confidence band of the current prompt version whose buy Hit Rate is above BREAK_EVEN_HIT_RATE.
+    """Lowest Confidence band (1 / BANDS_PER_CONFIDENCE wide) of the current prompt version whose buy Hit Rate is above BREAK_EVEN_HIT_RATE.
 
     Only bands with BAND_MIN_SCORED Targets plus Stops count: MIN_CONFIDENCE while none has that many,
     None when some do but none is above BREAK_EVEN_HIT_RATE.
@@ -266,7 +266,7 @@ def _min_confidence(conn: sqlite3.Connection) -> float | None:
 
 
 def _bands(conn: sqlite3.Connection, ticker: str | None, interval: str | None) -> list[dict]:
-    """Outcome counts and Hit Rates of the current prompt version's Signals per 0.1 Confidence band and Verdict,
+    """Outcome counts and Hit Rates of the current prompt version's Signals per Confidence band (1 / BANDS_PER_CONFIDENCE wide) and Verdict,
     optionally for one ticker and/or Interval, bands with Signals only, ascending.
 
     Leaves out Signals that can never be scored: those missing a price their Outcome rule is judged by.
@@ -321,7 +321,7 @@ def _counts(verdict: str, tally: dict[str, int]) -> dict:
     return {**counts, "hit_rate": _rate(counts[rule.hit], counts[rule.miss])}
 
 
-def trade_plan(
+def _trade_plan(
     history: pd.DataFrame, entry: float, atr_multiple: float, reward_ratio: float, *, long: bool = True
 ) -> dict:
     """Stop and Target around entry (the Price) from the last ATR(14) of history; long=False mirrors them, to score a cut."""
@@ -349,7 +349,7 @@ def trade_plan(
 def _default_plan(history: pd.DataFrame, entry: float, *, long: bool) -> tuple[float | None, float | None]:
     """Stop and Target of the default Trade Plan stored with a Signal, or mirrored; nulls when that plan can't be made."""
     try:
-        plan = trade_plan(history, entry, PLAN_ATR_MULTIPLE, PLAN_REWARD_RATIO, long=long)
+        plan = _trade_plan(history, entry, PLAN_ATR_MULTIPLE, PLAN_REWARD_RATIO, long=long)
     except InputError:
         return None, None
     return plan["stop"], plan["target"]
