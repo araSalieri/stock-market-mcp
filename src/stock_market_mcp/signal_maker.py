@@ -72,15 +72,23 @@ class SignalMaker:
         min_confidence = self._signals.min_confidence()
         hit_rate = self._signals.hit_rate(ticker, interval, signal["verdict"])
         confident = min_confidence is not None and signal["confidence"] >= min_confidence
+        # Checked on cached Signals too, so a cached buy can't slip past a lock or miss a lift.
+        lock = self._signals.reentry_lock(ticker, interval, df)
         # Before the Signal is stored, so a plan error doesn't fail a call that already logged.
-        plan = trade_plan(df, price, atr_multiple, reward_ratio) if confident and signal["verdict"] == "buy" else None
+        buys = confident and signal["verdict"] == "buy" and lock is None
+        plan = trade_plan(df, price, atr_multiple, reward_ratio) if buys else None
+        locks = fresh and confident and signal["verdict"] == "cut"
         # Stored at any Confidence for the Cut Loss Hit Rate; the reply's cut_loss also needs the Minimum Confidence.
         cuts_losing = position.cuts_losing(signal["verdict"], pnl) if position is not None and pnl is not None else None
         if fresh:
-            self._signals.record(ticker, interval, signal, df, price, cuts_losing)
+            self._signals.record(ticker, interval, signal, df, price, cuts_losing, locks)
             # Cached only once stored, so a failed store is retried instead of served from the cache.
             self._cache.put(prompt, signal)
+        if locks:
+            lock = self._signals.reentry_lock(ticker, interval, df)
         reply = {**signal, "price": price, "hit_rate": hit_rate, "min_confidence": min_confidence, "trade_plan": plan}
+        if lock is not None:
+            reply["re_entry_lock"] = lock
         if position is not None and pnl is not None:
             reply["position"] = {
                 **asdict(position),
