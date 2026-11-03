@@ -12,7 +12,7 @@ from typing import cast
 import pandas as pd
 
 from stock_market_mcp.bars import EMA_LENGTH, finite, last_value
-from stock_market_mcp.prompt import PROMPT_VERSION
+from stock_market_mcp.prompt import PROMPT_VERSION, PreviousSignal
 from stock_market_mcp.db import transaction
 from stock_market_mcp.errors import InputError
 
@@ -92,7 +92,7 @@ class SignalLog:
 
     def before_classifier(
         self, ticker: str, interval: str, history: pd.DataFrame, scored_at: str
-    ) -> tuple[str, float, str | None] | None:
+    ) -> PreviousSignal | None:
         """Score pending Signals for the ticker and Interval, then return the previous Signal's Verdict, Confidence and Outcome (None while pending), or None."""
         with self._open() as conn:
             _score(conn, ticker, interval, history, scored_at)
@@ -101,7 +101,7 @@ class SignalLog:
                 "ORDER BY id DESC LIMIT 1",
                 (ticker, interval),
             ).fetchone()
-        return None if row is None else tuple(row)
+        return None if row is None else PreviousSignal(*row)
 
     def after_classifier(
         self,

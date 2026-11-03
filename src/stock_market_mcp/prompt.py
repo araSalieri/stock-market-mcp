@@ -7,6 +7,7 @@ unit-tested with literals as truth.
 import json
 import os
 from dataclasses import dataclass
+from typing import NamedTuple
 
 import pandas as pd
 
@@ -19,6 +20,14 @@ PROMPT_VERSION = 3
 # max_tokens_exceeded (verified live); this payload tokenizes at ~1.2 chars per
 # token, so a 32k-char budget lands near 27k tokens – under the cap with headroom.
 DEFAULT_MAX_STATE_CHARS = 32_000
+
+
+class PreviousSignal(NamedTuple):
+    """The previous Signal as the classifier sees it; outcome is None while pending."""
+
+    verdict: str
+    confidence: float
+    outcome: str | None
 
 _BUY = "Bullish momentum or trend evidence in the supplied data."
 _HOLD = "Mixed or insufficient evidence in the supplied data."
@@ -77,7 +86,7 @@ def signal_prompt(
     *,
     interval: str = "1d",
     position: PricedPosition | None = None,
-    previous: tuple[str, float, str | None] | None = None,
+    previous: PreviousSignal | None = None,
     max_chars: int | None = None,
 ) -> SignalPrompt:
     """What the classifier reads: OHLCV history plus joined indicator columns, the Position and the previous Signal.
@@ -103,8 +112,7 @@ def signal_prompt(
     cache_key = json.dumps({**head, "rows": rows})
     state = cache_key
     if previous is not None:
-        verdict, confidence, outcome = previous
-        previous_view = {"verdict": verdict, "confidence": confidence, "outcome": outcome or "pending"}
+        previous_view = {"verdict": previous.verdict, "confidence": previous.confidence, "outcome": previous.outcome or "pending"}
         state = json.dumps({**head, "previous_signal": previous_view, "rows": rows})
     return SignalPrompt(cache_key, state, position is not None)
 
