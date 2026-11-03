@@ -13,7 +13,7 @@ An MCP server that gives coding agents stock market data, indicators and advisor
 | `set_watchlist` | Save a Watchlist of up to 15 tickers. An empty list deletes it. |
 | `get_watchlists` | Every saved Watchlist |
 | `scan` | Price, previous day's range, ATR, RSI, Gap, Relative Volume and VWAP distance for a Watchlist or list of tickers |
-| `set_position` | Save the Position for a ticker: long or short, quantity and average cost. Replaces any held one; quantity 0 deletes it and replies with just the ticker and quantity 0. At most 15 Positions. |
+| `set_position` | Save the long Position for a ticker: quantity and average cost. Replaces any held one; quantity 0 deletes it and replies with just the ticker and quantity 0. At most 15 Positions. |
 | `get_portfolio` | Every Position with its latest price and Unrealised P&L in the ticker's own currency, with no total |
 
 Each tool's arguments and output are described in its MCP schema. Domain terms are defined in [GLOSSARY.md](GLOSSARY.md).

@@ -35,7 +35,7 @@ from stock_market_mcp.db import DEFAULT_DB_PATH
 from stock_market_mcp.errors import InputError
 from stock_market_mcp.portfolio import PortfolioStore
 from stock_market_mcp.signal_maker import SignalMaker
-from stock_market_mcp.signals import PLAN_ATR_MULTIPLE, PLAN_REWARD_RATIO, Direction, SignalLog
+from stock_market_mcp.signals import PLAN_ATR_MULTIPLE, PLAN_REWARD_RATIO, SignalLog
 from stock_market_mcp.watchlists import WatchlistStore, normalise_tickers
 
 log = logging.getLogger(__name__)
@@ -207,7 +207,7 @@ def build_server(
         atr_multiple: StrictNumber = PLAN_ATR_MULTIPLE,
         reward_ratio: StrictNumber = PLAN_REWARD_RATIO,
     ) -> dict:
-        """Advisory buy/sell/hold Signal from price history and indicators on bars of one Interval, with the Price (last close), the Hit Rate of past Signals of its kind (buy/sell or hold) for this ticker and Interval (null until enough are scored), the Minimum Confidence applied as min_confidence (set by the server from buy Hit Rates per 0.1 Confidence band, a fixed default until enough are scored), and for buy or sell at or above min_confidence a Trade Plan (Entry, Stop, Target), else null; min_confidence null means no band beats break-even, so no buy or sell gets a Trade Plan; for a held ticker a position key with the Position, its Unrealised P&L (amount and percent of cost) at the Price, and cut_loss: true when the Verdict points against the Position (sell on a long, buy on a short) at or above min_confidence while its Unrealised P&L is negative, else false (the Trade Plan is unchanged), and cut_loss_hit_rate: Targets / (Targets + Stops) over scored past Signals that pointed against a losing Position at any Confidence, across all tickers and Intervals (null until enough are scored); position is absent when not held; input only, never acts on it."""
+        """Advisory buy/sell/hold Signal from price history and indicators on bars of one Interval, with the Price (last close), the Hit Rate of past Signals of its kind (buy/sell or hold) for this ticker and Interval (null until enough are scored), the Minimum Confidence applied as min_confidence (set by the server from buy Hit Rates per 0.1 Confidence band, a fixed default until enough are scored), and for buy or sell at or above min_confidence a Trade Plan (Entry, Stop, Target), else null; min_confidence null means no band beats break-even, so no buy or sell gets a Trade Plan; for a held ticker a position key with the Position, its Unrealised P&L (amount and percent of cost) at the Price, and cut_loss: true when the Verdict is sell at or above min_confidence while its Unrealised P&L is negative, else false (the Trade Plan is unchanged), and cut_loss_hit_rate: Targets / (Targets + Stops) over scored past sells on a losing Position at any Confidence, across all tickers and Intervals (null until enough are scored); position is absent when not held; input only, never acts on it."""
         return signal_maker.make(ticker, interval, period, atr_multiple, reward_ratio)
 
     @audited_tool
@@ -273,8 +273,8 @@ def build_server(
         return watchlists.load()
 
     @audited_tool
-    def set_position(ticker: str, direction: Direction, quantity: StrictNumber, avg_cost: StrictNumber) -> dict:
-        """Save the Position for a ticker (checked with a quote), replacing any held one; quantity 0 deletes it and replies with just the ticker and quantity 0. Direction long or short, quantity at least 0, avg_cost above 0; as many Positions as a Watchlist has tickers. Records only, never places orders."""
+    def set_position(ticker: str, quantity: StrictNumber, avg_cost: StrictNumber) -> dict:
+        """Save the Position for a ticker (checked with a quote), replacing any held one; quantity 0 deletes it and replies with just the ticker and quantity 0. Positions are long; quantity at least 0, avg_cost above 0; as many Positions as a Watchlist has tickers. Records only, never places orders."""
         ticker = ticker.upper()
         # Deleting needs no quote; the store checks everything else.
         if quantity == 0:
@@ -285,12 +285,12 @@ def build_server(
         except Exception:
             # Bad input, not a dependency failure: no cause, so the audit logs a warning like set_watchlist.
             raise ToolError(f"unknown ticker, nothing saved: {ticker}") from None
-        portfolio.set(ticker, direction, quantity, avg_cost)
-        return {"ticker": ticker, "direction": direction, "quantity": quantity, "avg_cost": avg_cost}
+        portfolio.set(ticker, quantity, avg_cost)
+        return {"ticker": ticker, "quantity": quantity, "avg_cost": avg_cost}
 
     @audited_tool
     def get_portfolio() -> list[dict]:
-        """Every Position with its latest price and Unrealised P&L (amount and percent of cost) in the ticker's own currency; no total across currencies. A Position whose quote fails gets its own error entry."""
+        """Every Position (long: quantity and average cost) with its latest price and Unrealised P&L ((price - average cost) * quantity, and percent of cost) in the ticker's own currency; no total across currencies. A Position whose quote fails gets its own error entry."""
         held = portfolio.load()
         results = []
         for ticker, position in held.items():

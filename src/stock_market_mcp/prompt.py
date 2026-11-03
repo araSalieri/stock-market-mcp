@@ -30,7 +30,7 @@ def build_signal_prompt(
     are emitted as ISO date strings, with null for NaN (warmup rows of later
     lookbacks).
 
-    position (Direction, average cost, Unrealised P&L %) sits in the head, null when not held,
+    position (average cost, Unrealised P&L %) sits in the head, null when not held,
     so row trimming never drops it.
 
     If the serialized payload exceeds the character budget, the oldest rows are

@@ -169,7 +169,7 @@ async def test_min_confidence_and_cut_loss_hit_rate_match_get_signal(server_url,
     db = tmp_path / "s.db"
     seed_signals(db, ["target"] * 6 + ["stop"] * 24, confidence=0.6)
     seed_signals(db, ["target"] * 18 + ["stop"] * 12, confidence=0.7, cut_loss=1)
-    PortfolioStore(db).set("TSLA", "long", 10, 90.0)
+    PortfolioStore(db).set("TSLA", 10, 90.0)
     url = server_url(FakeFetcher(history=flat_history()), classifier=FakeClassifier(), db_path=db)
 
     signal = json.loads(text_of(await call_tool(url, "get_signal", {"ticker": "TSLA", "interval": "1d"})))
