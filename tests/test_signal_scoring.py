@@ -10,7 +10,7 @@ from stock_market_mcp.signals import SignalLog
 
 
 def _signal(verdict, confidence=0.7):
-    return {"verdict": verdict, "confidence": confidence, "rationale": "test", "data_date": "2024-02-29T00:00:00"}
+    return {"verdict": verdict, "confidence": confidence, "rationale": "test"}
 
 
 def _later(*bars):

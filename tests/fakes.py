@@ -159,7 +159,6 @@ class FakeClassifier:
             "verdict": "buy",
             "confidence": 0.7,
             "rationale": "uptrend with rising RSI",
-            "data_date": "2024-01-03T11:00:00",
         }
         self.error = error
         self.replies = list(replies) if replies is not None else None

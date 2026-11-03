@@ -41,7 +41,7 @@ def build_signal_prompt(
         # Read at call time; empty counts as unset (compose passthrough pattern).
         max_chars = int(os.environ.get("SMM_CLASSIFIER_MAX_STATE_CHARS") or DEFAULT_MAX_STATE_CHARS)
     # Yahoo names the index Date on daily bars and Datetime on intraday; every row
-    # carries Date so data_date reads the same key on both.
+    # carries Date so the classifier reads the same key on both.
     frame = df.rename_axis("Date").reset_index()
     # Bar times keep the exchange's offset, as scan gives them; to_json would turn them into UTC.
     frame["Date"] = [t.isoformat() for t in frame["Date"]]

@@ -4,7 +4,6 @@ The Protocol mirrors DataFetcher's pattern: tests inject a fake, and the real
 transport below is the only OpenRouter-aware code in the server.
 """
 
-import json
 import os
 from typing import Protocol
 
@@ -81,7 +80,7 @@ class SignalContractError(Exception):
     """A classifier reply violates the strict verdict contract (retryable once)."""
 
 
-_VERDICT_KEYS = frozenset({"verdict", "confidence", "rationale", "data_date"})
+_VERDICT_KEYS = frozenset({"verdict", "confidence", "rationale"})
 
 
 def validate_signal(payload: object, held: bool) -> dict:
@@ -107,9 +106,8 @@ def validate_signal(payload: object, held: bool) -> dict:
         raise SignalContractError(
             f"confidence must be a number in [0, 1], got: {confidence!r}"
         )
-    for key in ("rationale", "data_date"):
-        if not isinstance(payload[key], str):
-            raise SignalContractError(f"{key} must be a string, got: {payload[key]!r}")
+    if not isinstance(payload["rationale"], str):
+        raise SignalContractError(f"rationale must be a string, got: {payload['rationale']!r}")
     return payload
 
 
@@ -190,15 +188,8 @@ class OpenRouterClassifier:
             if isinstance(probabilities, dict)
             else "unavailable"
         )
-        # The Decisions reply carries no date of its own; the prompt's last row
-        # is the date of the last data row, flowing from the tool's input.
-        try:
-            data_date = json.loads(prompt)["rows"][-1]["Date"]
-        except (json.JSONDecodeError, KeyError, IndexError, TypeError):
-            data_date = ""
         return {
             "verdict": choice,
             "confidence": confidence,
             "rationale": f"Decisions API chose {choice} (probabilities: {probs_desc})",
-            "data_date": data_date,
         }
