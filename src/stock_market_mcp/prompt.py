@@ -1,4 +1,4 @@
-"""Pure prompt builder for get_signal: history + indicators to a compact classifier prompt.
+"""Prompt module: everything the classifier sees, and the Prompt Version that names it.
 
 No model, no I/O – serialization only, so NaN handling and date formats are
 unit-tested with literals as truth.
@@ -6,37 +6,111 @@ unit-tested with literals as truth.
 
 import json
 import os
+from dataclasses import dataclass
 
 import pandas as pd
+
+from stock_market_mcp.portfolio import PricedPosition
+
+# Stored with each Signal; bump whenever anything below changes what the classifier sees (the golden prompt test checks).
+PROMPT_VERSION = 3
 
 # typesafe/jev-1.13 rejects states over ~32k input tokens with a 400
 # max_tokens_exceeded (verified live); this payload tokenizes at ~1.2 chars per
 # token, so a 32k-char budget lands near 27k tokens – under the cap with headroom.
 DEFAULT_MAX_STATE_CHARS = 32_000
 
+_BUY = "Bullish momentum or trend evidence in the supplied data."
+_HOLD = "Mixed or insufficient evidence in the supplied data."
 
-def build_signal_prompt(
+# The single question the Verdict hinges on: _NOT_HELD_QUESTIONS without a Position, _HELD_QUESTIONS with one.
+_NOT_HELD_QUESTIONS = {
+    "verdict": {
+        "type": "choice",
+        "instructions": (
+            "Given the supplied price history and indicators, is now the right "
+            "time to buy this stock, or to hold off? The signal is advisory."
+        ),
+        "criteria": {"buy": _BUY, "hold": _HOLD},
+    },
+}
+_HELD_QUESTIONS = {
+    "verdict": {
+        "type": "choice",
+        "instructions": (
+            "A long position in this stock is supplied. Given the price history, "
+            "indicators and the position, should the holder buy more, hold, or cut "
+            "(exit the long now)? The signal is advisory."
+        ),
+        "criteria": {
+            "buy": _BUY,
+            "hold": _HOLD,
+            "cut": "Bearish evidence in the supplied data: exit the long now, at a gain or a loss.",
+        },
+    },
+}
+
+
+def questions(held: bool) -> dict:
+    """The Decisions questions for a state with (held) or without a Position."""
+    return _HELD_QUESTIONS if held else _NOT_HELD_QUESTIONS
+
+
+def verdicts(held: bool) -> list[str]:
+    """The Verdicts a Signal may have: buy or hold, plus cut on a held Position."""
+    return list(questions(held)["verdict"]["criteria"])
+
+
+@dataclass(frozen=True)
+class SignalPrompt:
+    """cache_key is the state without the previous Signal, so storing a Signal doesn't defeat the Signal cache."""
+
+    cache_key: str
+    state: str
+    held: bool
+
+
+def signal_prompt(
     ticker: str,
     period: str,
     df: pd.DataFrame,
     *,
     interval: str = "1d",
-    position: dict | None = None,
+    position: PricedPosition | None = None,
+    previous: tuple[str, float, str | None] | None = None,
     max_chars: int | None = None,
-) -> str:
-    """Serialize OHLCV history plus joined indicator columns for the classifier.
+) -> SignalPrompt:
+    """What the classifier reads: OHLCV history plus joined indicator columns, the Position and the previous Signal.
 
     The frame must already carry the indicator columns the tool computed; rows
     are emitted as ISO date strings, with null for NaN (warmup rows of later
     lookbacks).
 
-    position (average cost, Unrealised P&L %) sits in the head, null when not held,
-    so row trimming never drops it.
+    The Position (average cost and Unrealised P&L %, no quantity, so size doesn't
+    sway the Verdict or bust the cache: ADR-0005) sits in the head, null when not
+    held, so row trimming never drops it. previous is the previous Signal's
+    Verdict, Confidence and Outcome (None while pending); it goes in the head of
+    the state only.
 
-    If the serialized payload exceeds the character budget, the oldest rows are
-    dropped until it fits: recency is the point of a timing signal, so the most
-    recent rows are the ones kept.
+    If the payload without the previous Signal exceeds the character budget, the
+    oldest rows are dropped until it fits: recency is the point of a timing
+    signal, so the most recent rows are the ones kept. The state may run the
+    previous Signal's length over the budget.
     """
+    view = None if position is None else {"avg_cost": position.avg_cost, "unrealised_pnl_pct": position.unrealised_pnl_pct}
+    head = {"ticker": ticker, "period": period, "interval": interval, "position": view}
+    rows = _rows(df, head, max_chars)
+    cache_key = json.dumps({**head, "rows": rows})
+    state = cache_key
+    if previous is not None:
+        verdict, confidence, outcome = previous
+        previous_view = {"verdict": verdict, "confidence": confidence, "outcome": outcome or "pending"}
+        state = json.dumps({**head, "previous_signal": previous_view, "rows": rows})
+    return SignalPrompt(cache_key, state, position is not None)
+
+
+def _rows(df: pd.DataFrame, head: dict, max_chars: int | None) -> list:
+    """The newest rows that fit the character budget alongside head."""
     if max_chars is None:
         # Read at call time; empty counts as unset (compose passthrough pattern).
         max_chars = int(os.environ.get("SMM_CLASSIFIER_MAX_STATE_CHARS") or DEFAULT_MAX_STATE_CHARS)
@@ -49,9 +123,8 @@ def build_signal_prompt(
     if payload is None:
         raise ValueError("could not serialize history rows")
     rows = json.loads(payload)
-    head = {"ticker": ticker, "period": period, "interval": interval, "position": position}
     if not rows:
-        return json.dumps({**head, "rows": []})
+        return []
     # Serialize each row once and count back from the newest: json.dumps joins rows with ", ".
     size = len(json.dumps({**head, "rows": []})) + len(json.dumps(rows[-1]))
     start = len(rows) - 1
@@ -60,14 +133,5 @@ def build_signal_prompt(
         if size > max_chars:
             break
         start -= 1
-    return json.dumps({**head, "rows": rows[start:]})
+    return rows[start:]
 
-
-def with_previous_signal(prompt: str, previous_signal: dict) -> str:
-    """prompt with previous_signal (Verdict, Confidence, Outcome) in its head, where row trimming never drops it.
-
-    The rows were trimmed without it, so the prompt may run that many characters over the budget.
-    """
-    payload = json.loads(prompt)
-    rows = payload.pop("rows")
-    return json.dumps({**payload, "previous_signal": previous_signal, "rows": rows})

@@ -15,7 +15,7 @@ from stock_market_mcp.classifier import SignalClassifier
 from stock_market_mcp.data import DataFetcher
 from stock_market_mcp.errors import InputError
 from stock_market_mcp.portfolio import PortfolioStore
-from stock_market_mcp.prompt import build_signal_prompt, with_previous_signal
+from stock_market_mcp.prompt import signal_prompt
 from stock_market_mcp.signals import PLAN_ATR_MULTIPLE, PLAN_REWARD_RATIO, SignalLog
 
 PLAN_ARG_MAX = 10
@@ -60,17 +60,12 @@ class SignalMaker:
         # Read before the classifier, so a broken Portfolio file fails before a classifier call.
         position = self._portfolio.load().get(ticker)
         held = position.priced(price) if position is not None else None
-        # The prompt without the previous Signal is the cache key, so storing a Signal doesn't defeat the cache.
-        prompt = build_signal_prompt(
-            ticker, period, df, interval=interval, position=held.classifier_view() if held is not None else None
-        )
         previous = self._signals.before_classifier(ticker, interval, df, self._now().isoformat())
-        signal = self._cache.get(prompt, self._ttl)
+        prompt = signal_prompt(ticker, period, df, interval=interval, position=held, previous=previous)
+        signal = self._cache.get(prompt.cache_key, self._ttl)
         fresh = signal is None
         if fresh:
-            classified = self._classifier.classify(
-                prompt if previous is None else with_previous_signal(prompt, previous), held is not None
-            )
+            classified = self._classifier.classify(prompt.state, prompt.held)
             signal = {**classified, "data_date": cast("pd.Timestamp", df.index[-1]).isoformat()}
         fields = self._signals.after_classifier(
             ticker,
@@ -85,7 +80,7 @@ class SignalMaker:
         )
         # Cached only once recorded, so a failed store is retried instead of served from the cache.
         if fresh:
-            self._cache.put(prompt, signal)
+            self._cache.put(prompt.cache_key, signal)
         reply = {**signal, "price": price, **fields}
         if held is not None:
             reply["position"] = {

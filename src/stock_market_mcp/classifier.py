@@ -9,6 +9,10 @@ from typing import Protocol
 
 import requests
 
+# PROMPT_VERSION is re-exported for the golden prompt test, which pins this module's import.
+from stock_market_mcp.prompt import PROMPT_VERSION as PROMPT_VERSION
+from stock_market_mcp.prompt import questions, verdicts
+
 DEFAULT_CLASSIFIER_MODEL = "typesafe/jev-1.13"
 
 # Endpoint pinned as a constant: https only, and requests.post with a timeout
@@ -16,52 +20,6 @@ DEFAULT_CLASSIFIER_MODEL = "typesafe/jev-1.13"
 # The default model (typesafe/jev-1.13) is a Decisions model: it rejects
 # chat/completions with 400, so the transport targets the Decisions API.
 OPENROUTER_DECISIONS_URL = "https://openrouter.ai/api/alpha/decisions"
-
-# Stored with each Signal; bump by hand whenever the prompt or the criteria below change.
-PROMPT_VERSION = 3
-
-_BUY = "Bullish momentum or trend evidence in the supplied data."
-_HOLD = "Mixed or insufficient evidence in the supplied data."
-
-# The single question the verdict hinges on: _NOT_HELD_QUESTIONS without a Position, _HELD_QUESTIONS with one.
-# The state supplied by the caller is the prompt builder's serialized OHLCV+indicators
-# payload (the API accepts a string state verbatim).
-_NOT_HELD_QUESTIONS = {
-    "verdict": {
-        "type": "choice",
-        "instructions": (
-            "Given the supplied price history and indicators, is now the right "
-            "time to buy this stock, or to hold off? The signal is advisory."
-        ),
-        "criteria": {"buy": _BUY, "hold": _HOLD},
-    },
-}
-_HELD_QUESTIONS = {
-    "verdict": {
-        "type": "choice",
-        "instructions": (
-            "A long position in this stock is supplied. Given the price history, "
-            "indicators and the position, should the holder buy more, hold, or cut "
-            "(exit the long now)? The signal is advisory."
-        ),
-        "criteria": {
-            "buy": _BUY,
-            "hold": _HOLD,
-            "cut": "Bearish evidence in the supplied data: exit the long now, at a gain or a loss.",
-        },
-    },
-}
-
-
-def _questions(held: bool) -> dict:
-    """The Decisions questions for a prompt with (held) or without a Position."""
-    return _HELD_QUESTIONS if held else _NOT_HELD_QUESTIONS
-
-
-def _verdicts(held: bool) -> list[str]:
-    """The Verdicts a Signal may have: buy or hold, plus cut on a held Position."""
-    return list(_questions(held)["verdict"]["criteria"])
-
 
 def classifier_model_id() -> str:
     """Model id for the signal classifier; SMM_CLASSIFIER_MODEL overrides the default."""
@@ -93,9 +51,9 @@ def validate_signal(payload: object, held: bool) -> dict:
     extra = payload.keys() - _VERDICT_KEYS
     if extra:
         raise SignalContractError(f"reply has unexpected key(s): {', '.join(sorted(extra))}")
-    if payload["verdict"] not in _verdicts(held):
+    if payload["verdict"] not in verdicts(held):
         raise SignalContractError(
-            f"verdict must be one of {'/'.join(_verdicts(held))}, got: {payload['verdict']!r}"
+            f"verdict must be one of {'/'.join(verdicts(held))}, got: {payload['verdict']!r}"
         )
     confidence = payload["confidence"]
     if (
@@ -150,7 +108,7 @@ class OpenRouterClassifier:
         request = {
             "model": classifier_model_id(),
             "state": prompt,
-            "questions": _questions(held),
+            "questions": questions(held),
         }
         response = requests.post(
             OPENROUTER_DECISIONS_URL,
