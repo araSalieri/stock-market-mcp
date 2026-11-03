@@ -1,4 +1,4 @@
-"""Table tests on pricing a Position: Unrealised P&L, losing and the classifier view, on plain values."""
+"""Table tests on pricing a Position: Unrealised P&L and losing, on plain values."""
 
 import math
 
@@ -27,13 +27,6 @@ def test_non_finite_unrealised_pnl_is_null(price):
     priced = Position(10, 90.0).priced(price)
 
     assert (priced.unrealised_pnl, priced.unrealised_pnl_pct) == (None, None)
-
-
-def test_classifier_view_leaves_quantity_out():
-    assert Position(10, 90.0).priced(100.0).classifier_view() == {
-        "avg_cost": 90.0,
-        "unrealised_pnl_pct": pytest.approx(100 / 9),
-    }
 
 
 @pytest.mark.parametrize(

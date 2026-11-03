@@ -32,10 +32,6 @@ class PricedPosition:
         """Below cost; break-even and a null Unrealised P&L don't lose."""
         return self.unrealised_pnl is not None and self.unrealised_pnl < 0
 
-    def classifier_view(self) -> dict:
-        """The Position as the classifier sees it: quantity stays out, so size doesn't sway the Verdict or bust the cache (ADR-0005)."""
-        return {"avg_cost": self.avg_cost, "unrealised_pnl_pct": self.unrealised_pnl_pct}
-
 
 @dataclass(frozen=True)
 class Position:

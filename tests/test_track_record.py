@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from stock_market_mcp.classifier import PROMPT_VERSION
+from stock_market_mcp.prompt import PROMPT_VERSION
 
 from fakes import FakeClassifier, FakeFetcher, call_tool, flat_history, seed_signals, text_of
 

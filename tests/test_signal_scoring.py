@@ -6,7 +6,7 @@ import pandas as pd
 import pytest
 from fakes import FakeClassifier, FakeFetcher, flat_history, seed_signals
 
-from stock_market_mcp.classifier import PROMPT_VERSION
+from stock_market_mcp.prompt import PROMPT_VERSION
 
 
 def _signal(verdict, confidence=0.7):

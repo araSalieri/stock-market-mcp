@@ -1,11 +1,12 @@
-"""Unit tests for the pure prompt builder: serialized payload shape, literals as truth."""
+"""Unit tests for the prompt module: what the classifier reads, literals as truth."""
 
 import json
 
 import pandas as pd
 import pytest
 
-from stock_market_mcp.prompt import DEFAULT_MAX_STATE_CHARS, build_signal_prompt
+from stock_market_mcp.portfolio import Position
+from stock_market_mcp.prompt import DEFAULT_MAX_STATE_CHARS, signal_prompt
 
 
 def prompt_frame(rows: int = 3) -> pd.DataFrame:
@@ -23,7 +24,7 @@ def prompt_frame(rows: int = 3) -> pd.DataFrame:
 
 
 def test_prompt_payload_has_ticker_period_and_iso_dates():
-    prompt = build_signal_prompt("AAPL", "1mo", prompt_frame())
+    prompt = signal_prompt("AAPL", "1mo", prompt_frame()).state
 
     payload = json.loads(prompt)
     assert payload["ticker"] == "AAPL"
@@ -41,7 +42,7 @@ def test_prompt_dates_keep_the_exchanges_offset_on_every_interval(interval, freq
     idx = pd.date_range(start, periods=3, freq=freq, tz="America/New_York", name="Date")
     df = prompt_frame().set_axis(idx)
 
-    payload = json.loads(build_signal_prompt("AAPL", "1mo", df, interval=interval))
+    payload = json.loads(signal_prompt("AAPL", "1mo", df, interval=interval).state)
 
     assert payload["rows"][-1]["Date"] == last_date
 
@@ -49,7 +50,7 @@ def test_prompt_dates_keep_the_exchanges_offset_on_every_interval(interval, freq
 def test_prompt_serializes_nan_indicator_values_as_null():
     df = prompt_frame().assign(SMA_10=[float("nan"), float("nan"), 10.166666666666666])
 
-    payload = json.loads(build_signal_prompt("AAPL", "1mo", df))
+    payload = json.loads(signal_prompt("AAPL", "1mo", df).state)
 
     assert payload["rows"][0]["SMA_10"] is None
     assert payload["rows"][2]["SMA_10"] == pytest.approx(10.166666666666666)
@@ -58,7 +59,7 @@ def test_prompt_serializes_nan_indicator_values_as_null():
 def test_prompt_rows_are_compact_strings_not_nested_frames():
     df = prompt_frame().assign(SMA_10=[1.0, 2.0, 3.0])
 
-    prompt = build_signal_prompt("AAPL", "1mo", df)
+    prompt = signal_prompt("AAPL", "1mo", df).state
 
     assert prompt.count('{"Date"') == 3  # one flat JSON object per row
 
@@ -74,7 +75,7 @@ def test_prompt_truncates_oldest_rows_to_the_budget():
     # max_tokens_exceeded, so the builder bounds the payload: the MOST RECENT
     # rows are kept and the oldest are dropped – recency is the point of a
     # timing signal.
-    prompt = build_signal_prompt("AAPL", "1y", wide_frame(500), max_chars=8000)
+    prompt = signal_prompt("AAPL", "1y", wide_frame(500), max_chars=8000).state
 
     assert len(prompt) <= 8000
     payload = json.loads(prompt)
@@ -87,7 +88,7 @@ def test_prompt_truncates_oldest_rows_to_the_budget():
 def test_prompt_keeps_every_row_within_the_budget():
     df = wide_frame(20)
 
-    payload = json.loads(build_signal_prompt("AAPL", "1mo", df, max_chars=1_000_000))
+    payload = json.loads(signal_prompt("AAPL", "1mo", df, max_chars=1_000_000).state)
 
     assert len(payload["rows"]) == 20
 
@@ -95,15 +96,15 @@ def test_prompt_keeps_every_row_within_the_budget():
 def test_prompt_budget_default_and_env_override(monkeypatch):
     # Default budget sits under the discovered ~32k-token model cap; the env
     # override is read at call time like the classifier key and model id.
-    small = build_signal_prompt("AAPL", "1y", wide_frame(500))
+    small = signal_prompt("AAPL", "1y", wide_frame(500)).state
     assert len(small) <= DEFAULT_MAX_STATE_CHARS
 
     monkeypatch.setenv("SMM_CLASSIFIER_MAX_STATE_CHARS", "500")
-    bounded = build_signal_prompt("AAPL", "1y", wide_frame(500))
+    bounded = signal_prompt("AAPL", "1y", wide_frame(500)).state
     assert len(bounded) <= 500
 
     monkeypatch.setenv("SMM_CLASSIFIER_MAX_STATE_CHARS", "")
-    assert len(build_signal_prompt("AAPL", "1y", wide_frame(500))) <= DEFAULT_MAX_STATE_CHARS  # empty env counts as unset
+    assert len(signal_prompt("AAPL", "1y", wide_frame(500)).state) <= DEFAULT_MAX_STATE_CHARS  # empty env counts as unset
 
 
 def five_minute_frame(rows: int) -> pd.DataFrame:
@@ -119,7 +120,7 @@ def test_prompt_for_a_month_of_5m_bars_builds_fast():
     import time
 
     start = time.perf_counter()
-    prompt = build_signal_prompt("AAPL", "1mo", five_minute_frame(1600), interval="5m")
+    prompt = signal_prompt("AAPL", "1mo", five_minute_frame(1600), interval="5m").state
     elapsed = time.perf_counter() - start
 
     assert len(prompt) <= DEFAULT_MAX_STATE_CHARS
@@ -131,13 +132,13 @@ def test_prompt_keeps_the_longest_run_of_newest_rows_that_fits(max_chars):
     # Called directly: no tool argument sets the character budget.
     df = wide_frame(300)
 
-    payload = json.loads(build_signal_prompt("AAPL", "1y", df, max_chars=max_chars))
+    payload = json.loads(signal_prompt("AAPL", "1y", df, max_chars=max_chars).state)
     kept = len(payload["rows"])
 
     assert kept >= 1
     assert payload["rows"][-1]["Close"] == pytest.approx(399.0)
     # One more older row would push the prompt over the budget.
-    longer = json.loads(build_signal_prompt("AAPL", "1y", df, max_chars=1_000_000))
+    longer = json.loads(signal_prompt("AAPL", "1y", df, max_chars=1_000_000).state)
     longer["rows"] = longer["rows"][-(kept + 1):]
     assert len(json.dumps(longer)) > max_chars or kept == 300
     if kept > 1:
@@ -145,6 +146,13 @@ def test_prompt_keeps_the_longest_run_of_newest_rows_that_fits(max_chars):
 
 
 def test_prompt_for_an_empty_frame_has_no_rows():
-    payload = json.loads(build_signal_prompt("AAPL", "1mo", prompt_frame().iloc[0:0]))
+    payload = json.loads(signal_prompt("AAPL", "1mo", prompt_frame().iloc[0:0]).state)
 
     assert payload == {"ticker": "AAPL", "period": "1mo", "interval": "1d", "position": None, "rows": []}
+
+
+def test_the_position_the_classifier_sees_leaves_quantity_out():
+    prompt = signal_prompt("AAPL", "1mo", prompt_frame(), position=Position(10, 90.0).priced(100.0))
+
+    assert prompt.held
+    assert json.loads(prompt.state)["position"] == {"avg_cost": 90.0, "unrealised_pnl_pct": pytest.approx(100 / 9)}

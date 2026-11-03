@@ -12,7 +12,7 @@ from typing import cast
 import pandas as pd
 
 from stock_market_mcp.bars import EMA_LENGTH, finite, last_value
-from stock_market_mcp.classifier import PROMPT_VERSION
+from stock_market_mcp.prompt import PROMPT_VERSION
 from stock_market_mcp.db import transaction
 from stock_market_mcp.errors import InputError
 
@@ -90,8 +90,10 @@ class SignalLog:
                 conn.execute("ALTER TABLE signals ADD COLUMN cut_loss INTEGER")
             yield conn
 
-    def before_classifier(self, ticker: str, interval: str, history: pd.DataFrame, scored_at: str) -> dict | None:
-        """Score pending Signals for the ticker and Interval, then return the previous Signal as the classifier sees it, or None."""
+    def before_classifier(
+        self, ticker: str, interval: str, history: pd.DataFrame, scored_at: str
+    ) -> tuple[str, float, str | None] | None:
+        """Score pending Signals for the ticker and Interval, then return the previous Signal's Verdict, Confidence and Outcome (None while pending), or None."""
         with self._open() as conn:
             _score(conn, ticker, interval, history, scored_at)
             row = conn.execute(
@@ -99,10 +101,7 @@ class SignalLog:
                 "ORDER BY id DESC LIMIT 1",
                 (ticker, interval),
             ).fetchone()
-        if row is None:
-            return None
-        verdict, confidence, outcome = row
-        return {"verdict": verdict, "confidence": confidence, "outcome": outcome or "pending"}
+        return None if row is None else tuple(row)
 
     def after_classifier(
         self,

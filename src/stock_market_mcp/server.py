@@ -23,7 +23,6 @@ from stock_market_mcp.cache import (
     CachingFetcher,
 )
 from stock_market_mcp.classifier import (
-    PROMPT_VERSION,
     EnforcingClassifier,
     OpenRouterClassifier,
     SignalClassifier,
@@ -32,6 +31,7 @@ from stock_market_mcp.data import DataFetcher
 from stock_market_mcp.db import DEFAULT_DB_PATH
 from stock_market_mcp.errors import InputError
 from stock_market_mcp.portfolio import PortfolioStore
+from stock_market_mcp.prompt import PROMPT_VERSION
 from stock_market_mcp.scan import scan_ticker
 from stock_market_mcp.signal_maker import SignalMaker
 from stock_market_mcp.signals import PLAN_ATR_MULTIPLE, PLAN_REWARD_RATIO, SignalLog
