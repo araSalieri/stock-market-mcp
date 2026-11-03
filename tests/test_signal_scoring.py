@@ -29,7 +29,7 @@ def _outcome(tmp_path, verdict, *bars, confidence=0.7, first=None, scored_on=Non
     # Entry 100, ATR 2, default plans: long Stop 96 / Target 108, mirrored for a cut: Stop 104 / Target 92.
     log = SignalLog(tmp_path / "s.db")
     first = flat_history() if first is None else first
-    log.record("AAPL", "1d", _signal(verdict, confidence), first, float(first["Close"].iloc[-1]), None)
+    log.record("AAPL", "1d", _signal(verdict, confidence), first, float(first["Close"].iloc[-1]), None, False)
     log.score("AAPL", "1d", _later(*bars) if scored_on is None else scored_on, "2024-06-01T00:00:00")
     return cast("dict", log.latest("AAPL", "1d"))["outcome"]
 
