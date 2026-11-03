@@ -218,9 +218,7 @@ def build_server(
             "prompt_version": PROMPT_VERSION,
             "ticker": ticker,
             "interval": interval,
-            "bands": signal_log.track_record(ticker, interval),
-            "min_confidence": signal_log.min_confidence(),
-            "cut_loss_hit_rate": signal_log.cut_loss_hit_rate(),
+            **signal_log.track_record(ticker, interval),
         }
 
     @audited_tool

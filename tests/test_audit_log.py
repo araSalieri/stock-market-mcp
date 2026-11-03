@@ -1,3 +1,5 @@
+"""Tests for the audit log: one line per tool call with its arguments and outcome."""
+
 import logging
 import re
 

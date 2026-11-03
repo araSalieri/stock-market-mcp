@@ -48,7 +48,7 @@ async def test_get_signal_returns_strict_json_signal(server_url):
 
 
 async def test_unknown_ticker_is_a_loud_tool_error(server_url):
-    # Spec #19 user story 17: no empty data, and nothing reaches the classifier.
+    # A tool never returns empty data, and a ticker with no bars must not cost a classifier call.
     classifier = FakeClassifier()
     result = await call_tool(
         server_url(FakeFetcher(history={}), classifier=classifier),
@@ -89,7 +89,7 @@ async def test_other_tools_keep_working_without_openrouter_key(server_url, monke
     assert "190.0" in text_of(result)
 
 
-# --- Trade Plan arguments (ticket #21) ---
+# --- Trade Plan arguments ---
 
 
 def _signal(verdict, confidence=0.7):
@@ -144,7 +144,7 @@ async def test_non_number_plan_argument_fails_before_the_classifier(server_url, 
     assert classifier.prompts == []
 
 
-# --- Tool surface (ticket #22) ---
+# --- Tool surface ---
 
 
 async def test_server_lists_its_tools_and_get_signal_says_advisory_and_price(server_url):
@@ -181,7 +181,7 @@ async def test_removed_tools_fail_as_unknown(server_url, name):
     assert "unknown tool" in text_of(result).lower()
 
 
-# --- Intervals (ticket #28) ---
+# --- Intervals ---
 
 
 async def test_interval_outside_the_allowlist_is_a_tool_error(server_url):

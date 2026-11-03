@@ -1,3 +1,5 @@
+"""Tests for Watchlists: the store directly, then set_watchlist and get_watchlists over MCP."""
+
 import json
 
 import pytest

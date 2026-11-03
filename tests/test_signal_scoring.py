@@ -1,12 +1,12 @@
-"""Tests for scoring Signals (#53): SignalLog gives pending Signals an Outcome from later bars."""
+"""Tests for scoring Signals: pending Signals get an Outcome from later bars."""
 
 import json
-from typing import cast
 
+import pandas as pd
 import pytest
 from fakes import FakeClassifier, FakeFetcher, flat_history, seed_signals
 
-from stock_market_mcp.signals import SignalLog
+from stock_market_mcp.classifier import PROMPT_VERSION
 
 
 def _signal(verdict, confidence=0.7):
@@ -24,70 +24,84 @@ def _later(*bars):
 FLAT = (101.0, 99.0)
 
 
-def _outcome(tmp_path, verdict, *bars, confidence=0.7, first=None, scored_on=None):
-    """Outcome of one Signal recorded on first (default: 60 flat bars), then scored on scored_on (default: _later(*bars))."""
+def _outcome(signal_maker, verdict, *bars, confidence=0.7, first=None, scored_on=None):
+    """Outcome the classifier sees for one Signal made on first (default: 60 flat bars), then scored on scored_on (default: _later(*bars))."""
     # Entry 100, ATR 2, default plans: long Stop 96 / Target 108, mirrored for a cut: Stop 104 / Target 92.
-    log = SignalLog(tmp_path / "s.db")
     first = flat_history() if first is None else first
-    log.record("AAPL", "1d", _signal(verdict, confidence), first, float(first["Close"].iloc[-1]), None, False)
-    log.score("AAPL", "1d", _later(*bars) if scored_on is None else scored_on, "2024-06-01T00:00:00")
-    return cast("dict", log.latest("AAPL", "1d"))["outcome"]
+    scored_on = _later(*bars) if scored_on is None else scored_on
+    classifier = FakeClassifier(replies=[_signal(verdict, confidence), _signal("hold")])
+    maker = signal_maker(FakeFetcher(history=[first, scored_on]), classifier, ttl=0)
+    maker.make("AAPL", "1d")
+    maker.make("AAPL", "1d")
+    return json.loads(classifier.prompts[1])["previous_signal"]["outcome"]
 
 
-def test_buy_reaching_its_target_first_is_a_target(tmp_path):
-    assert _outcome(tmp_path, "buy", FLAT, (109.0, 99.0), (101.0, 90.0)) == "target"
+def test_buy_reaching_its_target_first_is_a_target(signal_maker):
+    assert _outcome(signal_maker, "buy", FLAT, (109.0, 99.0), (101.0, 90.0)) == "target"
 
 
-def test_cut_falling_to_its_mirrored_target_first_is_a_target(tmp_path):
-    assert _outcome(tmp_path, "cut", FLAT, (101.0, 91.0), (105.0, 99.0)) == "target"
+def test_cut_falling_to_its_mirrored_target_first_is_a_target(signal_maker):
+    assert _outcome(signal_maker, "cut", FLAT, (101.0, 91.0), (105.0, 99.0)) == "target"
 
 
-def test_buy_reaching_its_stop_first_is_a_stop(tmp_path):
-    assert _outcome(tmp_path, "buy", FLAT, (101.0, 95.0), (109.0, 99.0)) == "stop"
+def test_pending_sell_from_an_older_prompt_version_is_scored_as_a_cut(signal_maker, tmp_path):
+    seed_signals(tmp_path / "server.db", [None], verdict="sell", prompt_version=PROMPT_VERSION - 1)
+    history = _later((101.0, 91.0))
+    # seed_signals stores its Signals on 2023-01-01: make that the bar before the drop.
+    history.index = pd.date_range(end="2023-01-02", periods=len(history), freq="D", name="Date")
+    classifier = FakeClassifier(replies=[_signal("hold")])
+    signal_maker(FakeFetcher(history=history), classifier, ttl=0).make("AAPL", "1d")
+    assert json.loads(classifier.prompts[0])["previous_signal"]["outcome"] == "target"
 
 
-def test_cut_rising_to_its_mirrored_stop_first_is_a_stop(tmp_path):
-    assert _outcome(tmp_path, "cut", (105.0, 99.0), (101.0, 91.0)) == "stop"
+def test_buy_reaching_its_stop_first_is_a_stop(signal_maker):
+    assert _outcome(signal_maker, "buy", FLAT, (101.0, 95.0), (109.0, 99.0)) == "stop"
 
 
-def test_stop_and_target_in_one_bar_is_a_stop(tmp_path):
-    assert _outcome(tmp_path, "buy", FLAT, (109.0, 95.0)) == "stop"
+def test_cut_rising_to_its_mirrored_stop_first_is_a_stop(signal_maker):
+    assert _outcome(signal_maker, "cut", (105.0, 99.0), (101.0, 91.0)) == "stop"
 
 
-def test_neither_within_20_later_bars_is_expired(tmp_path):
-    assert _outcome(tmp_path, "buy", *[FLAT] * 20, (109.0, 99.0)) == "expired"
+def test_stop_and_target_in_one_bar_is_a_stop(signal_maker):
+    assert _outcome(signal_maker, "buy", FLAT, (109.0, 95.0)) == "stop"
 
 
-def test_fewer_than_20_later_bars_and_no_hit_stays_pending(tmp_path):
-    assert _outcome(tmp_path, "buy", *[FLAT] * 19) == "pending"
+def test_neither_within_20_later_bars_is_expired(signal_maker):
+    assert _outcome(signal_maker, "buy", *[FLAT] * 20, (109.0, 99.0)) == "expired"
 
 
-def test_hold_reaching_neither_target_within_20_later_bars_is_quiet(tmp_path):
-    assert _outcome(tmp_path, "hold", *[FLAT] * 20, (109.0, 91.0)) == "quiet"
+def test_fewer_than_20_later_bars_and_no_hit_stays_pending(signal_maker):
+    assert _outcome(signal_maker, "buy", *[FLAT] * 19) == "pending"
+
+
+def test_hold_reaching_neither_target_within_20_later_bars_is_quiet(signal_maker):
+    assert _outcome(signal_maker, "hold", *[FLAT] * 20, (109.0, 91.0)) == "quiet"
 
 
 @pytest.mark.parametrize("bar", [(109.0, 99.0), (101.0, 91.0)], ids=["up", "down"])
-def test_hold_reaching_either_target_is_missed(tmp_path, bar):
-    assert _outcome(tmp_path, "hold", FLAT, bar) == "missed"
+def test_hold_reaching_either_target_is_missed(signal_maker, bar):
+    assert _outcome(signal_maker, "hold", FLAT, bar) == "missed"
 
 
-def test_hold_with_fewer_than_20_later_bars_and_no_target_stays_pending(tmp_path):
-    assert _outcome(tmp_path, "hold", *[FLAT] * 19) == "pending"
+def test_hold_with_fewer_than_20_later_bars_and_no_target_stays_pending(signal_maker):
+    assert _outcome(signal_maker, "hold", *[FLAT] * 19) == "pending"
 
 
-def test_buy_below_the_minimum_confidence_is_scored_too(tmp_path):
-    assert _outcome(tmp_path, "buy", (109.0, 99.0), confidence=0.3) == "target"
+def test_buy_below_the_minimum_confidence_is_scored_too(signal_maker):
+    assert _outcome(signal_maker, "buy", (109.0, 99.0), confidence=0.3) == "target"
 
 
-def test_signal_whose_bar_is_outside_the_history_stays_pending(tmp_path):
+def test_signal_whose_bar_is_outside_the_history_stays_pending(signal_maker):
     # The history starts on the bar after the Signal's, which reaches the Target.
-    assert _outcome(tmp_path, "buy", scored_on=_later((109.0, 99.0), *[FLAT] * 59).iloc[60:]) == "pending"
+    assert _outcome(signal_maker, "buy", scored_on=_later((109.0, 99.0), *[FLAT] * 59).iloc[60:]) == "pending"
 
 
-def test_signal_without_a_default_plan_stays_pending(tmp_path):
+def test_signal_without_a_default_plan_stays_pending(signal_maker):
     # Close 1 with ATR 2 puts the long default Stop below zero, so it is stored null.
+    # Below the Minimum Confidence, so no Trade Plan is asked for and the Signal is still stored.
     first = flat_history(close=1.0)
-    assert _outcome(tmp_path, "buy", first=first, scored_on=flat_history(close=1.0, rows=90)) == "pending"
+    outcome = _outcome(signal_maker, "buy", confidence=0.5, first=first, scored_on=flat_history(close=1.0, rows=90))
+    assert outcome == "pending"
 
 
 def test_second_call_scores_the_first_before_the_classifier_sees_it(signal_maker):

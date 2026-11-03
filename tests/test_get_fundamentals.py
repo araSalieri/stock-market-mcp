@@ -1,3 +1,5 @@
+"""Tests for get_fundamentals over MCP."""
+
 from fakes import FakeFetcher, call_tool, text_of
 
 

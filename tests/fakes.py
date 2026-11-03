@@ -34,9 +34,9 @@ def seed_signals(db, outcomes, *, verdict="buy", confidence=0.7, prompt_version=
 
     long_plan and short_plan False store that default Trade Plan as nulls.
 
-    The only test code that knows the signals schema; SignalLog(db).latest creates the table first.
+    The only test code that knows the signals schema; SignalLog(db).track_record creates the table first.
     """
-    SignalLog(db).latest(ticker, interval)
+    SignalLog(db).track_record(None, None)
     long = (96.0, 108.0) if long_plan else (None, None)
     short = (104.0, 92.0) if short_plan else (None, None)
     with closing(sqlite3.connect(db)) as conn, conn:

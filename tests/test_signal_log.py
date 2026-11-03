@@ -1,4 +1,4 @@
-"""Tests for the Signal log (#52): SignalMaker stores each fresh Signal and shows the classifier its previous one."""
+"""Tests for the Signal log: SignalMaker stores each fresh Signal and shows the classifier its previous one."""
 
 import json
 import sqlite3
