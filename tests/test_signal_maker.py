@@ -1,4 +1,4 @@
-"""Tests for SignalMaker: step order, the Signal cache and the Trade Plan, called directly with fakes and a SQLite file."""
+"""Tests for SignalMaker: the Signal cache and the Trade Plan, called directly with fakes and a SQLite file."""
 
 import json
 

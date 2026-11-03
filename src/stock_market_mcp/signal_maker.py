@@ -57,6 +57,7 @@ class SignalMaker:
             raise InputError(f"latest row has a non-finite close (close={price})")
         ticker = ticker.upper()
         period = fetch_period(interval, period)
+        # Read before the classifier, so a broken Portfolio file fails before a classifier call.
         position = self._portfolio.load().get(ticker)
         held = pnl = None
         if position is not None:
@@ -84,6 +85,7 @@ class SignalMaker:
             atr_multiple=atr_multiple,
             reward_ratio=reward_ratio,
         )
+        # Cached only once recorded, so a failed store is retried instead of served from the cache.
         if fresh:
             self._cache.put(prompt, signal)
         reply = {**signal, "price": price, **fields}
