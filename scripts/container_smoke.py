@@ -205,6 +205,7 @@ async def check_signals(session):
         check_signal(await call(session, "get_signal", {"ticker": TICKER, "interval": interval}), interval)
     record = await call(session, "get_track_record", {"ticker": TICKER})
     assert "bands" in record and "min_confidence" in record, record
+    assert all("buy_hit_rate" in band for band in record["bands"]), record
     print(f"get_track_record: {len(record['bands'])} bands, min_confidence {record['min_confidence']}")
 
 
