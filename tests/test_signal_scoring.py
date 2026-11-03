@@ -42,6 +42,10 @@ def test_cut_falling_to_its_mirrored_target_first_is_a_target(tmp_path):
     assert _outcome(tmp_path, "cut", FLAT, (101.0, 91.0), (105.0, 99.0)) == "target"
 
 
+def test_pending_sell_from_an_older_prompt_version_is_scored_as_a_cut(tmp_path):
+    assert _outcome(tmp_path, "sell", FLAT, (101.0, 91.0)) == "target"
+
+
 def test_buy_reaching_its_stop_first_is_a_stop(tmp_path):
     assert _outcome(tmp_path, "buy", FLAT, (101.0, 95.0), (109.0, 99.0)) == "stop"
 
