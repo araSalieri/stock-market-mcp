@@ -42,6 +42,10 @@ _Avoid_: Stats, performance, backtest, scorecard
 The length of one bar in the price history a Signal is made from: 1m, 5m, 15m, 1h, or 1d.
 _Avoid_: Timeframe, resolution, granularity
 
+**Prompt Version**:
+The number stored with each Signal that names what the classifier was shown and asked: the bars and indicators, the Position, the previous Signal, and the questions. It changes whenever any of that changes, so Hit Rates and the Minimum Confidence count only Signals asked the same way.
+_Avoid_: Model version, schema version
+
 ### Trade Plan
 
 **Trade Plan**:

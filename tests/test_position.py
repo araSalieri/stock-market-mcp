@@ -1,4 +1,4 @@
-"""Table tests on Position: Unrealised P&L, the classifier view and the Cut Loss check, on plain values."""
+"""Table tests on pricing a Position: Unrealised P&L and losing, on plain values."""
 
 import math
 
@@ -15,45 +15,31 @@ from stock_market_mcp.portfolio import Position
     ],
 )
 def test_unrealised_pnl_is_an_amount_and_a_percent_of_cost(price, pnl, pct):
-    position = Position(10, 90.0)
+    priced = Position(10, 90.0).priced(price)
 
-    assert position.unrealised_pnl(price) == {
-        "unrealised_pnl": pytest.approx(pnl),
-        "unrealised_pnl_pct": pytest.approx(pct),
-    }
+    assert (priced.quantity, priced.avg_cost) == (10, 90.0)
+    assert priced.unrealised_pnl == pytest.approx(pnl)
+    assert priced.unrealised_pnl_pct == pytest.approx(pct)
 
 
 @pytest.mark.parametrize("price", [math.nan, math.inf])
 def test_non_finite_unrealised_pnl_is_null(price):
-    assert Position(10, 90.0).unrealised_pnl(price) == {"unrealised_pnl": None, "unrealised_pnl_pct": None}
+    priced = Position(10, 90.0).priced(price)
 
-
-def test_classifier_view_leaves_quantity_out():
-    position = Position(10, 90.0)
-
-    assert position.classifier_view(position.unrealised_pnl(100.0)) == {
-        "avg_cost": 90.0,
-        "unrealised_pnl_pct": pytest.approx(100 / 9),
-    }
+    assert (priced.unrealised_pnl, priced.unrealised_pnl_pct) == (None, None)
 
 
 @pytest.mark.parametrize(
-    ("verdict", "avg_cost", "expected"),
+    ("avg_cost", "expected"),
     [
-        ("cut", 110.0, True),  # losing
-        ("cut", 90.0, False),  # profit
-        ("cut", 100.0, False),  # break-even
-        ("buy", 110.0, False),
-        ("hold", 110.0, False),
+        (110.0, True),  # below cost
+        (90.0, False),  # profit
+        (100.0, False),  # break-even
     ],
 )
-def test_cuts_losing_at_a_price_of_100(verdict, avg_cost, expected):
-    position = Position(10, avg_cost)
-
-    assert position.cuts_losing(verdict, position.unrealised_pnl(100.0)) is expected
+def test_losing_at_a_price_of_100(avg_cost, expected):
+    assert Position(10, avg_cost).priced(100.0).losing is expected
 
 
 def test_a_non_finite_unrealised_pnl_is_not_losing():
-    position = Position(10, 110.0)
-
-    assert position.cuts_losing("cut", position.unrealised_pnl(math.nan)) is False
+    assert Position(10, 110.0).priced(math.nan).losing is False

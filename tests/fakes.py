@@ -8,7 +8,7 @@ from mcp import ClientSession, types
 from mcp.client.streamable_http import streamable_http_client
 from mcp.types import CallToolResult
 
-from stock_market_mcp.classifier import PROMPT_VERSION
+from stock_market_mcp.prompt import PROMPT_VERSION
 from stock_market_mcp.signals import SignalLog
 
 

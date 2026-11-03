@@ -15,7 +15,7 @@ from stock_market_mcp.classifier import SignalClassifier
 from stock_market_mcp.data import DataFetcher
 from stock_market_mcp.errors import InputError
 from stock_market_mcp.portfolio import PortfolioStore
-from stock_market_mcp.prompt import build_signal_prompt, with_previous_signal
+from stock_market_mcp.prompt import signal_prompt
 from stock_market_mcp.signals import PLAN_ATR_MULTIPLE, PLAN_REWARD_RATIO, SignalLog
 
 PLAN_ARG_MAX = 10
@@ -59,21 +59,14 @@ class SignalMaker:
         period = fetch_period(interval, period)
         # Read before the classifier, so a broken Portfolio file fails before a classifier call.
         position = self._portfolio.load().get(ticker)
-        held = pnl = None
-        if position is not None:
-            pnl = position.unrealised_pnl(price)
-            held = position.classifier_view(pnl)
-        # The prompt without the previous Signal is the cache key, so storing a Signal doesn't defeat the cache.
-        prompt = build_signal_prompt(ticker, period, df, interval=interval, position=held)
+        held = position.priced(price) if position is not None else None
         previous = self._signals.before_classifier(ticker, interval, df, self._now().isoformat())
-        signal = self._cache.get(prompt, self._ttl)
+        prompt = signal_prompt(ticker, period, df, interval=interval, position=held, previous=previous)
+        signal = self._cache.get(prompt.cache_key, self._ttl)
         fresh = signal is None
         if fresh:
-            classified = self._classifier.classify(
-                prompt if previous is None else with_previous_signal(prompt, previous), position is not None
-            )
+            classified = self._classifier.classify(prompt.state, prompt.held)
             signal = {**classified, "data_date": cast("pd.Timestamp", df.index[-1]).isoformat()}
-        cuts_losing = position.cuts_losing(signal["verdict"], pnl) if position is not None and pnl is not None else None
         fields = self._signals.after_classifier(
             ticker,
             interval,
@@ -81,18 +74,17 @@ class SignalMaker:
             price,
             signal,
             fresh=fresh,
-            cuts_losing=cuts_losing,
+            losing=held.losing if held is not None else None,
             atr_multiple=atr_multiple,
             reward_ratio=reward_ratio,
         )
         # Cached only once recorded, so a failed store is retried instead of served from the cache.
         if fresh:
-            self._cache.put(prompt, signal)
+            self._cache.put(prompt.cache_key, signal)
         reply = {**signal, "price": price, **fields}
-        if position is not None and pnl is not None:
+        if held is not None:
             reply["position"] = {
-                **asdict(position),
-                **pnl,
+                **asdict(held),
                 "cut_loss": reply.pop("cut_loss"),
                 "cut_loss_hit_rate": reply.pop("cut_loss_hit_rate"),
             }
