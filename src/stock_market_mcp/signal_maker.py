@@ -59,21 +59,19 @@ class SignalMaker:
         period = fetch_period(interval, period)
         # Read before the classifier, so a broken Portfolio file fails before a classifier call.
         position = self._portfolio.load().get(ticker)
-        held = pnl = None
-        if position is not None:
-            pnl = position.unrealised_pnl(price)
-            held = position.classifier_view(pnl)
+        held = position.priced(price) if position is not None else None
         # The prompt without the previous Signal is the cache key, so storing a Signal doesn't defeat the cache.
-        prompt = build_signal_prompt(ticker, period, df, interval=interval, position=held)
+        prompt = build_signal_prompt(
+            ticker, period, df, interval=interval, position=held.classifier_view() if held is not None else None
+        )
         previous = self._signals.before_classifier(ticker, interval, df, self._now().isoformat())
         signal = self._cache.get(prompt, self._ttl)
         fresh = signal is None
         if fresh:
             classified = self._classifier.classify(
-                prompt if previous is None else with_previous_signal(prompt, previous), position is not None
+                prompt if previous is None else with_previous_signal(prompt, previous), held is not None
             )
             signal = {**classified, "data_date": cast("pd.Timestamp", df.index[-1]).isoformat()}
-        cuts_losing = position.cuts_losing(signal["verdict"], pnl) if position is not None and pnl is not None else None
         fields = self._signals.after_classifier(
             ticker,
             interval,
@@ -81,7 +79,7 @@ class SignalMaker:
             price,
             signal,
             fresh=fresh,
-            cuts_losing=cuts_losing,
+            losing=held.losing if held is not None else None,
             atr_multiple=atr_multiple,
             reward_ratio=reward_ratio,
         )
@@ -89,10 +87,9 @@ class SignalMaker:
         if fresh:
             self._cache.put(prompt, signal)
         reply = {**signal, "price": price, **fields}
-        if position is not None and pnl is not None:
+        if held is not None:
             reply["position"] = {
-                **asdict(position),
-                **pnl,
+                **asdict(held),
                 "cut_loss": reply.pop("cut_loss"),
                 "cut_loss_hit_rate": reply.pop("cut_loss_hit_rate"),
             }

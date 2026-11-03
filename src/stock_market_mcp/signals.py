@@ -113,17 +113,18 @@ class SignalLog:
         signal: dict,
         *,
         fresh: bool,
-        cuts_losing: bool | None,
+        losing: bool | None,
         atr_multiple: float,
         reward_ratio: float,
     ) -> dict:
         """The reply fields for a Signal made on history's last bar: hit_rate, min_confidence, trade_plan, re_entry_lock when
-        locked, and cut_loss and cut_loss_hit_rate when held (cuts_losing not None).
+        locked, and cut_loss and cut_loss_hit_rate when held (losing not None).
 
-        A fresh Signal is recorded with both default Trade Plans at price and cuts_losing; a confident cut also starts a
-        Re-entry Lock at price, replacing any earlier one.
+        A fresh Signal is recorded with both default Trade Plans at price and its cut_loss: a cut on a losing Position at
+        any Confidence, null when not held. A confident cut also starts a Re-entry Lock at price, replacing any earlier one.
         """
         verdict = signal["verdict"]
+        cut_loss = None if losing is None else verdict == "cut" and losing
         with self._open() as conn:
             min_confidence = _min_confidence(conn)
             hit_rate = _hit_rate(conn, ticker, interval, verdict)
@@ -132,7 +133,7 @@ class SignalLog:
             buys = confident and verdict == "buy" and lock is None
             plan = _trade_plan(history, price, atr_multiple, reward_ratio) if buys else None
             if fresh:
-                _record(conn, ticker, interval, signal, history, price, cuts_losing)
+                _record(conn, ticker, interval, signal, history, price, cut_loss)
                 if confident and verdict == "cut":
                     conn.execute(
                         "INSERT OR REPLACE INTO reentry_locks VALUES (?, ?, ?, ?, 0)",
@@ -142,8 +143,8 @@ class SignalLog:
             fields = {"hit_rate": hit_rate, "min_confidence": min_confidence, "trade_plan": plan}
             if lock is not None:
                 fields["re_entry_lock"] = lock
-            if cuts_losing is not None:
-                fields |= {"cut_loss": confident and cuts_losing, "cut_loss_hit_rate": _cut_loss_hit_rate(conn)}
+            if cut_loss is not None:
+                fields |= {"cut_loss": confident and cut_loss, "cut_loss_hit_rate": _cut_loss_hit_rate(conn)}
         return fields
 
     def track_record(self, ticker: str | None, interval: str | None) -> dict:

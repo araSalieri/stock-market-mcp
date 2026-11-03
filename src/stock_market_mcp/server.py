@@ -220,7 +220,7 @@ def build_server(
             try:
                 quote = fetcher.fetch_quote(ticker)
                 price = float(quote["price"])
-                entry |= {"price": finite(price), "currency": quote["currency"], **position.unrealised_pnl(price)}
+                entry |= {"price": finite(price), "currency": quote["currency"], **asdict(position.priced(price))}
             except Exception as exc:
                 log.exception(_error_line(f"get_portfolio ticker={ticker}", exc))
                 entry["error"] = str(exc)
