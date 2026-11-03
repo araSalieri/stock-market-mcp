@@ -3,8 +3,10 @@
 import math
 import os
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
+from functools import partial
 from typing import cast
 
 import pandas as pd
@@ -35,7 +37,6 @@ BANDS_PER_CONFIDENCE = 10
 BAND = f"CAST(confidence * {BANDS_PER_CONFIDENCE} + 1e-9 AS INTEGER)"
 
 # Outcome is null while pending; plan prices are the default Trade Plans, null when one has non-positive prices.
-# short_stop and short_target are the default plan's distances mirrored above and below the Price, which score a cut.
 # cut_loss: 1 when the Verdict was cut on a losing Position at any Confidence, 0 when held otherwise, null when not held.
 SCHEMA = """CREATE TABLE IF NOT EXISTS signals (
     id INTEGER PRIMARY KEY,
@@ -149,37 +150,31 @@ class SignalLog:
         """
         with self._open() as conn:
             pending = conn.execute(
-                "SELECT id, data_date, verdict, long_stop, long_target, short_stop, short_target FROM signals "
+                f"SELECT id, data_date, verdict, {', '.join(_PLAN_COLUMNS)} FROM signals "
                 "WHERE ticker = ? AND interval = ? AND outcome IS NULL",
                 (ticker, interval),
             ).fetchall()
-            for id_, data_date, verdict, long_stop, long_target, short_stop, short_target in pending:
+            for id_, data_date, verdict, *prices in pending:
                 bar = pd.Timestamp(data_date)
                 if bar not in history.index:
                     continue
                 later = cast("pd.DataFrame", history[history.index > bar])
-                if verdict == "hold":
-                    outcome = _hold_outcome(later, long_target, short_target)
-                elif verdict == "buy":
-                    outcome = _outcome(later, long_stop, long_target, long=True)
-                else:  # cut, and sell from older prompt versions
-                    outcome = _outcome(later, short_stop, short_target, long=False)
+                rule = _RULES[verdict]
+                plan: dict[str, float | None] = dict(zip(_PLAN_COLUMNS, prices, strict=True))
+                outcome = rule.outcome(later, *(plan[column] for column in rule.plan))
                 if outcome is not None:
                     conn.execute(
                         "UPDATE signals SET outcome = ?, scored_at = ? WHERE id = ?", (outcome, scored_at, id_)
                     )
 
     def hit_rate(self, ticker: str, interval: str, verdict: str) -> float | None:
-        """Hit Rate of the current prompt version's Signals with this verdict; None under HIT_RATE_MIN_SCORED.
-
-        Buy, cut: Targets / (Targets + Stops). Hold: Quiet / scored holds.
-        """
-        hits, misses = ("quiet", "missed") if verdict == "hold" else ("target", "stop")
+        """Hit Rate of the current prompt version's Signals with this verdict; None under HIT_RATE_MIN_SCORED."""
+        rule = _RULES[verdict]
         with self._open() as conn:
             right, wrong = conn.execute(
                 "SELECT COUNT(*) FILTER (WHERE outcome = ?), COUNT(*) FILTER (WHERE outcome = ?) "
                 "FROM signals WHERE ticker = ? AND interval = ? AND prompt_version = ? AND verdict = ?",
-                (hits, misses, ticker, interval, PROMPT_VERSION, verdict),
+                (rule.hit, rule.miss, ticker, interval, PROMPT_VERSION, verdict),
             ).fetchone()
         return _rate(right, wrong)
 
@@ -189,12 +184,12 @@ class SignalLog:
         Only bands with BAND_MIN_SCORED Targets plus Stops count: MIN_CONFIDENCE while none has that many,
         None when some do but none is above BREAK_EVEN_HIT_RATE.
         """
+        buy = _RULES["buy"]
         with self._open() as conn:
             bands = conn.execute(
-                f"SELECT {BAND} AS band, "
-                "COUNT(*) FILTER (WHERE outcome = 'target'), COUNT(*) FILTER (WHERE outcome = 'stop') "
+                f"SELECT {BAND} AS band, COUNT(*) FILTER (WHERE outcome = ?), COUNT(*) FILTER (WHERE outcome = ?) "
                 "FROM signals WHERE prompt_version = ? AND verdict = 'buy' GROUP BY band ORDER BY band",
-                (PROMPT_VERSION,),
+                (buy.hit, buy.miss, PROMPT_VERSION),
             ).fetchall()
         rates = [(band, _rate(targets, stops, BAND_MIN_SCORED)) for band, targets, stops in bands]
         scored = [(band, rate) for band, rate in rates if rate is not None]
@@ -203,44 +198,53 @@ class SignalLog:
                 return band / BANDS_PER_CONFIDENCE
         return None if scored else MIN_CONFIDENCE
 
-    def track_record(self, ticker: str | None, interval: str | None) -> list[dict]:
+    def track_record(self, ticker: str | None, interval: str | None) -> dict:
+        """The Track Record's bands, with the server-wide Minimum Confidence and Cut Loss Hit Rate get_signal reports."""
+        return {
+            "bands": self._bands(ticker, interval),
+            "min_confidence": self.min_confidence(),
+            "cut_loss_hit_rate": self.cut_loss_hit_rate(),
+        }
+
+    def _bands(self, ticker: str | None, interval: str | None) -> list[dict]:
         """Outcome counts and Hit Rates of the current prompt version's Signals per 0.1 Confidence band and Verdict,
         optionally for one ticker and/or Interval, bands with Signals only, ascending.
 
-        Leaves out Signals score never scores: buy without a long default plan, cut without a mirrored one,
-        hold without both.
+        Leaves out Signals score never scores: those missing a price their Outcome rule is judged by.
         """
+        scorable = " OR ".join(
+            f"(verdict = '{verdict}' AND {' AND '.join(f'{column} IS NOT NULL' for column in _RULES[verdict].plan)})"
+            for verdict in _TRACKED
+        )
         with self._open() as conn:
             rows = conn.execute(
-                f"SELECT {BAND} AS band, verdict, "
-                "COUNT(*) FILTER (WHERE outcome = 'target'), COUNT(*) FILTER (WHERE outcome = 'stop'), "
-                "COUNT(*) FILTER (WHERE outcome = 'expired'), COUNT(*) FILTER (WHERE outcome = 'quiet'), "
-                "COUNT(*) FILTER (WHERE outcome = 'missed'), COUNT(*) FILTER (WHERE outcome IS NULL) "
-                "FROM signals WHERE prompt_version = ? AND (? IS NULL OR ticker = ?) AND (? IS NULL OR interval = ?) "
-                # Plan prices are null together, so the Target stands for the whole plan.
-                "AND CASE verdict WHEN 'buy' THEN long_target IS NOT NULL WHEN 'cut' THEN short_target IS NOT NULL "
-                "ELSE long_target IS NOT NULL AND short_target IS NOT NULL END "
-                "GROUP BY band, verdict ORDER BY band",
+                f"SELECT {BAND} AS band, verdict, COALESCE(outcome, 'pending'), COUNT(*) FROM signals "
+                "WHERE prompt_version = ? AND (? IS NULL OR ticker = ?) AND (? IS NULL OR interval = ?) "
+                f"AND ({scorable}) GROUP BY band, verdict, outcome ORDER BY band",
                 (PROMPT_VERSION, ticker, ticker, interval, interval),
             ).fetchall()
-        bands: dict[int, dict] = {}
-        for band, verdict, *counts in rows:
-            entry = bands.setdefault(
-                band, {"band": band / BANDS_PER_CONFIDENCE, **{v: _counts(v) for v in ("buy", "cut", "hold")}}
-            )
-            entry[verdict] = _counts(verdict, *counts)
-        for entry in bands.values():
-            entry["buy_hit_rate"] = _rate(entry["buy"]["target"], entry["buy"]["stop"], BAND_MIN_SCORED)
-        return list(bands.values())
+        tallies: dict[int, dict[str, dict[str, int]]] = {}
+        for band, verdict, outcome, count in rows:
+            tallies.setdefault(band, {v: {} for v in _TRACKED})[verdict][outcome] = count
+        buy = _RULES["buy"]
+        return [
+            {
+                "band": band / BANDS_PER_CONFIDENCE,
+                **{verdict: _counts(verdict, tally[verdict]) for verdict in _TRACKED},
+                "buy_hit_rate": _rate(tally["buy"].get(buy.hit, 0), tally["buy"].get(buy.miss, 0), BAND_MIN_SCORED),
+            }
+            for band, tally in tallies.items()
+        ]
 
     def cut_loss_hit_rate(self) -> float | None:
         """Targets / (Targets + Stops) over the current prompt version's Signals stored with cut_loss = 1, all tickers and
         Intervals; None under CUT_LOSS_MIN_SCORED."""
+        cut = _RULES["cut"]
         with self._open() as conn:
             targets, stops = conn.execute(
-                "SELECT COUNT(*) FILTER (WHERE outcome = 'target'), COUNT(*) FILTER (WHERE outcome = 'stop') "
+                "SELECT COUNT(*) FILTER (WHERE outcome = ?), COUNT(*) FILTER (WHERE outcome = ?) "
                 "FROM signals WHERE prompt_version = ? AND cut_loss = 1",
-                (PROMPT_VERSION,),
+                (cut.hit, cut.miss, PROMPT_VERSION),
             ).fetchone()
         return _rate(targets, stops, CUT_LOSS_MIN_SCORED)
 
@@ -265,13 +269,11 @@ def _rate(hits: int, misses: int, min_scored: int = HIT_RATE_MIN_SCORED) -> floa
     return hits / (hits + misses)
 
 
-def _counts(
-    verdict: str, target: int = 0, stop: int = 0, expired: int = 0, quiet: int = 0, missed: int = 0, pending: int = 0
-) -> dict:
+def _counts(verdict: str, tally: dict[str, int]) -> dict:
     """One Verdict's Outcome counts and Hit Rate in a Track Record band."""
-    if verdict == "hold":
-        return {"quiet": quiet, "missed": missed, "pending": pending, "hit_rate": _rate(quiet, missed)}
-    return {"target": target, "stop": stop, "expired": expired, "pending": pending, "hit_rate": _rate(target, stop)}
+    rule = _RULES[verdict]
+    counts = {outcome: tally.get(outcome, 0) for outcome in (rule.hit, rule.miss, *rule.other, "pending")}
+    return {**counts, "hit_rate": _rate(counts[rule.hit], counts[rule.miss])}
 
 
 def trade_plan(
@@ -328,3 +330,28 @@ def _hold_outcome(later: pd.DataFrame, long_target: float | None, short_target: 
     if (window["High"] >= long_target).any() or (window["Low"] <= short_target).any():
         return "missed"
     return "quiet" if len(later) >= OUTCOME_BARS else None
+
+
+@dataclass(frozen=True)
+class _Rule:
+    """How one Verdict is scored: the stored prices passed to outcome, and which Outcomes are hits, misses or neither."""
+
+    plan: tuple[str, ...]
+    outcome: Callable[..., str | None]
+    hit: str
+    miss: str
+    other: tuple[str, ...] = ()
+
+
+# long_* is the default Trade Plan, short_* the same distances mirrored, which a cut is judged by.
+_PLAN_COLUMNS = ("long_stop", "long_target", "short_stop", "short_target")
+_CUT = _Rule(("short_stop", "short_target"), partial(_outcome, long=False), "target", "stop", ("expired",))
+_RULES = {
+    "buy": _Rule(("long_stop", "long_target"), partial(_outcome, long=True), "target", "stop", ("expired",)),
+    "cut": _CUT,
+    "hold": _Rule(("long_target", "short_target"), _hold_outcome, "quiet", "missed"),
+    # Older prompt versions' sell exited the long, as cut does now.
+    "sell": _CUT,
+}
+# Verdicts the current prompt version gives, each reported in a Track Record band.
+_TRACKED = ("buy", "cut", "hold")
