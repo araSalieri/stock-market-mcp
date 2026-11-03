@@ -1,7 +1,5 @@
 """Tests for the automatic Minimum Confidence: set from Hit Rates per Confidence band, applied by SignalMaker."""
 
-import pytest
-
 from fakes import FakeClassifier, FakeFetcher, flat_history, seed_signals
 
 
