@@ -67,7 +67,9 @@ class SignalMaker:
         fresh = signal is None
         if fresh:
             previous = self._signals.latest(ticker, interval)
-            signal = self._classifier.classify(prompt if previous is None else with_previous_signal(prompt, previous))
+            signal = self._classifier.classify(
+                prompt if previous is None else with_previous_signal(prompt, previous), position is not None
+            )
         # After the cache, so a cached Signal gets the current Minimum Confidence; a new pending Signal changes neither read.
         min_confidence = self._signals.min_confidence()
         hit_rate = self._signals.hit_rate(ticker, interval, signal["verdict"])
