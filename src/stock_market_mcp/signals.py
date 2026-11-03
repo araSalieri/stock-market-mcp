@@ -9,7 +9,7 @@ from typing import cast
 
 import pandas as pd
 
-from stock_market_mcp.bars import finite, last_value
+from stock_market_mcp.bars import EMA_LENGTH, finite, last_value
 from stock_market_mcp.classifier import PROMPT_VERSION
 from stock_market_mcp.db import transaction
 from stock_market_mcp.errors import InputError
@@ -72,7 +72,7 @@ class SignalLog:
 
     @contextmanager
     def _open(self) -> Iterator[sqlite3.Connection]:
-        """A transaction on the signals table, adding cut_loss to a file from before it existed (null on old rows)."""
+        """A transaction on the signals and reentry_locks tables, adding cut_loss to a file from before it existed (null on old rows)."""
         with transaction(self.path, SCHEMA) as conn:
             conn.execute(LOCK_SCHEMA)
             # shortcut: two servers upgrading one file at once can fail one call on a duplicate column; retry succeeds.
@@ -88,7 +88,7 @@ class SignalLog:
         history: pd.DataFrame,
         price: float,
         cut_loss: bool | None,
-        lock: bool = False,
+        lock: bool,
     ) -> None:
         """Store one pending Signal made on history's last bar, with both default Trade Plans at price.
 
@@ -122,9 +122,9 @@ class SignalLog:
                 )
 
     def reentry_lock(self, ticker: str, interval: str, history: pd.DataFrame) -> dict | None:
-        """The Re-entry Lock on the ticker and Interval as {cut_price, cut_date, ema}, or None when there's none.
+        """The Re-entry Lock on the ticker and Interval as {cut_price, cut_date, ema}, or None when there's none; writes the lift when history shows one.
 
-        A lock lifts, for good, once a bar of history after the cut closes above both the 10-bar EMA and the cut's Price.
+        A lock lifts, for good, once a bar of history after the cut closes above both the EMA (EMA_LENGTH bars) and the cut's Price.
         """
         with self._open() as conn:
             row = conn.execute(
@@ -135,12 +135,12 @@ class SignalLog:
                 return None
             cut_price, cut_date = row
             later = cast("pd.DataFrame", history[history.index > pd.Timestamp(cut_date)])
-            if ((later["Close"] > later["EMA_10"]) & (later["Close"] > cut_price)).any():
+            if ((later["Close"] > later[f"EMA_{EMA_LENGTH}"]) & (later["Close"] > cut_price)).any():
                 conn.execute(
                     "UPDATE reentry_locks SET lifted = 1 WHERE ticker = ? AND interval = ?", (ticker, interval)
                 )
                 return None
-        return {"cut_price": cut_price, "cut_date": cut_date, "ema": finite(float(history["EMA_10"].iloc[-1]))}
+        return {"cut_price": cut_price, "cut_date": cut_date, "ema": finite(float(history[f"EMA_{EMA_LENGTH}"].iloc[-1]))}
 
     def score(self, ticker: str, interval: str, history: pd.DataFrame, scored_at: str) -> None:
         """Give pending Signals for the ticker and Interval an Outcome from the bars after their own.

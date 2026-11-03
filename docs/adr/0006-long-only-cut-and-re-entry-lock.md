@@ -15,7 +15,7 @@ The server is long-only: there are no short Trade Plans and no short Positions. 
 
 - `PROMPT_VERSION` goes to 3, so Hit Rates and the Minimum Confidence reset to their defaults.
 - The Minimum Confidence is set from buy Hit Rates only, and cut uses the same threshold. The Cut Loss Hit Rate is reported but sets nothing.
-- Sell is no longer scored. A cut is scored against the default Trade Plan distances mirrored below the Price (the old short levels).
+- Sell is no longer scored. A cut is scored against the default Trade Plan distances mirrored below the Price (the old short Stop and Target).
 - A cut can come at any Unrealised P&L, and every confident cut starts a Re-entry Lock. Cut Loss means a confident cut while the Position is losing.
 - The lock is per ticker and Interval and is never in the prompt. Once lifted it stays lifted until the next confident cut.
 - A Portfolio file holding a short Position fails loudly on load and names the tickers. `set_position` with quantity 0 still has to work, so the user can clear them.

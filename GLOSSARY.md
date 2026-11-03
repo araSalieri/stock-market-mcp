@@ -93,7 +93,7 @@ The Positions the user holds, set by the user through the agent. The server only
 _Avoid_: Holdings, account
 
 **Position**:
-One long holding of a ticker in the Portfolio, with a quantity and an average cost. There are no short Positions.
+A long stake in one ticker in the Portfolio, with a quantity and an average cost. There are no short Positions.
 _Avoid_: Holding, lot
 
 **Unrealised P&L**:

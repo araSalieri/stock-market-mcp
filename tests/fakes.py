@@ -165,7 +165,7 @@ class FakeClassifier:
         self.replies = list(replies) if replies is not None else None
         self.prompts = []
 
-    def classify(self, prompt):
+    def classify(self, prompt, held):
         self.prompts.append(prompt)
         if self.error is not None:
             raise self.error

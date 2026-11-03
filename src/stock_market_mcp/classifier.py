@@ -24,49 +24,44 @@ PROMPT_VERSION = 3
 _BUY = "Bullish momentum or trend evidence in the supplied data."
 _HOLD = "Mixed or insufficient evidence in the supplied data."
 
-# The single question the verdict hinges on, by whether the prompt supplies a Position.
+# The single question the verdict hinges on: _NOT_HELD_QUESTIONS without a Position, _HELD_QUESTIONS with one.
 # The state supplied by the caller is the prompt builder's serialized OHLCV+indicators
 # payload (the API accepts a string state verbatim).
-_DECISION_QUESTIONS = {
-    False: {
-        "verdict": {
-            "type": "choice",
-            "instructions": (
-                "Given the supplied price history and indicators, is now the right "
-                "time to buy this stock, or to hold off? The signal is advisory."
-            ),
-            "criteria": {"buy": _BUY, "hold": _HOLD},
-        },
+_NOT_HELD_QUESTIONS = {
+    "verdict": {
+        "type": "choice",
+        "instructions": (
+            "Given the supplied price history and indicators, is now the right "
+            "time to buy this stock, or to hold off? The signal is advisory."
+        ),
+        "criteria": {"buy": _BUY, "hold": _HOLD},
     },
-    True: {
-        "verdict": {
-            "type": "choice",
-            "instructions": (
-                "A long position in this stock is supplied. Given the price history, "
-                "indicators and the position, should the holder buy more, hold, or cut "
-                "(exit the long now)? The signal is advisory."
-            ),
-            "criteria": {
-                "buy": _BUY,
-                "hold": _HOLD,
-                "cut": "Bearish evidence in the supplied data: exit the long now, at a gain or a loss.",
-            },
+}
+_HELD_QUESTIONS = {
+    "verdict": {
+        "type": "choice",
+        "instructions": (
+            "A long position in this stock is supplied. Given the price history, "
+            "indicators and the position, should the holder buy more, hold, or cut "
+            "(exit the long now)? The signal is advisory."
+        ),
+        "criteria": {
+            "buy": _BUY,
+            "hold": _HOLD,
+            "cut": "Bearish evidence in the supplied data: exit the long now, at a gain or a loss.",
         },
     },
 }
 
 
-def _held(prompt: str) -> bool:
-    """Whether the prompt supplies a Position, which picks the Verdicts it may get."""
-    try:
-        return json.loads(prompt).get("position") is not None
-    except (json.JSONDecodeError, AttributeError):
-        return False
+def _questions(held: bool) -> dict:
+    """The Decisions questions for a prompt with (held) or without a Position."""
+    return _HELD_QUESTIONS if held else _NOT_HELD_QUESTIONS
 
 
 def _verdicts(held: bool) -> list[str]:
     """The Verdicts a Signal may have: buy or hold, plus cut on a held Position."""
-    return list(_DECISION_QUESTIONS[held]["verdict"]["criteria"])
+    return list(_questions(held)["verdict"]["criteria"])
 
 
 def classifier_model_id() -> str:
@@ -77,7 +72,9 @@ def classifier_model_id() -> str:
 
 
 class SignalClassifier(Protocol):
-    def classify(self, prompt: str) -> dict: ...
+    def classify(self, prompt: str, held: bool) -> dict:
+        """The Signal for prompt; held says the prompt supplies a Position, which allows a cut."""
+        ...
 
 
 class SignalContractError(Exception):
@@ -127,13 +124,12 @@ class EnforcingClassifier:
     def __init__(self, classifier: SignalClassifier) -> None:
         self._classifier = classifier
 
-    def classify(self, prompt: str) -> dict:
-        held = _held(prompt)
+    def classify(self, prompt: str, held: bool) -> dict:
         try:
-            return validate_signal(self._classifier.classify(prompt), held)
+            return validate_signal(self._classifier.classify(prompt, held), held)
         except SignalContractError as first_error:
             try:
-                return validate_signal(self._classifier.classify(prompt), held)
+                return validate_signal(self._classifier.classify(prompt, held), held)
             except SignalContractError as second_error:
                 raise SignalContractError(
                     f"classifier reply violated the signal contract twice, "
@@ -144,7 +140,7 @@ class EnforcingClassifier:
 class OpenRouterClassifier:
     """Decisions-API transport against OpenRouter's /api/alpha/decisions endpoint."""
 
-    def classify(self, prompt: str) -> dict:
+    def classify(self, prompt: str, held: bool) -> dict:
         # Key is read at call time and never stored; a missing key is a loud
         # error naming the cause, before any HTTP request is attempted.
         api_key = os.environ.get("SMM_OPENROUTER_API_KEY")
@@ -156,7 +152,7 @@ class OpenRouterClassifier:
         request = {
             "model": classifier_model_id(),
             "state": prompt,
-            "questions": _DECISION_QUESTIONS[_held(prompt)],
+            "questions": _questions(held),
         }
         response = requests.post(
             OPENROUTER_DECISIONS_URL,
