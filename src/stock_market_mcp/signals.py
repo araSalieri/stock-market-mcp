@@ -5,7 +5,7 @@ import os
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Literal, cast
+from typing import cast
 
 import pandas as pd
 
@@ -13,10 +13,6 @@ from stock_market_mcp.bars import last_value
 from stock_market_mcp.classifier import PROMPT_VERSION
 from stock_market_mcp.db import transaction
 from stock_market_mcp.errors import InputError
-
-Direction = Literal["long", "short"]
-# Verdict -> Trade Plan Direction; hold has no plan.
-VERDICT_DIRECTION: dict[str, Direction] = {"buy": "long", "sell": "short"}
 
 PLAN_ATR_MULTIPLE = 2.0
 PLAN_REWARD_RATIO = 2.0
@@ -39,7 +35,8 @@ BANDS_PER_CONFIDENCE = 10
 BAND = f"CAST(confidence * {BANDS_PER_CONFIDENCE} + 1e-9 AS INTEGER)"
 
 # Outcome is null while pending; plan prices are the default Trade Plans, null when one has non-positive prices.
-# cut_loss: 1 when the Verdict opposed a losing Position at any Confidence, 0 when held otherwise, null when not held.
+# short_stop and short_target are the default plan's distances mirrored above and below the Price, which score a cut.
+# cut_loss: 1 when the Verdict was cut on a losing Position at any Confidence, 0 when held otherwise, null when not held.
 SCHEMA = """CREATE TABLE IF NOT EXISTS signals (
     id INTEGER PRIMARY KEY,
     ticker TEXT NOT NULL,
@@ -76,8 +73,8 @@ class SignalLog:
         self, ticker: str, interval: str, signal: dict, history: pd.DataFrame, price: float, cut_loss: bool | None
     ) -> None:
         """Store one pending Signal made on history's last bar, with both default Trade Plans at price."""
-        long_stop, long_target = _default_plan(history, price, "long")
-        short_stop, short_target = _default_plan(history, price, "short")
+        long_stop, long_target = _default_plan(history, price, long=True)
+        short_stop, short_target = _default_plan(history, price, long=False)
         with self._open() as conn:
             conn.execute(
                 "INSERT INTO signals (ticker, interval, prompt_version, data_date, verdict, confidence, price, "
@@ -118,7 +115,7 @@ class SignalLog:
                     outcome = _hold_outcome(later, long_target, short_target)
                 elif verdict == "buy":
                     outcome = _outcome(later, long_stop, long_target, long=True)
-                else:
+                else:  # cut, and sell from older prompt versions
                     outcome = _outcome(later, short_stop, short_target, long=False)
                 if outcome is not None:
                     conn.execute(
@@ -128,7 +125,7 @@ class SignalLog:
     def hit_rate(self, ticker: str, interval: str, verdict: str) -> float | None:
         """Hit Rate of the current prompt version's Signals of the verdict's kind; None under HIT_RATE_MIN_SCORED.
 
-        Buy/sell: Targets / (Targets + Stops). Hold: Quiet / scored holds.
+        Buy/cut: Targets / (Targets + Stops). Hold: Quiet / scored holds.
         """
         hold = verdict == "hold"
         hits, misses = ("quiet", "missed") if hold else ("target", "stop")
@@ -165,7 +162,7 @@ class SignalLog:
         """Outcome counts and Hit Rates of the current prompt version's Signals per 0.1 Confidence band and Verdict,
         optionally for one ticker and/or Interval, bands with Signals only, ascending.
 
-        Leaves out Signals score never scores: buy without a long default plan, sell without a short one,
+        Leaves out Signals score never scores: buy without a long default plan, cut without a mirrored one,
         hold without both.
         """
         with self._open() as conn:
@@ -176,7 +173,7 @@ class SignalLog:
                 "COUNT(*) FILTER (WHERE outcome = 'missed'), COUNT(*) FILTER (WHERE outcome IS NULL) "
                 "FROM signals WHERE prompt_version = ? AND (? IS NULL OR ticker = ?) AND (? IS NULL OR interval = ?) "
                 # Plan prices are null together, so the Target stands for the whole plan.
-                "AND CASE verdict WHEN 'buy' THEN long_target IS NOT NULL WHEN 'sell' THEN short_target IS NOT NULL "
+                "AND CASE verdict WHEN 'buy' THEN long_target IS NOT NULL WHEN 'cut' THEN short_target IS NOT NULL "
                 "ELSE long_target IS NOT NULL AND short_target IS NOT NULL END "
                 "GROUP BY band, verdict ORDER BY band",
                 (PROMPT_VERSION, ticker, ticker, interval, interval),
@@ -184,7 +181,7 @@ class SignalLog:
         bands: dict[int, dict] = {}
         for band, verdict, *counts in rows:
             entry = bands.setdefault(
-                band, {"band": band / BANDS_PER_CONFIDENCE, **{v: _counts(v) for v in ("buy", "sell", "hold")}}
+                band, {"band": band / BANDS_PER_CONFIDENCE, **{v: _counts(v) for v in ("buy", "cut", "hold")}}
             )
             entry[verdict] = _counts(verdict, *counts)
         for entry in bands.values():
@@ -233,15 +230,14 @@ def _counts(
 
 
 def trade_plan(
-    history: pd.DataFrame, entry: float, direction: Direction, atr_multiple: float, reward_ratio: float
+    history: pd.DataFrame, entry: float, atr_multiple: float, reward_ratio: float, *, long: bool = True
 ) -> dict:
-    """Stop and Target around entry (the Price) from the last ATR(14) of history."""
+    """Stop and Target around entry (the Price) from the last ATR(14) of history; long=False mirrors them, to score a cut."""
     atr = last_value("atr", history)
     if not math.isfinite(atr):
         raise InputError(f"latest row has a non-finite ATR (atr={atr})")
-    sign = 1 if direction == "long" else -1
-    stop = entry - sign * atr_multiple * atr
-    # Same line for both Directions: short Target = Entry - ratio * (Stop - Entry).
+    stop = entry - (1 if long else -1) * atr_multiple * atr
+    # Same line both ways: mirrored Target = Entry - ratio * (Stop - Entry).
     target = entry + reward_ratio * (entry - stop)
     if stop <= 0 or target <= 0:
         raise InputError(
@@ -249,7 +245,6 @@ def trade_plan(
             "ATR is too large relative to the last close"
         )
     return {
-        "direction": direction,
         "entry": entry,
         "stop": stop,
         "target": target,
@@ -259,10 +254,10 @@ def trade_plan(
     }
 
 
-def _default_plan(history: pd.DataFrame, entry: float, direction: Direction) -> tuple[float | None, float | None]:
-    """Stop and Target of the default Trade Plan stored with a Signal; nulls when that plan can't be made."""
+def _default_plan(history: pd.DataFrame, entry: float, *, long: bool) -> tuple[float | None, float | None]:
+    """Stop and Target of the default Trade Plan stored with a Signal, or mirrored; nulls when that plan can't be made."""
     try:
-        plan = trade_plan(history, entry, direction, PLAN_ATR_MULTIPLE, PLAN_REWARD_RATIO)
+        plan = trade_plan(history, entry, PLAN_ATR_MULTIPLE, PLAN_REWARD_RATIO, long=long)
     except InputError:
         return None, None
     return plan["stop"], plan["target"]

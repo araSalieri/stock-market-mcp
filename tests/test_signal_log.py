@@ -15,7 +15,7 @@ def _signal(verdict, confidence=0.7):
 
 
 def test_second_call_shows_the_classifier_the_first_signal_as_pending(signal_maker):
-    classifier = FakeClassifier(replies=[_signal("sell", 0.8), _signal("buy")])
+    classifier = FakeClassifier(replies=[_signal("hold", 0.8), _signal("buy")])
     maker = signal_maker(FakeFetcher(history=flat_history()), classifier, ttl=0)
 
     maker.make("AAPL")
@@ -23,7 +23,7 @@ def test_second_call_shows_the_classifier_the_first_signal_as_pending(signal_mak
 
     first, second = (json.loads(p) for p in classifier.prompts)
     assert "previous_signal" not in first
-    assert second["previous_signal"] == {"verdict": "sell", "confidence": 0.8, "outcome": "pending"}
+    assert second["previous_signal"] == {"verdict": "hold", "confidence": 0.8, "outcome": "pending"}
 
 
 def _stored(db):
@@ -68,7 +68,7 @@ def test_failed_fetch_stores_nothing(signal_maker, tmp_path):
 
 
 def test_hold_is_stored_with_both_default_plans_whatever_the_caller_asked(signal_maker, tmp_path):
-    # Entry 100, ATR 2, defaults 2 ATR and ratio 2: long 96/108, short 104/92.
+    # Entry 100, ATR 2, defaults 2 ATR and ratio 2: long 96/108, mirrored 104/92.
     maker = signal_maker(FakeFetcher(history=flat_history()), FakeClassifier(_signal("hold", 0.4)), db_path=tmp_path / "s.db")
 
     maker.make("aapl", "1d", atr_multiple=1, reward_ratio=3)
@@ -78,7 +78,7 @@ def test_hold_is_stored_with_both_default_plans_whatever_the_caller_asked(signal
         "id": 1,
         "ticker": "AAPL",
         "interval": "1d",
-        "prompt_version": 2,
+        "prompt_version": 3,
         "data_date": "2024-02-29T00:00:00",
         "verdict": "hold",
         "confidence": 0.4,

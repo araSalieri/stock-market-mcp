@@ -77,4 +77,4 @@ async def test_tool_schema_keeps_argument_names_defaults_and_description(server_
         "reward_ratio": 2.0,
     }
     assert tool.description is not None
-    assert tool.description.startswith("Advisory buy/sell/hold Signal")
+    assert tool.description.startswith("Advisory long-only Signal")

@@ -70,7 +70,6 @@ def test_buy_carries_a_long_trade_plan(signal_maker):
         "hit_rate": None,
         "min_confidence": 0.6,
         "trade_plan": {
-            "direction": "long",
             "entry": 100.0,
             "stop": pytest.approx(96.0),
             "target": pytest.approx(108.0),
@@ -81,17 +80,6 @@ def test_buy_carries_a_long_trade_plan(signal_maker):
     }
 
 
-def test_sell_carries_a_short_trade_plan(signal_maker):
-    # Entry 100, ATR 2: Stop = 100 + 2*2 = 104, Target = 100 - 2*(104 - 100) = 92.
-    reply = signal_maker(FakeFetcher(history=flat_history()), FakeClassifier(_signal("sell"))).make("AAPL")
-
-    plan = reply["trade_plan"]
-    assert plan["direction"] == "short"
-    assert plan["entry"] == reply["price"] == 100.0
-    assert plan["stop"] == pytest.approx(104.0)
-    assert plan["target"] == pytest.approx(92.0)
-
-
 def test_hold_has_no_trade_plan_but_carries_the_price(signal_maker):
     fetcher = FakeFetcher(history=flat_history(last_close=123.5))
     reply = signal_maker(fetcher, FakeClassifier(_signal("hold"))).make("AAPL")
@@ -99,37 +87,32 @@ def test_hold_has_no_trade_plan_but_carries_the_price(signal_maker):
     assert reply == {**_signal("hold"), "price": 123.5, "hit_rate": None, "min_confidence": 0.6, "trade_plan": None}
 
 
-@pytest.mark.parametrize("verdict", ["buy", "sell"])
-def test_buy_or_sell_below_the_default_minimum_confidence_has_no_trade_plan(signal_maker, verdict):
-    reply = signal_maker(FakeFetcher(history=flat_history()), FakeClassifier(_signal(verdict, 0.59))).make("AAPL")
+def test_buy_below_the_default_minimum_confidence_has_no_trade_plan(signal_maker):
+    reply = signal_maker(FakeFetcher(history=flat_history()), FakeClassifier(_signal("buy", 0.59))).make("AAPL")
 
-    assert reply == {**_signal(verdict, 0.59), "price": 100.0, "hit_rate": None, "min_confidence": 0.6, "trade_plan": None}
+    assert reply == {**_signal("buy", 0.59), "price": 100.0, "hit_rate": None, "min_confidence": 0.6, "trade_plan": None}
 
 
-# Entry 100, ATR 2, atr_multiple 1.5, reward_ratio 3:
-# long Stop = 100 - 1.5*2 = 97, Target = 100 + 3*(100-97) = 109;
-# short Stop = 100 + 1.5*2 = 103, Target = 100 - 3*(103-100) = 91.
-@pytest.mark.parametrize(("verdict", "stop", "target"), [("buy", 97.0, 109.0), ("sell", 103.0, 91.0)])
-def test_custom_atr_multiple_and_reward_ratio_change_the_plan_and_are_echoed(signal_maker, verdict, stop, target):
-    maker = signal_maker(FakeFetcher(history=flat_history()), FakeClassifier(_signal(verdict)))
+# Entry 100, ATR 2, atr_multiple 1.5, reward_ratio 3: Stop = 100 - 1.5*2 = 97, Target = 100 + 3*(100-97) = 109.
+def test_custom_atr_multiple_and_reward_ratio_change_the_plan_and_are_echoed(signal_maker):
+    maker = signal_maker(FakeFetcher(history=flat_history()), FakeClassifier(_signal("buy")))
     plan = maker.make("AAPL", atr_multiple=1.5, reward_ratio=3)["trade_plan"]
 
-    assert plan["stop"] == pytest.approx(stop)
-    assert plan["target"] == pytest.approx(target)
+    assert plan["stop"] == pytest.approx(97.0)
+    assert plan["target"] == pytest.approx(109.0)
     assert plan["atr_multiple"] == 1.5
     assert plan["reward_ratio"] == 3
 
 
-# Entry 1, ATR 2: long Stop = 1 - 2*2 = -3; short Stop = 5, Target = 1 - 2*(5 - 1) = -7.
-@pytest.mark.parametrize("verdict", ["buy", "sell"])
-def test_non_positive_plan_price_is_an_input_error(signal_maker, verdict):
-    maker = signal_maker(FakeFetcher(history=flat_history(close=1.0)), FakeClassifier(_signal(verdict)))
+# Entry 1, ATR 2: Stop = 1 - 2*2 = -3.
+def test_non_positive_plan_price_is_an_input_error(signal_maker):
+    maker = signal_maker(FakeFetcher(history=flat_history(close=1.0)), FakeClassifier(_signal("buy")))
 
     with pytest.raises(InputError, match="non-positive"):
         maker.make("AAPL")
 
 
-@pytest.mark.parametrize("verdict", ["buy", "sell", "hold"])
+@pytest.mark.parametrize("verdict", ["buy", "hold"])
 def test_nan_last_close_is_an_input_error_before_the_classifier(signal_maker, verdict):
     classifier = FakeClassifier(_signal(verdict))
     maker = signal_maker(FakeFetcher(history=flat_history(last_close=float("nan"))), classifier)

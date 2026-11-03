@@ -26,7 +26,7 @@ FLAT = (101.0, 99.0)
 
 def _outcome(tmp_path, verdict, *bars, confidence=0.7, first=None, scored_on=None):
     """Outcome of one Signal recorded on first (default: 60 flat bars), then scored on scored_on (default: _later(*bars))."""
-    # Entry 100, ATR 2, default plans: long Stop 96 / Target 108, short Stop 104 / Target 92.
+    # Entry 100, ATR 2, default plans: long Stop 96 / Target 108, mirrored for a cut: Stop 104 / Target 92.
     log = SignalLog(tmp_path / "s.db")
     first = flat_history() if first is None else first
     log.record("AAPL", "1d", _signal(verdict, confidence), first, float(first["Close"].iloc[-1]), None)
@@ -38,16 +38,16 @@ def test_buy_reaching_its_target_first_is_a_target(tmp_path):
     assert _outcome(tmp_path, "buy", FLAT, (109.0, 99.0), (101.0, 90.0)) == "target"
 
 
-def test_sell_reaching_its_target_first_is_a_target(tmp_path):
-    assert _outcome(tmp_path, "sell", FLAT, (101.0, 91.0), (105.0, 99.0)) == "target"
+def test_cut_falling_to_its_mirrored_target_first_is_a_target(tmp_path):
+    assert _outcome(tmp_path, "cut", FLAT, (101.0, 91.0), (105.0, 99.0)) == "target"
 
 
 def test_buy_reaching_its_stop_first_is_a_stop(tmp_path):
     assert _outcome(tmp_path, "buy", FLAT, (101.0, 95.0), (109.0, 99.0)) == "stop"
 
 
-def test_sell_reaching_its_stop_first_is_a_stop(tmp_path):
-    assert _outcome(tmp_path, "sell", (105.0, 99.0), (101.0, 91.0)) == "stop"
+def test_cut_rising_to_its_mirrored_stop_first_is_a_stop(tmp_path):
+    assert _outcome(tmp_path, "cut", (105.0, 99.0), (101.0, 91.0)) == "stop"
 
 
 def test_stop_and_target_in_one_bar_is_a_stop(tmp_path):
@@ -66,7 +66,7 @@ def test_hold_reaching_neither_target_within_20_later_bars_is_quiet(tmp_path):
     assert _outcome(tmp_path, "hold", *[FLAT] * 20, (109.0, 91.0)) == "quiet"
 
 
-@pytest.mark.parametrize("bar", [(109.0, 99.0), (101.0, 91.0)], ids=["long", "short"])
+@pytest.mark.parametrize("bar", [(109.0, 99.0), (101.0, 91.0)], ids=["up", "down"])
 def test_hold_reaching_either_target_is_missed(tmp_path, bar):
     assert _outcome(tmp_path, "hold", FLAT, bar) == "missed"
 
@@ -110,7 +110,7 @@ def _hit_rate(signal_maker, tmp_path, *seeds, reply="buy"):
 
 
 def test_hit_rate_is_targets_over_targets_and_stops_ignoring_expired(signal_maker, tmp_path):
-    seeds = [(["target"] * 3 + ["stop"] * 7 + ["expired"] * 5, {}), (["stop"], {"verdict": "sell"})]
+    seeds = [(["target"] * 3 + ["stop"] * 7 + ["expired"] * 5, {}), (["stop"], {"verdict": "cut"})]
     assert _hit_rate(signal_maker, tmp_path, *seeds) == pytest.approx(3 / 11)
 
 

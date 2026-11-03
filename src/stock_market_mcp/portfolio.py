@@ -38,10 +38,10 @@ class Position:
             "unrealised_pnl_pct": pnl["unrealised_pnl_pct"],
         }
 
-    def opposes_losing(self, verdict: str, pnl: dict) -> bool:
-        """Whether the Verdict is sell while the Unrealised P&L loses; break-even and null don't lose."""
+    def cuts_losing(self, verdict: str, pnl: dict) -> bool:
+        """Whether the Verdict is cut while the Unrealised P&L loses; break-even and null don't lose."""
         amount = pnl["unrealised_pnl"]
-        return verdict == "sell" and amount is not None and amount < 0
+        return verdict == "cut" and amount is not None and amount < 0
 
 
 class PortfolioStore:
