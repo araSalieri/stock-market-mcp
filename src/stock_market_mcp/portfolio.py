@@ -19,29 +19,35 @@ SCHEMA = """CREATE TABLE IF NOT EXISTS positions (
 
 
 @dataclass(frozen=True)
+class PricedPosition:
+    """A Position at a Price; its fields are the ones get_signal and get_portfolio reply with."""
+
+    quantity: float
+    avg_cost: float
+    unrealised_pnl: float | None
+    unrealised_pnl_pct: float | None
+
+    @property
+    def losing(self) -> bool:
+        """Below cost; break-even and a null Unrealised P&L don't lose."""
+        return self.unrealised_pnl is not None and self.unrealised_pnl < 0
+
+    def classifier_view(self) -> dict:
+        """The Position as the classifier sees it: quantity stays out, so size doesn't sway the Verdict or bust the cache (ADR-0005)."""
+        return {"avg_cost": self.avg_cost, "unrealised_pnl_pct": self.unrealised_pnl_pct}
+
+
+@dataclass(frozen=True)
 class Position:
     quantity: float
     avg_cost: float
 
-    def unrealised_pnl(self, price: float) -> dict:
-        """Unrealised P&L at price, as an amount and a percent of cost; null when non-finite."""
+    def priced(self, price: float) -> PricedPosition:
+        """The Position at price, with its Unrealised P&L as an amount and a percent of cost; null when non-finite."""
         pnl = (price - self.avg_cost) * self.quantity
-        return {
-            "unrealised_pnl": finite(pnl),
-            "unrealised_pnl_pct": finite(pnl / (self.avg_cost * self.quantity) * 100),
-        }
-
-    def classifier_view(self, pnl: dict) -> dict:
-        """The Position as the classifier sees it: quantity stays out, so size doesn't sway the Verdict or bust the cache (ADR-0005)."""
-        return {
-            "avg_cost": self.avg_cost,
-            "unrealised_pnl_pct": pnl["unrealised_pnl_pct"],
-        }
-
-    def cuts_losing(self, verdict: str, pnl: dict) -> bool:
-        """Whether the Verdict is cut while the Unrealised P&L loses; break-even and null don't lose."""
-        amount = pnl["unrealised_pnl"]
-        return verdict == "cut" and amount is not None and amount < 0
+        return PricedPosition(
+            self.quantity, self.avg_cost, finite(pnl), finite(pnl / (self.avg_cost * self.quantity) * 100)
+        )
 
 
 class PortfolioStore:
