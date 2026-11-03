@@ -7,11 +7,11 @@ A server that gives coding agents market data, indicators, and advisory trading 
 ### Signal
 
 **Signal**:
-An advisory answer to "is now the time to buy, sell, or hold this stock?", made of a Verdict, a Confidence, a rationale, the data date, the Price, the Hit Rate for its ticker and Interval (none until enough are scored), and a Trade Plan when the Verdict is buy or sell.
+An advisory answer to "is now the time to buy or hold this stock, or to cut it if held?", made of a Verdict, a Confidence, a rationale, the data date, the Price, the Hit Rate for its ticker and Interval (none until enough are scored), and a Trade Plan when the Verdict is buy.
 _Avoid_: Recommendation, call, alert
 
 **Verdict**:
-One of buy, sell, or hold – the direction the Signal leans.
+Buy or hold on a ticker not held; buy (add), hold, or cut on a held Position. Cut means exit now, whatever the Unrealised P&L. There is no sell or short.
 _Avoid_: Decision, action
 
 **Confidence**:
@@ -19,19 +19,19 @@ The classifier's own 0–1 estimate that the Verdict is right. Self-reported, no
 _Avoid_: Probability, certainty, score
 
 **Minimum Confidence**:
-The lowest Confidence at which a buy or sell gets a Trade Plan. Set by the server from Hit Rates: 0.6 until enough Signals are scored.
+The lowest Confidence at which a buy gets a Trade Plan or a cut counts. Set by the server from buy Hit Rates: 0.6 until enough Signals are scored.
 _Avoid_: Threshold, cut-off
 
 **Price**:
-The last close in the data the Signal was made from; during the session that is the close of the bar still forming. Every Signal has one; on buy or sell it equals the Entry.
+The last close in the data the Signal was made from; during the session that is the close of the bar still forming. Every Signal has one; on buy it equals the Entry.
 _Avoid_: Current price, last price, quote
 
 **Outcome**:
-What happened to a buy or sell Signal within 20 bars of its Interval, judged against the default Trade Plan: Target (reached first), Stop (reached first, or on the same bar as the Target), or Expired (neither). Scored even when the Signal was below the Minimum Confidence. A hold Signal's Outcome is Quiet (neither the long nor the short default Target reached) or Missed (one was).
+What happened to a Signal within 20 bars of its Interval, scored even when it was below the Minimum Confidence. A buy is judged against the default Trade Plan: Target (reached first), Stop (reached first, or on the same bar as the Target), or Expired (neither). A cut is judged against the same distances mirrored below the Price: Target if price falls the Target distance first, Stop if it rises the Stop distance first, else Expired. A hold's Outcome is Quiet (price moved the Target distance neither up nor down) or Missed (it did).
 _Avoid_: Result, win/loss
 
 **Hit Rate**:
-For buy and sell, Targets divided by Targets plus Stops over a set of scored Signals, Expired left out; for hold, Quiet divided by all scored holds. The measured counterpart to Confidence.
+For buy and cut, Targets divided by Targets plus Stops over a set of scored Signals, Expired left out; for hold, Quiet divided by all scored holds. The measured counterpart to Confidence.
 _Avoid_: Win rate, accuracy
 
 **Track Record**:
@@ -45,23 +45,19 @@ _Avoid_: Timeframe, resolution, granularity
 ### Trade Plan
 
 **Trade Plan**:
-The three prices for one Direction: Entry, Stop, and Target. Part of a Signal; a hold Verdict, or a Signal below the Minimum Confidence, has none. Advisory only.
+The three prices for a long trade: Entry, Stop, and Target. Part of a buy Signal at or above the Minimum Confidence and not under a Re-entry Lock; every other Signal has none. Advisory only.
 _Avoid_: Setup, strategy, levels
-
-**Direction**:
-Long (profit if price rises) or short (profit if price falls). Set by the Verdict: buy is long, sell is short.
-_Avoid_: Side, bias
 
 **Entry**:
 The price at which the Trade Plan opens the position.
 _Avoid_: Buy price, trigger
 
 **Stop**:
-The price at which the Trade Plan is wrong and the position should close at a loss. Below Entry for long, above for short.
+The price at which the Trade Plan is wrong and the position should close at a loss. Below Entry.
 _Avoid_: Stop-loss price, invalidation
 
 **Target**:
-The price at which the Trade Plan takes profit. Above Entry for long, below for short.
+The price at which the Trade Plan takes profit. Above Entry.
 _Avoid_: Take-profit, objective, goal
 
 **Reward Ratio**:
@@ -97,17 +93,21 @@ The Positions the user holds, set by the user through the agent. The server only
 _Avoid_: Holdings, account
 
 **Position**:
-One ticker in the Portfolio with a Direction, a quantity, and an average cost.
+One long holding of a ticker in the Portfolio, with a quantity and an average cost. There are no short Positions.
 _Avoid_: Holding, lot
 
 **Unrealised P&L**:
-A Position's profit or loss if closed at a given price: the price minus the average cost, times the quantity, sign flipped for short. In the ticker's currency, also given as a percent of cost.
+A Position's profit or loss if closed at a given price: the price minus the average cost, times the quantity. In the ticker's currency, also given as a percent of cost.
 _Avoid_: Gain, return, open P&L
 
 **Cut Loss**:
-A Signal, made with the held Position in view, whose Verdict points against that Position (sell on a long, buy on a short) at or above the Minimum Confidence while the Position's Unrealised P&L at the Price is negative. Advisory only; the server never closes the Position.
+A cut Verdict at or above the Minimum Confidence while the Position's Unrealised P&L at the Price is negative. Advisory only; the server never closes the Position.
 _Avoid_: Stop out, exit signal, bail
 
 **Cut Loss Hit Rate**:
-The Hit Rate over every scored Signal that pointed against a losing Position, across all tickers and Intervals and at any Confidence. Measures whether cutting was right.
+The Hit Rate over every scored cut on a losing Position, across all tickers and Intervals and at any Confidence. Measures whether cutting was right. Reported only; it sets nothing.
 _Avoid_: Exit accuracy, cut rate
+
+**Re-entry Lock**:
+The state of a ticker on one Interval from a cut at or above the Minimum Confidence until a later bar of that Interval closes above both its 10-bar EMA and the cut's Price. While locked, a buy gets no Trade Plan. Once lifted it stays lifted until the next such cut.
+_Avoid_: Cooldown, ban, penalty
