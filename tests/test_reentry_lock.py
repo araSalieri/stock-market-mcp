@@ -1,7 +1,7 @@
-"""Tests for the Re-entry Lock (#93): SignalMaker locks a ticker on an Interval after a confident cut, until a later
+"""Tests for the Re-entry Lock: SignalMaker locks a ticker on an Interval after a confident cut, until a later
 bar closes above both the 10-bar EMA and the cut's Price.
 
-Drives SignalMaker with fakes, not the MCP surface: spec #89's Testing Decisions ask for it, to step history bar by bar."""
+Drives SignalMaker with fakes, not the MCP surface, to step history bar by bar."""
 
 import pandas as pd
 import pytest

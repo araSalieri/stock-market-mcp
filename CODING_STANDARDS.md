@@ -10,3 +10,4 @@ Judgement calls for review. `scripts/check.sh` (run by CI) already enforces test
 - **Glossary terms.** Code, tool descriptions and docs use `GLOSSARY.md` terms and avoid each term's _Avoid_ list; a new domain concept gets a glossary entry in the same change.
 - **Docs follow the surface.** A change to a tool's parameters or reply, an env var, or the compose setup updates the tool description, README and compose comments in the same change.
 - **No private library APIs.** A `pyright: ignore[reportPrivateUsage]` needs a `shortcut:` comment saying why no public API works.
+- **Comments give the why.** A comment says what the code can't show, not what the next line does. No issue or spec numbers in code; ADR references and `shortcut:` comments are fine.
