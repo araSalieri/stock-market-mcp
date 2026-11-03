@@ -9,8 +9,6 @@ from typing import Protocol
 
 import requests
 
-# PROMPT_VERSION is re-exported for the golden prompt test, which pins this module's import.
-from stock_market_mcp.prompt import PROMPT_VERSION as PROMPT_VERSION
 from stock_market_mcp.prompt import questions, verdicts
 
 DEFAULT_CLASSIFIER_MODEL = "typesafe/jev-1.13"

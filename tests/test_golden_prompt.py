@@ -6,7 +6,8 @@ from types import SimpleNamespace
 
 from fakes import FakeFetcher, daily_bars, seed_signals
 
-from stock_market_mcp.classifier import PROMPT_VERSION, EnforcingClassifier, OpenRouterClassifier
+from stock_market_mcp.classifier import EnforcingClassifier, OpenRouterClassifier
+from stock_market_mcp.prompt import PROMPT_VERSION
 from stock_market_mcp.portfolio import PortfolioStore
 
 # One fingerprint per Prompt Version. Never edit an existing one: add the new version's instead.
