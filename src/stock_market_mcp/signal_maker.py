@@ -13,7 +13,7 @@ from stock_market_mcp.data import DataFetcher
 from stock_market_mcp.errors import InputError
 from stock_market_mcp.portfolio import PortfolioStore
 from stock_market_mcp.prompt import build_signal_prompt, with_previous_signal
-from stock_market_mcp.signals import PLAN_ATR_MULTIPLE, PLAN_REWARD_RATIO, VERDICT_DIRECTION, SignalLog, trade_plan
+from stock_market_mcp.signals import PLAN_ATR_MULTIPLE, PLAN_REWARD_RATIO, SignalLog, trade_plan
 
 PLAN_ARG_MAX = 10
 
@@ -67,26 +67,37 @@ class SignalMaker:
         fresh = signal is None
         if fresh:
             previous = self._signals.latest(ticker, interval)
-            signal = self._classifier.classify(prompt if previous is None else with_previous_signal(prompt, previous))
+            signal = self._classifier.classify(
+                prompt if previous is None else with_previous_signal(prompt, previous), position is not None
+            )
         # After the cache, so a cached Signal gets the current Minimum Confidence; a new pending Signal changes neither read.
         min_confidence = self._signals.min_confidence()
         hit_rate = self._signals.hit_rate(ticker, interval, signal["verdict"])
         confident = min_confidence is not None and signal["confidence"] >= min_confidence
-        direction = VERDICT_DIRECTION.get(signal["verdict"]) if confident else None
+        confident_verdict = signal["verdict"] if confident else None
+        # Checked on cached Signals too, so a cached buy can't slip past a lock or miss a lift.
+        lock = self._signals.reentry_lock(ticker, interval, df)
         # Before the Signal is stored, so a plan error doesn't fail a call that already logged.
-        plan = trade_plan(df, price, direction, atr_multiple, reward_ratio) if direction else None
+        buys = confident_verdict == "buy" and lock is None
+        plan = trade_plan(df, price, atr_multiple, reward_ratio) if buys else None
+        locks = fresh and confident_verdict == "cut"
         # Stored at any Confidence for the Cut Loss Hit Rate; the reply's cut_loss also needs the Minimum Confidence.
-        opposes_losing = position.opposes_losing(signal["verdict"], pnl) if position is not None and pnl is not None else None
+        cuts_losing = position.cuts_losing(signal["verdict"], pnl) if position is not None and pnl is not None else None
         if fresh:
-            self._signals.record(ticker, interval, signal, df, price, opposes_losing)
+            self._signals.record(ticker, interval, signal, df, price, cuts_losing, locks)
             # Cached only once stored, so a failed store is retried instead of served from the cache.
             self._cache.put(prompt, signal)
+        if locks:
+            # Reads back the lock just started; it can't lift on its own bar.
+            lock = self._signals.reentry_lock(ticker, interval, df)
         reply = {**signal, "price": price, "hit_rate": hit_rate, "min_confidence": min_confidence, "trade_plan": plan}
+        if lock is not None:
+            reply["re_entry_lock"] = lock
         if position is not None and pnl is not None:
             reply["position"] = {
                 **asdict(position),
                 **pnl,
-                "cut_loss": confident and opposes_losing,
+                "cut_loss": confident and cuts_losing,
                 "cut_loss_hit_rate": self._signals.cut_loss_hit_rate(),
             }
         return reply

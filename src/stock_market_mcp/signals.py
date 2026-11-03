@@ -5,18 +5,14 @@ import os
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Literal, cast
+from typing import cast
 
 import pandas as pd
 
-from stock_market_mcp.bars import last_value
+from stock_market_mcp.bars import EMA_LENGTH, finite, last_value
 from stock_market_mcp.classifier import PROMPT_VERSION
 from stock_market_mcp.db import transaction
 from stock_market_mcp.errors import InputError
-
-Direction = Literal["long", "short"]
-# Verdict -> Trade Plan Direction; hold has no plan.
-VERDICT_DIRECTION: dict[str, Direction] = {"buy": "long", "sell": "short"}
 
 PLAN_ATR_MULTIPLE = 2.0
 PLAN_REWARD_RATIO = 2.0
@@ -39,7 +35,8 @@ BANDS_PER_CONFIDENCE = 10
 BAND = f"CAST(confidence * {BANDS_PER_CONFIDENCE} + 1e-9 AS INTEGER)"
 
 # Outcome is null while pending; plan prices are the default Trade Plans, null when one has non-positive prices.
-# cut_loss: 1 when the Verdict opposed a losing Position at any Confidence, 0 when held otherwise, null when not held.
+# short_stop and short_target are the default plan's distances mirrored above and below the Price, which score a cut.
+# cut_loss: 1 when the Verdict was cut on a losing Position at any Confidence, 0 when held otherwise, null when not held.
 SCHEMA = """CREATE TABLE IF NOT EXISTS signals (
     id INTEGER PRIMARY KEY,
     ticker TEXT NOT NULL,
@@ -58,6 +55,16 @@ SCHEMA = """CREATE TABLE IF NOT EXISTS signals (
     cut_loss INTEGER
 )"""
 
+# Re-entry Lock per ticker and Interval: the confident cut's Price and data date; lifted stays 1 until the next such cut.
+LOCK_SCHEMA = """CREATE TABLE IF NOT EXISTS reentry_locks (
+    ticker TEXT NOT NULL,
+    interval TEXT NOT NULL,
+    cut_price REAL NOT NULL,
+    cut_date TEXT NOT NULL,
+    lifted INTEGER NOT NULL,
+    PRIMARY KEY (ticker, interval)
+)"""
+
 
 class SignalLog:
     def __init__(self, path: str | os.PathLike):
@@ -65,19 +72,31 @@ class SignalLog:
 
     @contextmanager
     def _open(self) -> Iterator[sqlite3.Connection]:
-        """A transaction on the signals table, adding cut_loss to a file from before it existed (null on old rows)."""
+        """A transaction on the signals and reentry_locks tables, adding cut_loss to a file from before it existed (null on old rows)."""
         with transaction(self.path, SCHEMA) as conn:
+            conn.execute(LOCK_SCHEMA)
             # shortcut: two servers upgrading one file at once can fail one call on a duplicate column; retry succeeds.
             if "cut_loss" not in {column[1] for column in conn.execute("PRAGMA table_info(signals)")}:
                 conn.execute("ALTER TABLE signals ADD COLUMN cut_loss INTEGER")
             yield conn
 
     def record(
-        self, ticker: str, interval: str, signal: dict, history: pd.DataFrame, price: float, cut_loss: bool | None
+        self,
+        ticker: str,
+        interval: str,
+        signal: dict,
+        history: pd.DataFrame,
+        price: float,
+        cut_loss: bool | None,
+        lock: bool,
     ) -> None:
-        """Store one pending Signal made on history's last bar, with both default Trade Plans at price."""
-        long_stop, long_target = _default_plan(history, price, "long")
-        short_stop, short_target = _default_plan(history, price, "short")
+        """Store one pending Signal made on history's last bar, with both default Trade Plans at price.
+
+        lock=True also starts a Re-entry Lock at price in the same transaction, replacing any earlier one.
+        """
+        data_date = cast("pd.Timestamp", history.index[-1]).isoformat()
+        long_stop, long_target = _default_plan(history, price, long=True)
+        short_stop, short_target = _default_plan(history, price, long=False)
         with self._open() as conn:
             conn.execute(
                 "INSERT INTO signals (ticker, interval, prompt_version, data_date, verdict, confidence, price, "
@@ -86,7 +105,7 @@ class SignalLog:
                     ticker,
                     interval,
                     PROMPT_VERSION,
-                    cast("pd.Timestamp", history.index[-1]).isoformat(),
+                    data_date,
                     signal["verdict"],
                     signal["confidence"],
                     price,
@@ -97,6 +116,31 @@ class SignalLog:
                     cut_loss,
                 ),
             )
+            if lock:
+                conn.execute(
+                    "INSERT OR REPLACE INTO reentry_locks VALUES (?, ?, ?, ?, 0)", (ticker, interval, price, data_date)
+                )
+
+    def reentry_lock(self, ticker: str, interval: str, history: pd.DataFrame) -> dict | None:
+        """The Re-entry Lock on the ticker and Interval as {cut_price, cut_date, ema}, or None when there's none; writes the lift when history shows one.
+
+        A lock lifts, for good, once a bar of history after the cut closes above both the EMA (EMA_LENGTH bars) and the cut's Price.
+        """
+        with self._open() as conn:
+            row = conn.execute(
+                "SELECT cut_price, cut_date FROM reentry_locks WHERE ticker = ? AND interval = ? AND lifted = 0",
+                (ticker, interval),
+            ).fetchone()
+            if row is None:
+                return None
+            cut_price, cut_date = row
+            later = cast("pd.DataFrame", history[history.index > pd.Timestamp(cut_date)])
+            if ((later["Close"] > later[f"EMA_{EMA_LENGTH}"]) & (later["Close"] > cut_price)).any():
+                conn.execute(
+                    "UPDATE reentry_locks SET lifted = 1 WHERE ticker = ? AND interval = ?", (ticker, interval)
+                )
+                return None
+        return {"cut_price": cut_price, "cut_date": cut_date, "ema": finite(float(history[f"EMA_{EMA_LENGTH}"].iloc[-1]))}
 
     def score(self, ticker: str, interval: str, history: pd.DataFrame, scored_at: str) -> None:
         """Give pending Signals for the ticker and Interval an Outcome from the bars after their own.
@@ -118,7 +162,7 @@ class SignalLog:
                     outcome = _hold_outcome(later, long_target, short_target)
                 elif verdict == "buy":
                     outcome = _outcome(later, long_stop, long_target, long=True)
-                else:
+                else:  # cut, and sell from older prompt versions
                     outcome = _outcome(later, short_stop, short_target, long=False)
                 if outcome is not None:
                     conn.execute(
@@ -126,23 +170,21 @@ class SignalLog:
                     )
 
     def hit_rate(self, ticker: str, interval: str, verdict: str) -> float | None:
-        """Hit Rate of the current prompt version's Signals of the verdict's kind; None under HIT_RATE_MIN_SCORED.
+        """Hit Rate of the current prompt version's Signals with this verdict; None under HIT_RATE_MIN_SCORED.
 
-        Buy/sell: Targets / (Targets + Stops). Hold: Quiet / scored holds.
+        Buy, cut: Targets / (Targets + Stops). Hold: Quiet / scored holds.
         """
-        hold = verdict == "hold"
-        hits, misses = ("quiet", "missed") if hold else ("target", "stop")
+        hits, misses = ("quiet", "missed") if verdict == "hold" else ("target", "stop")
         with self._open() as conn:
             right, wrong = conn.execute(
                 "SELECT COUNT(*) FILTER (WHERE outcome = ?), COUNT(*) FILTER (WHERE outcome = ?) "
-                "FROM signals WHERE ticker = ? AND interval = ? AND prompt_version = ? "
-                f"AND verdict {'=' if hold else '!='} 'hold'",
-                (hits, misses, ticker, interval, PROMPT_VERSION),
+                "FROM signals WHERE ticker = ? AND interval = ? AND prompt_version = ? AND verdict = ?",
+                (hits, misses, ticker, interval, PROMPT_VERSION, verdict),
             ).fetchone()
         return _rate(right, wrong)
 
     def min_confidence(self) -> float | None:
-        """Lowest 0.1 Confidence band of the current prompt version whose buy/sell Hit Rate is above BREAK_EVEN_HIT_RATE.
+        """Lowest 0.1 Confidence band of the current prompt version whose buy Hit Rate is above BREAK_EVEN_HIT_RATE.
 
         Only bands with BAND_MIN_SCORED Targets plus Stops count: MIN_CONFIDENCE while none has that many,
         None when some do but none is above BREAK_EVEN_HIT_RATE.
@@ -151,7 +193,7 @@ class SignalLog:
             bands = conn.execute(
                 f"SELECT {BAND} AS band, "
                 "COUNT(*) FILTER (WHERE outcome = 'target'), COUNT(*) FILTER (WHERE outcome = 'stop') "
-                "FROM signals WHERE prompt_version = ? AND verdict IN ('buy', 'sell') GROUP BY band ORDER BY band",
+                "FROM signals WHERE prompt_version = ? AND verdict = 'buy' GROUP BY band ORDER BY band",
                 (PROMPT_VERSION,),
             ).fetchall()
         rates = [(band, _rate(targets, stops, BAND_MIN_SCORED)) for band, targets, stops in bands]
@@ -165,7 +207,7 @@ class SignalLog:
         """Outcome counts and Hit Rates of the current prompt version's Signals per 0.1 Confidence band and Verdict,
         optionally for one ticker and/or Interval, bands with Signals only, ascending.
 
-        Leaves out Signals score never scores: buy without a long default plan, sell without a short one,
+        Leaves out Signals score never scores: buy without a long default plan, cut without a mirrored one,
         hold without both.
         """
         with self._open() as conn:
@@ -176,7 +218,7 @@ class SignalLog:
                 "COUNT(*) FILTER (WHERE outcome = 'missed'), COUNT(*) FILTER (WHERE outcome IS NULL) "
                 "FROM signals WHERE prompt_version = ? AND (? IS NULL OR ticker = ?) AND (? IS NULL OR interval = ?) "
                 # Plan prices are null together, so the Target stands for the whole plan.
-                "AND CASE verdict WHEN 'buy' THEN long_target IS NOT NULL WHEN 'sell' THEN short_target IS NOT NULL "
+                "AND CASE verdict WHEN 'buy' THEN long_target IS NOT NULL WHEN 'cut' THEN short_target IS NOT NULL "
                 "ELSE long_target IS NOT NULL AND short_target IS NOT NULL END "
                 "GROUP BY band, verdict ORDER BY band",
                 (PROMPT_VERSION, ticker, ticker, interval, interval),
@@ -184,14 +226,11 @@ class SignalLog:
         bands: dict[int, dict] = {}
         for band, verdict, *counts in rows:
             entry = bands.setdefault(
-                band, {"band": band / BANDS_PER_CONFIDENCE, **{v: _counts(v) for v in ("buy", "sell", "hold")}}
+                band, {"band": band / BANDS_PER_CONFIDENCE, **{v: _counts(v) for v in ("buy", "cut", "hold")}}
             )
             entry[verdict] = _counts(verdict, *counts)
         for entry in bands.values():
-            buy, sell = entry["buy"], entry["sell"]
-            entry["buy_sell_hit_rate"] = _rate(
-                buy["target"] + sell["target"], buy["stop"] + sell["stop"], BAND_MIN_SCORED
-            )
+            entry["buy_hit_rate"] = _rate(entry["buy"]["target"], entry["buy"]["stop"], BAND_MIN_SCORED)
         return list(bands.values())
 
     def cut_loss_hit_rate(self) -> float | None:
@@ -236,15 +275,14 @@ def _counts(
 
 
 def trade_plan(
-    history: pd.DataFrame, entry: float, direction: Direction, atr_multiple: float, reward_ratio: float
+    history: pd.DataFrame, entry: float, atr_multiple: float, reward_ratio: float, *, long: bool = True
 ) -> dict:
-    """Stop and Target around entry (the Price) from the last ATR(14) of history."""
+    """Stop and Target around entry (the Price) from the last ATR(14) of history; long=False mirrors them, to score a cut."""
     atr = last_value("atr", history)
     if not math.isfinite(atr):
         raise InputError(f"latest row has a non-finite ATR (atr={atr})")
-    sign = 1 if direction == "long" else -1
-    stop = entry - sign * atr_multiple * atr
-    # Same line for both Directions: short Target = Entry - ratio * (Stop - Entry).
+    stop = entry - (1 if long else -1) * atr_multiple * atr
+    # Same line both ways: mirrored Target = Entry - ratio * (Stop - Entry).
     target = entry + reward_ratio * (entry - stop)
     if stop <= 0 or target <= 0:
         raise InputError(
@@ -252,7 +290,6 @@ def trade_plan(
             "ATR is too large relative to the last close"
         )
     return {
-        "direction": direction,
         "entry": entry,
         "stop": stop,
         "target": target,
@@ -262,10 +299,10 @@ def trade_plan(
     }
 
 
-def _default_plan(history: pd.DataFrame, entry: float, direction: Direction) -> tuple[float | None, float | None]:
-    """Stop and Target of the default Trade Plan stored with a Signal; nulls when that plan can't be made."""
+def _default_plan(history: pd.DataFrame, entry: float, *, long: bool) -> tuple[float | None, float | None]:
+    """Stop and Target of the default Trade Plan stored with a Signal, or mirrored; nulls when that plan can't be made."""
     try:
-        plan = trade_plan(history, entry, direction, PLAN_ATR_MULTIPLE, PLAN_REWARD_RATIO)
+        plan = trade_plan(history, entry, PLAN_ATR_MULTIPLE, PLAN_REWARD_RATIO, long=long)
     except InputError:
         return None, None
     return plan["stop"], plan["target"]

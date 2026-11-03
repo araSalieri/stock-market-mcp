@@ -19,26 +19,49 @@ DEFAULT_CLASSIFIER_MODEL = "typesafe/jev-1.13"
 OPENROUTER_DECISIONS_URL = "https://openrouter.ai/api/alpha/decisions"
 
 # Stored with each Signal; bump by hand whenever the prompt or the criteria below change.
-PROMPT_VERSION = 2
+PROMPT_VERSION = 3
 
-# The single question the verdict hinges on. The state supplied by the caller
-# is the prompt builder's serialized OHLCV+indicators payload (the API accepts
-# a string state verbatim).
-_DECISION_QUESTIONS = {
+_BUY = "Bullish momentum or trend evidence in the supplied data."
+_HOLD = "Mixed or insufficient evidence in the supplied data."
+
+# The single question the verdict hinges on: _NOT_HELD_QUESTIONS without a Position, _HELD_QUESTIONS with one.
+# The state supplied by the caller is the prompt builder's serialized OHLCV+indicators
+# payload (the API accepts a string state verbatim).
+_NOT_HELD_QUESTIONS = {
     "verdict": {
         "type": "choice",
         "instructions": (
             "Given the supplied price history and indicators, is now the right "
-            "time to buy, sell, or hold this stock? The signal is advisory. "
-            "If a position is supplied, judge it too: sell on a held long or buy on a held short means close it."
+            "time to buy this stock, or to hold off? The signal is advisory."
+        ),
+        "criteria": {"buy": _BUY, "hold": _HOLD},
+    },
+}
+_HELD_QUESTIONS = {
+    "verdict": {
+        "type": "choice",
+        "instructions": (
+            "A long position in this stock is supplied. Given the price history, "
+            "indicators and the position, should the holder buy more, hold, or cut "
+            "(exit the long now)? The signal is advisory."
         ),
         "criteria": {
-            "buy": "Bullish momentum or trend evidence in the supplied data.",
-            "sell": "Bearish momentum or trend evidence in the supplied data.",
-            "hold": "Mixed or insufficient evidence in the supplied data.",
+            "buy": _BUY,
+            "hold": _HOLD,
+            "cut": "Bearish evidence in the supplied data: exit the long now, at a gain or a loss.",
         },
     },
 }
+
+
+def _questions(held: bool) -> dict:
+    """The Decisions questions for a prompt with (held) or without a Position."""
+    return _HELD_QUESTIONS if held else _NOT_HELD_QUESTIONS
+
+
+def _verdicts(held: bool) -> list[str]:
+    """The Verdicts a Signal may have: buy or hold, plus cut on a held Position."""
+    return list(_questions(held)["verdict"]["criteria"])
 
 
 def classifier_model_id() -> str:
@@ -49,7 +72,9 @@ def classifier_model_id() -> str:
 
 
 class SignalClassifier(Protocol):
-    def classify(self, prompt: str) -> dict: ...
+    def classify(self, prompt: str, held: bool) -> dict:
+        """The Signal for prompt; held says the prompt supplies a Position, which allows a cut."""
+        ...
 
 
 class SignalContractError(Exception):
@@ -57,10 +82,9 @@ class SignalContractError(Exception):
 
 
 _VERDICT_KEYS = frozenset({"verdict", "confidence", "rationale", "data_date"})
-_VALID_VERDICTS = frozenset({"buy", "sell", "hold"})
 
 
-def validate_signal(payload: object) -> dict:
+def validate_signal(payload: object, held: bool) -> dict:
     """Enforce the strict verdict schema; raise SignalContractError naming the violation."""
     if not isinstance(payload, dict):
         raise SignalContractError(f"reply is not a JSON object: {type(payload).__name__}")
@@ -70,9 +94,9 @@ def validate_signal(payload: object) -> dict:
     extra = payload.keys() - _VERDICT_KEYS
     if extra:
         raise SignalContractError(f"reply has unexpected key(s): {', '.join(sorted(extra))}")
-    if payload["verdict"] not in _VALID_VERDICTS:
+    if payload["verdict"] not in _verdicts(held):
         raise SignalContractError(
-            f"verdict must be one of buy/sell/hold, got: {payload['verdict']!r}"
+            f"verdict must be one of {'/'.join(_verdicts(held))}, got: {payload['verdict']!r}"
         )
     confidence = payload["confidence"]
     if (
@@ -100,12 +124,12 @@ class EnforcingClassifier:
     def __init__(self, classifier: SignalClassifier) -> None:
         self._classifier = classifier
 
-    def classify(self, prompt: str) -> dict:
+    def classify(self, prompt: str, held: bool) -> dict:
         try:
-            return validate_signal(self._classifier.classify(prompt))
+            return validate_signal(self._classifier.classify(prompt, held), held)
         except SignalContractError as first_error:
             try:
-                return validate_signal(self._classifier.classify(prompt))
+                return validate_signal(self._classifier.classify(prompt, held), held)
             except SignalContractError as second_error:
                 raise SignalContractError(
                     f"classifier reply violated the signal contract twice, "
@@ -116,7 +140,7 @@ class EnforcingClassifier:
 class OpenRouterClassifier:
     """Decisions-API transport against OpenRouter's /api/alpha/decisions endpoint."""
 
-    def classify(self, prompt: str) -> dict:
+    def classify(self, prompt: str, held: bool) -> dict:
         # Key is read at call time and never stored; a missing key is a loud
         # error naming the cause, before any HTTP request is attempted.
         api_key = os.environ.get("SMM_OPENROUTER_API_KEY")
@@ -128,7 +152,7 @@ class OpenRouterClassifier:
         request = {
             "model": classifier_model_id(),
             "state": prompt,
-            "questions": _DECISION_QUESTIONS,
+            "questions": _questions(held),
         }
         response = requests.post(
             OPENROUTER_DECISIONS_URL,

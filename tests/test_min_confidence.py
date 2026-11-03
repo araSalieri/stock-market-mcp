@@ -13,7 +13,7 @@ def test_no_scored_signals_applies_0_6(signal_maker):
     payload = signal_maker(FakeFetcher(history=flat_history()), FakeClassifier(_signal("buy", 0.6))).make("AAPL")
 
     assert payload["min_confidence"] == 0.6
-    assert payload["trade_plan"]["direction"] == "long"
+    assert payload["trade_plan"] is not None
 
 
 def _seed(db, targets, stops, expired=0, **kwargs):
@@ -39,7 +39,7 @@ def test_lowest_band_above_break_even_is_applied(signal_maker, tmp_path):
     payload = _reply(signal_maker, tmp_path, *seeds, signal=_signal("buy", 0.5))
 
     assert payload["min_confidence"] == 0.5
-    assert payload["trade_plan"]["direction"] == "long"
+    assert payload["trade_plan"] is not None
 
 
 def test_bands_under_30_targets_and_stops_are_ignored_and_expired_dont_count(signal_maker, tmp_path):
@@ -58,11 +58,18 @@ def test_older_prompt_versions_are_ignored(signal_maker, tmp_path):
     assert (_reply(signal_maker, tmp_path, *seeds))["min_confidence"] == 0.7
 
 
-@pytest.mark.parametrize("verdict", ["buy", "sell"])
-def test_enough_data_with_no_band_above_break_even_gives_no_trade_plan(signal_maker, tmp_path, verdict):
+def test_enough_data_with_no_band_above_break_even_gives_no_trade_plan(signal_maker, tmp_path):
     seeds = [{"confidence": 0.9, "targets": 10, "stops": 20}, {"confidence": 0.3, "targets": 20, "stops": 0}]
-    payload = _reply(signal_maker, tmp_path, *seeds, signal=_signal(verdict, 1.0))
+    payload = _reply(signal_maker, tmp_path, *seeds, signal=_signal("buy", 1.0))
 
     assert payload["min_confidence"] is None
     assert payload["trade_plan"] is None
 
+
+def test_cut_outcomes_do_not_move_it(signal_maker, tmp_path):
+    # SignalMaker with fakes, not the MCP surface: spec #89's Testing Decisions ask for it.
+    seeds = [
+        {"confidence": 0.5, "targets": 30, "stops": 0, "verdict": "cut"},
+        {"confidence": 0.7, "targets": 20, "stops": 10},
+    ]
+    assert (_reply(signal_maker, tmp_path, *seeds))["min_confidence"] == 0.7

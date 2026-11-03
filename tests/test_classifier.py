@@ -21,6 +21,7 @@ from stock_market_mcp.classifier import (
     SignalContractError,
     classifier_model_id,
 )
+from stock_market_mcp.portfolio import PortfolioStore
 
 
 def test_classifier_model_id_default_and_env_override(monkeypatch):
@@ -55,7 +56,7 @@ async def test_single_formatting_slip_recovers_after_one_retry(server_url):
     # One malformed reply, then a valid one: the call succeeds on the retry.
     bad = {"verdict": "maybe", "confidence": 0.7,
            "rationale": "uptrend", "data_date": "2024-01-03"}
-    good = {"verdict": "sell", "confidence": 0.9,
+    good = {"verdict": "hold", "confidence": 0.9,
             "rationale": "overbought", "data_date": "2024-01-03"}
     classifier = FakeClassifier(replies=[bad, good])
     result = await call_tool(
@@ -66,13 +67,41 @@ async def test_single_formatting_slip_recovers_after_one_retry(server_url):
 
     assert not result.is_error
     payload = json.loads(text_of(result))
-    plan = payload.pop("trade_plan")
-    assert plan["direction"] == "short"
-    assert payload.pop("price") == plan["entry"]
+    assert payload.pop("trade_plan") is None
+    payload.pop("price")
     assert payload.pop("hit_rate") is None
     assert payload.pop("min_confidence") == 0.6
     assert payload == good
     assert len(classifier.prompts) == 2  # the retry happened, not a third call
+
+
+async def test_cut_on_a_ticker_not_held_retried_once_then_loud(server_url):
+    cut = {"verdict": "cut", "confidence": 0.9, "rationale": "breakdown", "data_date": "2024-01-03"}
+    classifier = FakeClassifier(replies=[cut, cut])
+    result = await call_tool(
+        server_url(FakeFetcher(history=fake_history()), classifier=classifier),
+        "get_signal",
+        {"ticker": "AAPL", "period": "1mo"},
+    )
+
+    assert result.is_error
+    assert "'cut'" in text_of(result)
+    assert len(classifier.prompts) == 2
+
+
+async def test_cut_on_a_held_position_is_accepted(server_url, tmp_path):
+    PortfolioStore(tmp_path / "server.db").set("AAPL", 10, 90.0)
+    cut = {"verdict": "cut", "confidence": 0.9, "rationale": "breakdown", "data_date": "2024-01-03"}
+    classifier = FakeClassifier(replies=[cut])
+    result = await call_tool(
+        server_url(FakeFetcher(history=fake_history()), classifier=classifier),
+        "get_signal",
+        {"ticker": "AAPL", "period": "1mo"},
+    )
+
+    assert not result.is_error, text_of(result)
+    assert json.loads(text_of(result))["verdict"] == "cut"
+    assert len(classifier.prompts) == 1
 
 
 async def test_provider_failure_is_loud_and_never_retried(server_url):
@@ -116,7 +145,7 @@ def _decisions_body(answer):
 
 
 def _choice_answer(
-    choice="sell",
+    choice="hold",
     probabilities=None,
     confidence: float | None = 0.9,
 ):
@@ -125,7 +154,7 @@ def _choice_answer(
         "choice": choice,
         "probabilities": probabilities
         if probabilities is not None
-        else {"buy": 0.1, "sell": 0.7, "hold": 0.2},
+        else {"buy": 0.3, "hold": 0.7},
     }
     if confidence is not None:
         answer["confidence"] = confidence
@@ -153,12 +182,12 @@ def test_decisions_answer_maps_to_strict_signal(monkeypatch):
         monkeypatch, [_decisions_body(_choice_answer())]
     )
 
-    verdict = classifier.classify(PROMPT)
+    verdict = classifier.classify(PROMPT, held=False)
 
     assert verdict == {
-        "verdict": "sell",
+        "verdict": "hold",
         "confidence": 0.9,
-        "rationale": "Decisions API chose sell (probabilities: buy=0.1, sell=0.7, hold=0.2)",
+        "rationale": "Decisions API chose hold (probabilities: buy=0.3, hold=0.7)",
         "data_date": "2024-01-03T00:00:00",
     }
     assert len(posts) == 1
@@ -169,15 +198,18 @@ def test_decisions_answer_maps_to_strict_signal(monkeypatch):
     assert request["state"] == PROMPT
     question = request["questions"]["verdict"]
     assert question["type"] == "choice"
-    assert question["criteria"] == {
-        "buy": "Bullish momentum or trend evidence in the supplied data.",
-        "sell": "Bearish momentum or trend evidence in the supplied data.",
-        "hold": "Mixed or insufficient evidence in the supplied data.",
-    }
-    assert question["instructions"].endswith(
-        "If a position is supplied, judge it too: sell on a held long or buy on a held short means close it."
-    )
+    assert list(question["criteria"]) == ["buy", "hold"]
     assert kwargs["headers"]["Authorization"] == "Bearer test-key"
+
+
+def test_a_prompt_with_a_position_is_asked_buy_hold_or_cut(monkeypatch):
+    prompt = json.dumps({**json.loads(PROMPT), "position": {"avg_cost": 90.0, "unrealised_pnl_pct": 5.0}})
+    classifier, posts = _real_transport_with_bodies(
+        monkeypatch, [_decisions_body(_choice_answer(choice="cut", probabilities={"buy": 0.1, "hold": 0.2, "cut": 0.7}))]
+    )
+
+    assert classifier.classify(prompt, held=True)["verdict"] == "cut"
+    assert list(posts[0][1]["json"]["questions"]["verdict"]["criteria"]) == ["buy", "hold", "cut"]
 
 
 def test_missing_confidence_falls_back_to_chosen_probability(monkeypatch):
@@ -188,9 +220,9 @@ def test_missing_confidence_falls_back_to_chosen_probability(monkeypatch):
         [_decisions_body(_choice_answer(confidence=None))],
     )
 
-    verdict = classifier.classify(PROMPT)
+    verdict = classifier.classify(PROMPT, held=False)
 
-    assert verdict["verdict"] == "sell"
+    assert verdict["verdict"] == "hold"
     assert verdict["confidence"] == 0.7
 
 
@@ -205,7 +237,7 @@ def test_missing_verdict_answer_retried_once_then_valid(monkeypatch):
         ],
     )
 
-    assert classifier.classify(PROMPT)["verdict"] == "sell"
+    assert classifier.classify(PROMPT, held=False)["verdict"] == "hold"
     assert len(posts) == 2  # exactly one retry
 
 
@@ -215,13 +247,13 @@ def test_unexpected_answer_type_retried_once_then_loud(monkeypatch):
     classifier, posts = _real_transport_with_bodies(
         monkeypatch,
         [
-            _decisions_body({"type": "text", "text": "I think sell"}),
-            _decisions_body({"type": "text", "text": "I still think sell"}),
+            _decisions_body({"type": "text", "text": "I think hold"}),
+            _decisions_body({"type": "text", "text": "I still think hold"}),
         ],
     )
 
     with pytest.raises(SignalContractError) as exc_info:
-        classifier.classify(PROMPT)
+        classifier.classify(PROMPT, held=False)
 
     assert "twice" in str(exc_info.value)
     assert "type" in str(exc_info.value)
@@ -232,20 +264,20 @@ def test_unexpected_answer_type_retried_once_then_loud(monkeypatch):
     "answer",
     [
         {"type": "choice", "choice": "maybe", "confidence": 0.9},
-        {"type": "choice", "choice": "maybe", "probabilities": {"buy": 0.1, "sell": 0.7, "hold": 0.2}},
+        {"type": "choice", "choice": "maybe", "probabilities": {"buy": 0.3, "hold": 0.7}},
         {"type": "choice", "choice": "maybe"},
-        {"type": "choice", "choice": ["maybe"], "probabilities": {"buy": 0.1, "sell": 0.7, "hold": 0.2}},
+        {"type": "choice", "choice": ["maybe"], "probabilities": {"buy": 0.3, "hold": 0.7}},
     ],
     ids=["confidence", "probabilities-only", "neither", "non-string"],
 )
-def test_choice_outside_buy_sell_hold_retried_once_then_loud(monkeypatch, answer):
+def test_choice_outside_buy_hold_retried_once_then_loud(monkeypatch, answer):
     # Called directly: a malformed Decisions reply is a transport detail no fake classifier behind a tool can send.
     classifier, posts = _real_transport_with_bodies(
         monkeypatch, [_decisions_body(answer), _decisions_body(answer)]
     )
 
     with pytest.raises(SignalContractError) as exc_info:
-        classifier.classify(PROMPT)
+        classifier.classify(PROMPT, held=False)
 
     assert "twice" in str(exc_info.value)
     assert "maybe" in str(exc_info.value)
@@ -264,7 +296,7 @@ def test_missing_confidence_and_probability_is_a_contract_error(monkeypatch):
     )
 
     with pytest.raises(SignalContractError) as exc_info:
-        classifier.classify(PROMPT)
+        classifier.classify(PROMPT, held=False)
 
     assert "twice" in str(exc_info.value)
     assert len(posts) == 2
@@ -284,7 +316,7 @@ def test_provider_http_error_is_loud_and_never_retried(monkeypatch):
     monkeypatch.setattr("stock_market_mcp.classifier.requests.post", failing_post)
 
     with pytest.raises(requests.HTTPError):
-        classifier.classify(PROMPT)
+        classifier.classify(PROMPT, held=False)
 
     assert len(posts) == 1
 

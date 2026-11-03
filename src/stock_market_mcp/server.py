@@ -35,7 +35,7 @@ from stock_market_mcp.db import DEFAULT_DB_PATH
 from stock_market_mcp.errors import InputError
 from stock_market_mcp.portfolio import PortfolioStore
 from stock_market_mcp.signal_maker import SignalMaker
-from stock_market_mcp.signals import PLAN_ATR_MULTIPLE, PLAN_REWARD_RATIO, Direction, SignalLog
+from stock_market_mcp.signals import PLAN_ATR_MULTIPLE, PLAN_REWARD_RATIO, SignalLog
 from stock_market_mcp.watchlists import WatchlistStore, normalise_tickers
 
 log = logging.getLogger(__name__)
@@ -207,12 +207,12 @@ def build_server(
         atr_multiple: StrictNumber = PLAN_ATR_MULTIPLE,
         reward_ratio: StrictNumber = PLAN_REWARD_RATIO,
     ) -> dict:
-        """Advisory buy/sell/hold Signal from price history and indicators on bars of one Interval, with the Price (last close), the Hit Rate of past Signals of its kind (buy/sell or hold) for this ticker and Interval (null until enough are scored), the Minimum Confidence applied as min_confidence (set by the server from buy/sell Hit Rates per 0.1 Confidence band, a fixed default until enough are scored), and for buy or sell at or above min_confidence a Trade Plan (Entry, Stop, Target), else null; min_confidence null means no band beats break-even, so no buy or sell gets a Trade Plan; for a held ticker a position key with the Position, its Unrealised P&L (amount and percent of cost) at the Price, and cut_loss: true when the Verdict points against the Position (sell on a long, buy on a short) at or above min_confidence while its Unrealised P&L is negative, else false (the Trade Plan is unchanged), and cut_loss_hit_rate: Targets / (Targets + Stops) over scored past Signals that pointed against a losing Position at any Confidence, across all tickers and Intervals (null until enough are scored); position is absent when not held; input only, never acts on it."""
+        """Advisory long-only Signal from price history and indicators on bars of one Interval: the Verdict is buy or hold on a ticker not held, and buy (add), hold or cut (exit the long now, at a gain or a loss) on a held Position. With the Price (last close), the Hit Rate of past Signals with the same Verdict for this ticker and Interval (null until enough are scored), the Minimum Confidence applied as min_confidence (set by the server from buy Hit Rates per 0.1 Confidence band, a fixed default until enough are scored), and for a buy at or above min_confidence and not under a Re-entry Lock a long Trade Plan (Entry, Stop, Target), else null (cut and hold never get one); a cut at or above min_confidence locks the ticker on that Interval until a later bar closes above both the 10-bar EMA and the cut's Price, and once lifted it stays lifted until the next such cut; while locked the reply has re_entry_lock {cut_price, cut_date (the cut's data date), ema (the current 10-bar EMA)}, absent otherwise; min_confidence null means no band beats break-even, so no buy gets a Trade Plan; for a held ticker a position key with the Position, its Unrealised P&L (amount and percent of cost) at the Price, and cut_loss: true when the Verdict is cut at or above min_confidence while its Unrealised P&L is negative, else false, and cut_loss_hit_rate: Targets / (Targets + Stops) over scored past cuts on a losing Position, a cut scored against the default Trade Plan distances mirrored below the Price, at any Confidence, across all tickers and Intervals (null until enough are scored); position is absent when not held; input only, never acts on it."""
         return signal_maker.make(ticker, interval, period, atr_multiple, reward_ratio)
 
     @audited_tool
     def get_track_record(ticker: str | None = None, interval: Interval | None = None) -> dict:
-        """Track Record: how the current prompt version's Signals turned out, from the server's Signal log; no market data or classifier call. ticker and/or interval narrow it; both are echoed back (null when not given) with prompt_version. bands lists each 0.1 Confidence band that has Signals, ascending, as band (its lower bound: 0.6 for 0.6-0.69) with buy and sell each {target, stop, expired, pending, hit_rate: Targets / (Targets + Stops)} and hold {quiet, missed, pending, hit_rate: Quiet / (Quiet + Missed)}, and buy_sell_hit_rate: buy and sell Targets / (Targets + Stops) together, the rate the Minimum Confidence is set from; Expired and pending are counted but left out of each Hit Rate, which is null until enough are scored (more for buy_sell_hit_rate). min_confidence and cut_loss_hit_rate are the server-wide values get_signal reports, ignoring ticker and interval. Signals that can never be scored (no default Trade Plan) are left out. A filter matching nothing gives an empty bands list: the market is never asked, so it means no Signals were logged for that filter, not that the ticker is unknown."""
+        """Track Record: how the current prompt version's Signals turned out, from the server's Signal log; no market data or classifier call. ticker and/or interval narrow it; both are echoed back (null when not given) with prompt_version. bands lists each 0.1 Confidence band that has Signals, ascending, as band (its lower bound: 0.6 for 0.6-0.69) with buy and cut each {target, stop, expired, pending, hit_rate: Targets / (Targets + Stops)}, a cut scored against the default Trade Plan distances mirrored below the Price, and hold {quiet, missed, pending, hit_rate: Quiet / (Quiet + Missed)}, and buy_hit_rate: buy Targets / (Targets + Stops), the rate the Minimum Confidence is set from; Expired and pending are counted but left out of each Hit Rate, which is null until enough are scored (more for buy_hit_rate). min_confidence and cut_loss_hit_rate are the server-wide values get_signal reports, ignoring ticker and interval. Signals that can never be scored (no default Trade Plan) are left out. A filter matching nothing gives an empty bands list: the market is never asked, so it means no Signals were logged for that filter, not that the ticker is unknown."""
         ticker = ticker.upper() if ticker is not None else None
         return {
             "prompt_version": PROMPT_VERSION,
@@ -273,8 +273,8 @@ def build_server(
         return watchlists.load()
 
     @audited_tool
-    def set_position(ticker: str, direction: Direction, quantity: StrictNumber, avg_cost: StrictNumber) -> dict:
-        """Save the Position for a ticker (checked with a quote), replacing any held one; quantity 0 deletes it and replies with just the ticker and quantity 0. Direction long or short, quantity at least 0, avg_cost above 0; as many Positions as a Watchlist has tickers. Records only, never places orders."""
+    def set_position(ticker: str, quantity: StrictNumber, avg_cost: StrictNumber) -> dict:
+        """Save the Position for a ticker (checked with a quote), replacing any held one; quantity 0 deletes it and replies with just the ticker and quantity 0. Positions are long; quantity at least 0, avg_cost above 0; as many Positions as a Watchlist has tickers. Records only, never places orders."""
         ticker = ticker.upper()
         # Deleting needs no quote; the store checks everything else.
         if quantity == 0:
@@ -285,12 +285,12 @@ def build_server(
         except Exception:
             # Bad input, not a dependency failure: no cause, so the audit logs a warning like set_watchlist.
             raise ToolError(f"unknown ticker, nothing saved: {ticker}") from None
-        portfolio.set(ticker, direction, quantity, avg_cost)
-        return {"ticker": ticker, "direction": direction, "quantity": quantity, "avg_cost": avg_cost}
+        portfolio.set(ticker, quantity, avg_cost)
+        return {"ticker": ticker, "quantity": quantity, "avg_cost": avg_cost}
 
     @audited_tool
     def get_portfolio() -> list[dict]:
-        """Every Position with its latest price and Unrealised P&L (amount and percent of cost) in the ticker's own currency; no total across currencies. A Position whose quote fails gets its own error entry."""
+        """Every Position (long: quantity and average cost) with its latest price and Unrealised P&L ((price - average cost) * quantity, and percent of cost) in the ticker's own currency; no total across currencies. A Position whose quote fails gets its own error entry."""
         held = portfolio.load()
         results = []
         for ticker, position in held.items():

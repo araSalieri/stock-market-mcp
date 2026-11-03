@@ -8,10 +8,9 @@ import pytest
 from fakes import FakeClassifier, FakeFetcher, flat_history, seed_signals
 
 from stock_market_mcp.portfolio import PortfolioStore
-from stock_market_mcp.signals import Direction
 
 
-def _signal(verdict="sell", confidence=0.7):
+def _signal(verdict="cut", confidence=0.7):
     return {"verdict": verdict, "confidence": confidence, "rationale": "test", "data_date": "2024-02-29T00:00:00"}
 
 
@@ -20,8 +19,8 @@ def _maker(signal_maker, tmp_path, classifier):
     return signal_maker(FakeFetcher(history=flat_history()), classifier, db_path=tmp_path / "smm.db")
 
 
-def set_position(tmp_path, ticker, direction: Direction = "long", quantity: float = 10, avg_cost: float = 90.0):
-    PortfolioStore(tmp_path / "smm.db").set(ticker, direction, quantity, avg_cost)
+def set_position(tmp_path, ticker, quantity: float = 10, avg_cost: float = 90.0):
+    PortfolioStore(tmp_path / "smm.db").set(ticker, quantity, avg_cost)
 
 
 def test_held_position_rides_on_the_signal_with_pnl_at_its_price(signal_maker, tmp_path):
@@ -32,7 +31,6 @@ def test_held_position_rides_on_the_signal_with_pnl_at_its_price(signal_maker, t
 
     assert payload["price"] == 100.0
     assert payload["position"] == {
-        "direction": "long",
         "quantity": 10,
         "avg_cost": 90.0,
         "unrealised_pnl": pytest.approx(100.0),
@@ -43,12 +41,12 @@ def test_held_position_rides_on_the_signal_with_pnl_at_its_price(signal_maker, t
 
 
 def test_ticker_not_held_has_no_position_key(signal_maker, tmp_path):
-    maker = _maker(signal_maker, tmp_path, FakeClassifier(_signal()))
+    maker = _maker(signal_maker, tmp_path, FakeClassifier(_signal("hold")))
     set_position(tmp_path, "MSFT")
     payload = maker.make("aapl")
 
     assert "position" not in payload
-    assert payload["verdict"] == "sell"
+    assert payload["verdict"] == "hold"
 
 
 def test_cached_signal_shows_the_current_position(signal_maker, tmp_path):
@@ -62,7 +60,6 @@ def test_cached_signal_shows_the_current_position(signal_maker, tmp_path):
 
     assert first["position"]["quantity"] == 10
     assert second["position"] == {
-        "direction": "long",
         "quantity": 4,
         "avg_cost": 90.0,
         "unrealised_pnl": pytest.approx(40.0),
@@ -73,7 +70,7 @@ def test_cached_signal_shows_the_current_position(signal_maker, tmp_path):
     assert len(classifier.prompts) == 1
 
 
-@pytest.mark.parametrize("change", [{"avg_cost": 95.0}, {"direction": "short"}, "deleted"])
+@pytest.mark.parametrize("change", [{"avg_cost": 95.0}, "deleted"])
 def test_changing_the_position_beyond_quantity_reclassifies(signal_maker, tmp_path, change):
     classifier = FakeClassifier(_signal())
     maker = _maker(signal_maker, tmp_path, classifier)
@@ -102,7 +99,6 @@ def test_prompt_carries_the_held_position_without_quantity(signal_maker, tmp_pat
     maker.make("aapl")
 
     assert _prompt(classifier)["position"] == {
-        "direction": "long",
         "avg_cost": 90.0,
         "unrealised_pnl_pct": pytest.approx(100 / 9),
     }
@@ -123,53 +119,62 @@ def test_position_survives_row_trimming(signal_maker, tmp_path, monkeypatch):
     monkeypatch.setenv("SMM_CLASSIFIER_MAX_STATE_CHARS", "3000")
     classifier = FakeClassifier(_signal())
     maker = _maker(signal_maker, tmp_path, classifier)
-    set_position(tmp_path, "AAPL", "short")
+    set_position(tmp_path, "AAPL")
     maker.make("aapl")
 
     prompt = _prompt(classifier)
     assert len(prompt["rows"]) < 60  # rows were dropped to fit
-    assert prompt["position"]["direction"] == "short"
+    assert prompt["position"]["avg_cost"] == 90.0
 
 
-def _cut_loss_reply(signal_maker, tmp_path, signal, direction: Direction = "long", avg_cost=110.0, seed=False) -> dict:
+def _cut_loss_reply(signal_maker, tmp_path, signal, avg_cost=110.0, seed=False) -> dict:
     """SignalMaker reply for a held AAPL at flat close 100; seed=True makes the Minimum Confidence null."""
     db = tmp_path / "smm.db"
     maker = _maker(signal_maker, tmp_path, FakeClassifier(signal))
     if seed:  # 30 scored in the 0.9 band at under break-even, so no band qualifies
         seed_signals(db, ["target"] * 10 + ["stop"] * 20, confidence=0.9)
-    set_position(tmp_path, "AAPL", direction, avg_cost=avg_cost)
+    set_position(tmp_path, "AAPL", avg_cost=avg_cost)
     return maker.make("aapl")
 
 
-def test_opposing_verdict_on_a_losing_position_is_a_cut_loss(signal_maker, tmp_path):
+def test_cut_on_a_losing_position_is_a_cut_loss(signal_maker, tmp_path):
     # No scored Signals, so the Minimum Confidence is the 0.6 default; 0.6 itself counts.
-    payload = _cut_loss_reply(signal_maker, tmp_path, _signal("sell", 0.6))
+    payload = _cut_loss_reply(signal_maker, tmp_path, _signal("cut", 0.6))
 
     assert payload["min_confidence"] == 0.6
     assert payload["position"]["cut_loss"] is True
 
 
 def test_below_the_minimum_confidence_is_not_a_cut_loss(signal_maker, tmp_path):
-    # Which Verdicts oppose a losing Position is tested on Position; this is the Confidence gate.
-    payload = _cut_loss_reply(signal_maker, tmp_path, _signal("sell", 0.59))
+    payload = _cut_loss_reply(signal_maker, tmp_path, _signal("cut", 0.59))
 
     assert payload["position"]["cut_loss"] is False
 
 
 def test_null_minimum_confidence_is_never_a_cut_loss(signal_maker, tmp_path):
-    payload = _cut_loss_reply(signal_maker, tmp_path, _signal("sell", 1.0), seed=True)
+    payload = _cut_loss_reply(signal_maker, tmp_path, _signal("cut", 1.0), seed=True)
 
     assert payload["min_confidence"] is None
     assert payload["position"]["cut_loss"] is False
 
 
-def test_cut_loss_sell_keeps_its_short_trade_plan(signal_maker, tmp_path):
-    payload = _cut_loss_reply(signal_maker, tmp_path, _signal("sell", 0.7))
+@pytest.mark.parametrize(("verdict", "avg_cost"), [("cut", 110.0), ("cut", 90.0), ("hold", 110.0), ("buy", 110.0)])
+def test_only_a_cut_on_a_losing_position_is_a_cut_loss(signal_maker, tmp_path, verdict, avg_cost):
+    payload = _cut_loss_reply(signal_maker, tmp_path, _signal(verdict, 0.7), avg_cost=avg_cost)
 
-    assert payload["position"]["cut_loss"] is True
-    assert payload["trade_plan"]["direction"] == "short"
-    assert payload["trade_plan"]["stop"] > payload["trade_plan"]["entry"] > payload["trade_plan"]["target"]
+    assert payload["position"]["cut_loss"] is (verdict == "cut" and avg_cost == 110.0)
 
+
+def test_confident_cut_has_no_trade_plan(signal_maker, tmp_path):
+    payload = _cut_loss_reply(signal_maker, tmp_path, _signal("cut", 0.9))
+
+    assert payload["trade_plan"] is None
+
+
+def test_buy_on_a_held_position_carries_a_long_trade_plan(signal_maker, tmp_path):
+    payload = _cut_loss_reply(signal_maker, tmp_path, _signal("buy", 0.9))
+
+    assert payload["trade_plan"]["stop"] < payload["trade_plan"]["entry"] < payload["trade_plan"]["target"]
 
 
 def _stored_cut_loss(db) -> list:
@@ -181,9 +186,9 @@ def _stored_cut_loss(db) -> list:
 @pytest.mark.parametrize(
     ("held", "verdict", "confidence", "avg_cost", "stored"),
     [
-        ("AAPL", "sell", 0.3, 110.0, 1),  # below the Minimum Confidence still counts
-        ("AAPL", "sell", 0.7, 90.0, 0),  # profitable
-        ("MSFT", "sell", 0.7, 110.0, None),  # AAPL not held
+        ("AAPL", "cut", 0.3, 110.0, 1),  # below the Minimum Confidence still counts
+        ("AAPL", "cut", 0.7, 90.0, 0),  # profitable
+        ("MSFT", "cut", 0.7, 110.0, None),  # AAPL not held
     ],
 )
 def test_fresh_signal_stores_cut_loss(signal_maker, tmp_path, held, verdict, confidence, avg_cost, stored):
@@ -209,7 +214,7 @@ def test_old_signals_schema_is_upgraded_on_open(signal_maker, tmp_path):
             "INSERT INTO signals (ticker, interval, prompt_version, data_date, verdict, confidence, price, outcome) "
             "VALUES ('MSFT', '1d', 1, '2023-01-01T00:00:00', 'buy', 0.8, 50.0, 'target')"
         )
-    maker = _maker(signal_maker, tmp_path, FakeClassifier(_signal("sell", 0.7)))
+    maker = _maker(signal_maker, tmp_path, FakeClassifier(_signal("cut", 0.7)))
     set_position(tmp_path, "AAPL", avg_cost=110.0)
     payload = maker.make("aapl")
 
@@ -238,7 +243,7 @@ def test_cut_loss_hit_rate_is_null_under_30_scored(signal_maker, tmp_path):
 def test_cut_loss_hit_rate_pools_scored_cut_loss_signals_of_this_prompt_version(signal_maker, tmp_path):
     def seed(db):
         seed_signals(db, ["target"] * 20, cut_loss=1, ticker="MSFT", interval="1d")
-        seed_signals(db, ["stop"] * 5, cut_loss=1, ticker="NVDA", interval="5m", verdict="sell")
+        seed_signals(db, ["stop"] * 5, cut_loss=1, ticker="NVDA", interval="5m", verdict="cut")
         seed_signals(db, ["stop"] * 5, cut_loss=1, confidence=0.2)  # below the Minimum Confidence
         seed_signals(db, ["expired"] * 10, cut_loss=1)
         seed_signals(db, ["stop"] * 30, cut_loss=0)
