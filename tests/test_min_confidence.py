@@ -6,7 +6,7 @@ from fakes import FakeClassifier, FakeFetcher, flat_history, seed_signals
 
 
 def _signal(verdict="buy", confidence=0.7):
-    return {"verdict": verdict, "confidence": confidence, "rationale": "test", "data_date": "2024-02-29T00:00:00"}
+    return {"verdict": verdict, "confidence": confidence, "rationale": "test"}
 
 
 def test_no_scored_signals_applies_0_6(signal_maker):

@@ -94,7 +94,7 @@ async def test_other_tools_keep_working_without_openrouter_key(server_url, monke
 
 def _signal(verdict, confidence=0.7):
     return {"verdict": verdict, "confidence": confidence,
-            "rationale": "test", "data_date": "2024-02-29T00:00:00"}
+            "rationale": "test"}
 
 
 async def test_exactly_ten_is_accepted_and_ints_echo_as_floats(server_url):

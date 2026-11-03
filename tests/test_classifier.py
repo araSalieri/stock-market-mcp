@@ -1,4 +1,4 @@
-"""Classifier tests: the Decisions answer mapping, retries and provider failures on the classifier module, plus get_signal tests of the classifier behind the tool (retries, provider failure, data_date from the prompt)."""
+"""Classifier tests: the Decisions answer mapping, retries and provider failures on the classifier module, plus get_signal tests of the classifier behind the tool (retries, provider failure, data_date from the latest bar)."""
 
 import json
 from datetime import UTC, datetime
@@ -36,8 +36,8 @@ async def test_malformed_reply_retried_once_then_loud_error(server_url):
     # Both attempts violate the contract; exactly one retry, then a loud tool
     # error naming the violation. Agents never see a fabricated success.
     bad_verdict = {"verdict": "maybe", "confidence": 0.7,
-                   "rationale": "uptrend", "data_date": "2024-01-03"}
-    missing_key = {"verdict": "hold", "confidence": 0.5, "data_date": "2024-01-03"}
+                   "rationale": "uptrend"}
+    missing_key = {"verdict": "hold", "confidence": 0.5}
     classifier = FakeClassifier(replies=[bad_verdict, missing_key])
     result = await call_tool(
         server_url(fetcher := FakeFetcher(history=fake_history()), classifier=classifier),
@@ -55,9 +55,9 @@ async def test_malformed_reply_retried_once_then_loud_error(server_url):
 async def test_single_formatting_slip_recovers_after_one_retry(server_url):
     # One malformed reply, then a valid one: the call succeeds on the retry.
     bad = {"verdict": "maybe", "confidence": 0.7,
-           "rationale": "uptrend", "data_date": "2024-01-03"}
+           "rationale": "uptrend"}
     good = {"verdict": "hold", "confidence": 0.9,
-            "rationale": "overbought", "data_date": "2024-01-03"}
+            "rationale": "overbought"}
     classifier = FakeClassifier(replies=[bad, good])
     result = await call_tool(
         server_url(FakeFetcher(history=fake_history()), classifier=classifier),
@@ -71,12 +71,12 @@ async def test_single_formatting_slip_recovers_after_one_retry(server_url):
     payload.pop("price")
     assert payload.pop("hit_rate") is None
     assert payload.pop("min_confidence") == 0.6
-    assert payload == good
+    assert payload == {**good, "data_date": "2024-01-03T11:00:00"}
     assert len(classifier.prompts) == 2  # the retry happened, not a third call
 
 
 async def test_cut_on_a_ticker_not_held_retried_once_then_loud(server_url):
-    cut = {"verdict": "cut", "confidence": 0.9, "rationale": "breakdown", "data_date": "2024-01-03"}
+    cut = {"verdict": "cut", "confidence": 0.9, "rationale": "breakdown"}
     classifier = FakeClassifier(replies=[cut, cut])
     result = await call_tool(
         server_url(FakeFetcher(history=fake_history()), classifier=classifier),
@@ -91,7 +91,7 @@ async def test_cut_on_a_ticker_not_held_retried_once_then_loud(server_url):
 
 async def test_cut_on_a_held_position_is_accepted(server_url, tmp_path):
     PortfolioStore(tmp_path / "server.db").set("AAPL", 10, 90.0)
-    cut = {"verdict": "cut", "confidence": 0.9, "rationale": "breakdown", "data_date": "2024-01-03"}
+    cut = {"verdict": "cut", "confidence": 0.9, "rationale": "breakdown"}
     classifier = FakeClassifier(replies=[cut])
     result = await call_tool(
         server_url(FakeFetcher(history=fake_history()), classifier=classifier),
@@ -176,8 +176,7 @@ def _real_transport_with_bodies(monkeypatch, bodies):
 
 def test_decisions_answer_maps_to_strict_signal(monkeypatch):
     # The Decisions answer becomes the settled verdict dict: confidence straight
-    # from the answer, rationale citing the probabilities, data_date from the
-    # prompt's last row (the Decisions API returns no date of its own).
+    # from the answer, rationale citing the probabilities.
     classifier, posts = _real_transport_with_bodies(
         monkeypatch, [_decisions_body(_choice_answer())]
     )
@@ -188,7 +187,6 @@ def test_decisions_answer_maps_to_strict_signal(monkeypatch):
         "verdict": "hold",
         "confidence": 0.9,
         "rationale": "Decisions API chose hold (probabilities: buy=0.3, hold=0.7)",
-        "data_date": "2024-01-03T00:00:00",
     }
     assert len(posts) == 1
     url, kwargs = posts[0]
@@ -322,7 +320,7 @@ def test_provider_http_error_is_loud_and_never_retried(monkeypatch):
 
 
 async def test_intraday_data_date_is_the_latest_bars_timestamp(server_url, monkeypatch):
-    # Real transport: data_date comes from the prompt's last row. The fake's 60th
+    # Real transport: data_date comes from the latest bar. The fake's 60th
     # 5m bar opens 2024-03-01 13:55 WIB, given in the exchange's offset as scan does.
     posts = []
 
@@ -344,7 +342,7 @@ async def test_intraday_data_date_is_the_latest_bars_timestamp(server_url, monke
 
 
 async def test_daily_data_date_matches_scans_for_the_same_last_bar(server_url, monkeypatch):
-    # Real transport: data_date comes from the prompt's last row; the 5m bars stop the day
+    # Real transport: data_date comes from the latest bar; the 5m bars stop the day
     # before, so scan's data_date is the daily bar's too.
     monkeypatch.setenv("SMM_OPENROUTER_API_KEY", "test-key")
     monkeypatch.setattr(

@@ -5,6 +5,9 @@ import os
 from collections.abc import Callable
 from dataclasses import asdict
 from datetime import datetime
+from typing import cast
+
+import pandas as pd
 
 from stock_market_mcp.bars import Interval, fetch_period, history
 from stock_market_mcp.cache import TTLCache
@@ -67,9 +70,10 @@ class SignalMaker:
         fresh = signal is None
         if fresh:
             previous = self._signals.latest(ticker, interval)
-            signal = self._classifier.classify(
+            classified = self._classifier.classify(
                 prompt if previous is None else with_previous_signal(prompt, previous), position is not None
             )
+            signal = {**classified, "data_date": cast("pd.Timestamp", df.index[-1]).isoformat()}
         # After the cache, so a cached Signal gets the current Minimum Confidence; a new pending Signal changes neither read.
         min_confidence = self._signals.min_confidence()
         hit_rate = self._signals.hit_rate(ticker, interval, signal["verdict"])

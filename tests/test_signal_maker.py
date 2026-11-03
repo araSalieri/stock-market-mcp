@@ -9,7 +9,7 @@ from stock_market_mcp.errors import InputError
 
 
 def _signal(verdict, confidence=0.7):
-    return {"verdict": verdict, "confidence": confidence, "rationale": "test", "data_date": "2024-02-29T00:00:00"}
+    return {"verdict": verdict, "confidence": confidence, "rationale": "test"}
 
 
 def test_second_signal_within_the_ttl_is_served_from_the_cache(signal_maker):
@@ -65,7 +65,7 @@ def test_buy_carries_a_long_trade_plan(signal_maker):
     reply = signal_maker(FakeFetcher(history=flat_history()), FakeClassifier(_signal("buy"))).make("AAPL")
 
     assert reply == {
-        **_signal("buy"),
+        **_signal("buy"), "data_date": "2024-02-29T00:00:00",
         "price": 100.0,
         "hit_rate": None,
         "min_confidence": 0.6,
@@ -84,13 +84,13 @@ def test_hold_has_no_trade_plan_but_carries_the_price(signal_maker):
     fetcher = FakeFetcher(history=flat_history(last_close=123.5))
     reply = signal_maker(fetcher, FakeClassifier(_signal("hold"))).make("AAPL")
 
-    assert reply == {**_signal("hold"), "price": 123.5, "hit_rate": None, "min_confidence": 0.6, "trade_plan": None}
+    assert reply == {**_signal("hold"), "data_date": "2024-02-29T00:00:00", "price": 123.5, "hit_rate": None, "min_confidence": 0.6, "trade_plan": None}
 
 
 def test_buy_below_the_default_minimum_confidence_has_no_trade_plan(signal_maker):
     reply = signal_maker(FakeFetcher(history=flat_history()), FakeClassifier(_signal("buy", 0.59))).make("AAPL")
 
-    assert reply == {**_signal("buy", 0.59), "price": 100.0, "hit_rate": None, "min_confidence": 0.6, "trade_plan": None}
+    assert reply == {**_signal("buy", 0.59), "data_date": "2024-02-29T00:00:00", "price": 100.0, "hit_rate": None, "min_confidence": 0.6, "trade_plan": None}
 
 
 # Entry 100, ATR 2, atr_multiple 1.5, reward_ratio 3: Stop = 100 - 1.5*2 = 97, Target = 100 + 3*(100-97) = 109.
@@ -165,3 +165,11 @@ def test_default_call_uses_5m_bars_over_a_month(signal_maker):
     payload = json.loads(classifier.prompts[0])
     assert (payload["period"], payload["interval"]) == ("1mo", "5m")
     assert payload["rows"][-1]["Date"].startswith("2024-02-29")
+
+
+def test_data_date_is_the_latest_bars_timestamp_not_the_classifiers(signal_maker):
+    # The classifier reply carries no date; SignalMaker reads it from the bars it fetched.
+    classifier = FakeClassifier({"verdict": "hold", "confidence": 0.5, "rationale": "test"})
+    maker = signal_maker(FakeFetcher(history=intraday_history()), classifier)
+
+    assert maker.make("AAPL")["data_date"] == "2024-03-01T13:55:00+07:00"
