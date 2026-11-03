@@ -1,4 +1,4 @@
-"""Tests for the Position on a Signal (#59): SignalMaker adds the held Position and its Unrealised P&L at the Signal's Price."""
+"""Tests for the Position on a Signal: SignalMaker adds the held Position and its Unrealised P&L at the Signal's Price."""
 
 import json
 import sqlite3

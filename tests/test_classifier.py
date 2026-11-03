@@ -301,7 +301,7 @@ def test_missing_confidence_and_probability_is_a_contract_error(monkeypatch):
 
 
 def test_provider_http_error_is_loud_and_never_retried(monkeypatch):
-    # Non-200 responses are provider failures (#12 semantics): loud HTTPError,
+    # Non-200 responses are provider failures, not bad answers: loud HTTPError,
     # never retried, never wrapped as a contract violation.
     import requests
 

@@ -1,4 +1,4 @@
-"""Tests for the automatic Minimum Confidence (#55): set from Hit Rates per Confidence band, applied by SignalMaker."""
+"""Tests for the automatic Minimum Confidence: set from Hit Rates per Confidence band, applied by SignalMaker."""
 
 import pytest
 
@@ -67,7 +67,6 @@ def test_enough_data_with_no_band_above_break_even_gives_no_trade_plan(signal_ma
 
 
 def test_cut_outcomes_do_not_move_it(signal_maker, tmp_path):
-    # SignalMaker with fakes, not the MCP surface: spec #89's Testing Decisions ask for it.
     seeds = [
         {"confidence": 0.5, "targets": 30, "stops": 0, "verdict": "cut"},
         {"confidence": 0.7, "targets": 20, "stops": 10},

@@ -1,4 +1,4 @@
-"""Tests for the Portfolio (#58): the store directly, then set_position and get_portfolio over MCP."""
+"""Tests for the Portfolio: the store directly, then set_position and get_portfolio over MCP."""
 
 import json
 import re
@@ -14,8 +14,8 @@ from fakes import FakeClassifier, FakeFetcher, call_tool, flat_history, text_of
 from stock_market_mcp.errors import InputError
 from stock_market_mcp.portfolio import PortfolioStore, Position
 
-# Store tests call PortfolioStore directly: the spec (#57) puts a storage seam under the tools, and an
-# empty or broken file must fail the same way for every caller (get_signal reads it too in #59).
+# Store tests call PortfolioStore directly: an empty or broken file must fail the same way for every caller,
+# and get_signal reads it too.
 
 
 def test_store_set_then_load_round_trips(tmp_path):
