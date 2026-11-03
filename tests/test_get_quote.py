@@ -1,6 +1,5 @@
 """Tests for get_quote over MCP."""
 
-import pytest
 from fakes import FakeFetcher, call_tool, text_of
 
 
