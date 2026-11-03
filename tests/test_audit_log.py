@@ -33,7 +33,7 @@ EVERY_TOOL_ARGS = {
     "scan": {"tickers": ["AAPL"]},
     "set_watchlist": {"name": "tech", "tickers": ["AAPL"]},
     "get_watchlists": {},
-    "set_position": {"ticker": "AAPL", "direction": "long", "quantity": 1, "avg_cost": 1.0},
+    "set_position": {"ticker": "AAPL", "quantity": 1, "avg_cost": 1.0},
     "get_portfolio": {},
     "get_track_record": {},
 }

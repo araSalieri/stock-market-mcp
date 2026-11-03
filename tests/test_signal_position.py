@@ -8,7 +8,6 @@ import pytest
 from fakes import FakeClassifier, FakeFetcher, flat_history, seed_signals
 
 from stock_market_mcp.portfolio import PortfolioStore
-from stock_market_mcp.signals import Direction
 
 
 def _signal(verdict="sell", confidence=0.7):
@@ -20,8 +19,8 @@ def _maker(signal_maker, tmp_path, classifier):
     return signal_maker(FakeFetcher(history=flat_history()), classifier, db_path=tmp_path / "smm.db")
 
 
-def set_position(tmp_path, ticker, direction: Direction = "long", quantity: float = 10, avg_cost: float = 90.0):
-    PortfolioStore(tmp_path / "smm.db").set(ticker, direction, quantity, avg_cost)
+def set_position(tmp_path, ticker, quantity: float = 10, avg_cost: float = 90.0):
+    PortfolioStore(tmp_path / "smm.db").set(ticker, quantity, avg_cost)
 
 
 def test_held_position_rides_on_the_signal_with_pnl_at_its_price(signal_maker, tmp_path):
@@ -32,7 +31,6 @@ def test_held_position_rides_on_the_signal_with_pnl_at_its_price(signal_maker, t
 
     assert payload["price"] == 100.0
     assert payload["position"] == {
-        "direction": "long",
         "quantity": 10,
         "avg_cost": 90.0,
         "unrealised_pnl": pytest.approx(100.0),
@@ -62,7 +60,6 @@ def test_cached_signal_shows_the_current_position(signal_maker, tmp_path):
 
     assert first["position"]["quantity"] == 10
     assert second["position"] == {
-        "direction": "long",
         "quantity": 4,
         "avg_cost": 90.0,
         "unrealised_pnl": pytest.approx(40.0),
@@ -73,7 +70,7 @@ def test_cached_signal_shows_the_current_position(signal_maker, tmp_path):
     assert len(classifier.prompts) == 1
 
 
-@pytest.mark.parametrize("change", [{"avg_cost": 95.0}, {"direction": "short"}, "deleted"])
+@pytest.mark.parametrize("change", [{"avg_cost": 95.0}, "deleted"])
 def test_changing_the_position_beyond_quantity_reclassifies(signal_maker, tmp_path, change):
     classifier = FakeClassifier(_signal())
     maker = _maker(signal_maker, tmp_path, classifier)
@@ -102,7 +99,6 @@ def test_prompt_carries_the_held_position_without_quantity(signal_maker, tmp_pat
     maker.make("aapl")
 
     assert _prompt(classifier)["position"] == {
-        "direction": "long",
         "avg_cost": 90.0,
         "unrealised_pnl_pct": pytest.approx(100 / 9),
     }
@@ -123,21 +119,21 @@ def test_position_survives_row_trimming(signal_maker, tmp_path, monkeypatch):
     monkeypatch.setenv("SMM_CLASSIFIER_MAX_STATE_CHARS", "3000")
     classifier = FakeClassifier(_signal())
     maker = _maker(signal_maker, tmp_path, classifier)
-    set_position(tmp_path, "AAPL", "short")
+    set_position(tmp_path, "AAPL")
     maker.make("aapl")
 
     prompt = _prompt(classifier)
     assert len(prompt["rows"]) < 60  # rows were dropped to fit
-    assert prompt["position"]["direction"] == "short"
+    assert prompt["position"]["avg_cost"] == 90.0
 
 
-def _cut_loss_reply(signal_maker, tmp_path, signal, direction: Direction = "long", avg_cost=110.0, seed=False) -> dict:
+def _cut_loss_reply(signal_maker, tmp_path, signal, avg_cost=110.0, seed=False) -> dict:
     """SignalMaker reply for a held AAPL at flat close 100; seed=True makes the Minimum Confidence null."""
     db = tmp_path / "smm.db"
     maker = _maker(signal_maker, tmp_path, FakeClassifier(signal))
     if seed:  # 30 scored in the 0.9 band at under break-even, so no band qualifies
         seed_signals(db, ["target"] * 10 + ["stop"] * 20, confidence=0.9)
-    set_position(tmp_path, "AAPL", direction, avg_cost=avg_cost)
+    set_position(tmp_path, "AAPL", avg_cost=avg_cost)
     return maker.make("aapl")
 
 
