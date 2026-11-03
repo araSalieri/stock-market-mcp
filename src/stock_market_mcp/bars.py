@@ -52,11 +52,15 @@ def _suffixed_frame(ind: pd.Series | None) -> pd.DataFrame | None:
     return ind.to_frame()
 
 
+# Bars in the EMA, shared by the ema indicator and the Re-entry Lock.
+EMA_LENGTH = 10
+
+
 # Dispatch table: indicator name -> handler producing the indicator frame(s),
 # or None when the history is too short for that indicator (loud error path).
 _INDICATOR_DISPATCH = {
     "sma": lambda df: _suffixed_frame(ta.sma(cast("pd.Series", df["Close"]))),
-    "ema": lambda df: _suffixed_frame(ta.ema(cast("pd.Series", df["Close"]))),
+    "ema": lambda df: _suffixed_frame(ta.ema(cast("pd.Series", df["Close"]), length=EMA_LENGTH)),
     "rsi": lambda df: _suffixed_frame(ta.rsi(cast("pd.Series", df["Close"]))),
     "macd": lambda df: ta.macd(cast("pd.Series", df["Close"])),
     "bbands": lambda df: ta.bbands(cast("pd.Series", df["Close"])),
