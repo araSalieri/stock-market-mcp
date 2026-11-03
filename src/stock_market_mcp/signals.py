@@ -170,18 +170,16 @@ class SignalLog:
                     )
 
     def hit_rate(self, ticker: str, interval: str, verdict: str) -> float | None:
-        """Hit Rate of the current prompt version's Signals of the verdict's kind; None under HIT_RATE_MIN_SCORED.
+        """Hit Rate of the current prompt version's Signals with this verdict; None under HIT_RATE_MIN_SCORED.
 
-        Buy/cut: Targets / (Targets + Stops). Hold: Quiet / scored holds.
+        Buy, cut: Targets / (Targets + Stops). Hold: Quiet / scored holds.
         """
-        hold = verdict == "hold"
-        hits, misses = ("quiet", "missed") if hold else ("target", "stop")
+        hits, misses = ("quiet", "missed") if verdict == "hold" else ("target", "stop")
         with self._open() as conn:
             right, wrong = conn.execute(
                 "SELECT COUNT(*) FILTER (WHERE outcome = ?), COUNT(*) FILTER (WHERE outcome = ?) "
-                "FROM signals WHERE ticker = ? AND interval = ? AND prompt_version = ? "
-                f"AND verdict {'=' if hold else '!='} 'hold'",
-                (hits, misses, ticker, interval, PROMPT_VERSION),
+                "FROM signals WHERE ticker = ? AND interval = ? AND prompt_version = ? AND verdict = ?",
+                (hits, misses, ticker, interval, PROMPT_VERSION, verdict),
             ).fetchone()
         return _rate(right, wrong)
 

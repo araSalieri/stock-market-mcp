@@ -110,8 +110,13 @@ def _hit_rate(signal_maker, tmp_path, *seeds, reply="buy"):
 
 
 def test_hit_rate_is_targets_over_targets_and_stops_ignoring_expired(signal_maker, tmp_path):
-    seeds = [(["target"] * 3 + ["stop"] * 7 + ["expired"] * 5, {}), (["stop"], {"verdict": "cut"})]
-    assert _hit_rate(signal_maker, tmp_path, *seeds) == pytest.approx(3 / 11)
+    seeds = [(["target"] * 3 + ["stop"] * 7 + ["expired"] * 5, {})]
+    assert _hit_rate(signal_maker, tmp_path, *seeds) == pytest.approx(3 / 10)
+
+
+def test_buy_reply_ignores_scored_cuts(signal_maker, tmp_path):
+    seeds = [(["target"] * 9, {}), (["stop"] * 10, {"verdict": "cut"})]
+    assert _hit_rate(signal_maker, tmp_path, *seeds) is None
 
 
 def test_hit_rate_is_null_under_10_scored(signal_maker, tmp_path):
