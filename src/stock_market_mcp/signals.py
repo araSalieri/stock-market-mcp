@@ -142,7 +142,7 @@ class SignalLog:
         return _rate(right, wrong)
 
     def min_confidence(self) -> float | None:
-        """Lowest 0.1 Confidence band of the current prompt version whose buy/sell Hit Rate is above BREAK_EVEN_HIT_RATE.
+        """Lowest 0.1 Confidence band of the current prompt version whose buy Hit Rate is above BREAK_EVEN_HIT_RATE.
 
         Only bands with BAND_MIN_SCORED Targets plus Stops count: MIN_CONFIDENCE while none has that many,
         None when some do but none is above BREAK_EVEN_HIT_RATE.
@@ -151,7 +151,7 @@ class SignalLog:
             bands = conn.execute(
                 f"SELECT {BAND} AS band, "
                 "COUNT(*) FILTER (WHERE outcome = 'target'), COUNT(*) FILTER (WHERE outcome = 'stop') "
-                "FROM signals WHERE prompt_version = ? AND verdict IN ('buy', 'sell') GROUP BY band ORDER BY band",
+                "FROM signals WHERE prompt_version = ? AND verdict = 'buy' GROUP BY band ORDER BY band",
                 (PROMPT_VERSION,),
             ).fetchall()
         rates = [(band, _rate(targets, stops, BAND_MIN_SCORED)) for band, targets, stops in bands]
@@ -188,10 +188,7 @@ class SignalLog:
             )
             entry[verdict] = _counts(verdict, *counts)
         for entry in bands.values():
-            buy, sell = entry["buy"], entry["sell"]
-            entry["buy_sell_hit_rate"] = _rate(
-                buy["target"] + sell["target"], buy["stop"] + sell["stop"], BAND_MIN_SCORED
-            )
+            entry["buy_hit_rate"] = _rate(entry["buy"]["target"], entry["buy"]["stop"], BAND_MIN_SCORED)
         return list(bands.values())
 
     def cut_loss_hit_rate(self) -> float | None:

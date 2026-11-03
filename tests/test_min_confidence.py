@@ -66,3 +66,11 @@ def test_enough_data_with_no_band_above_break_even_gives_no_trade_plan(signal_ma
     assert payload["min_confidence"] is None
     assert payload["trade_plan"] is None
 
+
+
+def test_sell_outcomes_do_not_move_it(signal_maker, tmp_path):
+    seeds = [
+        {"confidence": 0.5, "targets": 30, "stops": 0, "verdict": "sell"},
+        {"confidence": 0.7, "targets": 20, "stops": 10},
+    ]
+    assert (_reply(signal_maker, tmp_path, *seeds))["min_confidence"] == 0.7
