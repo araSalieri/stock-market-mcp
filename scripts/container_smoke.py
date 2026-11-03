@@ -136,10 +136,11 @@ def check_signal(payload, interval):
     assert isinstance(price, (int, float)) and math.isfinite(price), price
     min_confidence = payload.pop("min_confidence")
     payload.pop("hit_rate")
-    payload.pop("position", None)
-    verdict = validate_signal(payload)
-    # A buy or sell below the Minimum Confidence has no Trade Plan either.
-    assert plan is None or verdict["verdict"] != "hold", plan
+    held = payload.pop("position", None) is not None
+    verdict = validate_signal(payload, held)
+    # Only a buy gets a Trade Plan, and not below the Minimum Confidence.
+    assert plan is None or verdict["verdict"] == "buy", plan
+    assert plan is None or plan["stop"] < plan["entry"] < plan["target"], plan
     assert plan is None or (min_confidence is not None and verdict["confidence"] >= min_confidence), plan
     if interval != "1d":
         # Intraday bars carry a time and the exchange offset.
@@ -205,7 +206,7 @@ async def check_signals(session):
         check_signal(await call(session, "get_signal", {"ticker": TICKER, "interval": interval}), interval)
     record = await call(session, "get_track_record", {"ticker": TICKER})
     assert "bands" in record and "min_confidence" in record, record
-    assert all("buy_hit_rate" in band for band in record["bands"]), record
+    assert all(set(band) == {"band", "buy", "cut", "hold", "buy_hit_rate"} for band in record["bands"]), record
     print(f"get_track_record: {len(record['bands'])} bands, min_confidence {record['min_confidence']}")
 
 

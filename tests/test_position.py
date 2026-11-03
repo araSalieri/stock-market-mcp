@@ -40,20 +40,20 @@ def test_classifier_view_leaves_quantity_out():
 @pytest.mark.parametrize(
     ("verdict", "avg_cost", "expected"),
     [
-        ("sell", 110.0, True),  # losing, opposing
-        ("sell", 90.0, False),  # profit
-        ("sell", 100.0, False),  # break-even
-        ("buy", 110.0, False),  # agreeing
+        ("cut", 110.0, True),  # losing
+        ("cut", 90.0, False),  # profit
+        ("cut", 100.0, False),  # break-even
+        ("buy", 110.0, False),
         ("hold", 110.0, False),
     ],
 )
-def test_opposes_losing_at_a_price_of_100(verdict, avg_cost, expected):
+def test_cuts_losing_at_a_price_of_100(verdict, avg_cost, expected):
     position = Position(10, avg_cost)
 
-    assert position.opposes_losing(verdict, position.unrealised_pnl(100.0)) is expected
+    assert position.cuts_losing(verdict, position.unrealised_pnl(100.0)) is expected
 
 
 def test_a_non_finite_unrealised_pnl_is_not_losing():
     position = Position(10, 110.0)
 
-    assert position.opposes_losing("sell", position.unrealised_pnl(math.nan)) is False
+    assert position.cuts_losing("cut", position.unrealised_pnl(math.nan)) is False
