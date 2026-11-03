@@ -1,4 +1,4 @@
-"""Table tests on Position (#78): Unrealised P&L, the classifier view and the Cut Loss check, on plain values."""
+"""Table tests on Position: Unrealised P&L, the classifier view and the Cut Loss check, on plain values."""
 
 import math
 

@@ -1,4 +1,4 @@
-"""Tests for scoring Signals (#53): SignalLog gives pending Signals an Outcome from later bars."""
+"""Tests for scoring Signals: SignalLog gives pending Signals an Outcome from later bars."""
 
 import json
 from typing import cast

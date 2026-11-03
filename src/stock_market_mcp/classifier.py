@@ -1,4 +1,4 @@
-"""Classifier transport boundary: get_signal's verdict comes from an injectable seam.
+"""Classifier: the injectable seam that gives get_signal its Verdict and Confidence.
 
 The Protocol mirrors DataFetcher's pattern: tests inject a fake, and the real
 transport below is the only OpenRouter-aware code in the server.
@@ -158,7 +158,7 @@ class OpenRouterClassifier:
             headers={"Authorization": f"Bearer {api_key}"},
             timeout=120,
         )
-        # Non-200 is a provider failure (#12 semantics): the HTTPError propagates
+        # Non-200 is a provider failure, not a bad answer: the HTTPError propagates
         # loudly and is never retried or converted into a contract violation.
         response.raise_for_status()
         body = response.json()
