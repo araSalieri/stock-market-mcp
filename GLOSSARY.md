@@ -7,7 +7,7 @@ A server that gives coding agents market data, indicators, and advisory trading 
 ### Signal
 
 **Signal**:
-An advisory answer to "is now the time to buy or hold this stock, or to cut it if held?", made of a Verdict, a Confidence, a rationale, the data date, the Price, the Hit Rate for its ticker and Interval (none until enough are scored), and a Trade Plan when the Verdict is buy.
+An advisory answer to "is now the time to buy or hold this stock, or to cut it if held?", made of a Verdict, a Confidence, a rationale, the data date, the Price, the Hit Rate for its ticker, Interval and Verdict (none until enough are scored), and a Trade Plan when the Verdict is buy.
 _Avoid_: Recommendation, call, alert
 
 **Verdict**:

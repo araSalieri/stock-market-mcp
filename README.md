@@ -60,10 +60,9 @@ compose reads `SMM_OPENROUTER_API_KEY`, `SMM_CLASSIFIER_MODEL` and `SMM_LOG_LEVE
 ## Development
 
 ```sh
-uv run pytest
-uv run pyright
+scripts/check.sh
 ```
 
-CI runs both on every push and pull request. Pushing a `v*` tag also publishes the image to `ghcr.io/arasalieri/stock-market-mcp`.
+It runs the tests, pyright and the en dash check. CI runs it on every push and pull request. Pushing a `v*` tag also publishes the image to `ghcr.io/arasalieri/stock-market-mcp`.
 
 Before tagging, run the smoke test against a local build: `docker compose up -d --build`, then `uv run python scripts/container_smoke.py`. Run it once during an IDX or US session and once outside one, since Gap, Relative Volume and VWAP distance take different paths.
