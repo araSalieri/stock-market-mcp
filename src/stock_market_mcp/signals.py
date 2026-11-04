@@ -64,7 +64,7 @@ SCHEMA = """CREATE TABLE IF NOT EXISTS signals (
 
 # Re-entry Lock per ticker and Interval: the confident cut's Price, data date and Buyback Price (its mirrored default
 # Target, null when that plan can't be made). armed_by (buyback or re_entry) and armed_date (the arming bar's date) are
-# set by the first price trigger after the cut; lifted is set by the first fresh confident buy while armed, and stays 1
+# set by the first bar after the cut that arms it; lifted is set by the first fresh confident buy while armed, and stays 1
 # until the next such cut. lifted_date is the lifting buy's data date and lifted_by its armed_by; locks lifted before
 # arming existed have the lifting bar's date and path, or nulls on rows lifted before those existed.
 # cut_quantity is the held Position's quantity at the cut; null when not held or on rows from before it existed.
@@ -167,11 +167,11 @@ class SignalLog:
             hit_rate = _hit_rate(conn, ticker, interval, verdict)
             confident = min_confidence is not None and signal["confidence"] >= min_confidence
             lock = _reentry_lock(conn, ticker, interval, lambda: history, now, held=held is not None)
-            buys = confident and verdict == "buy" and (lock is None or lock["state"] != "locked")
-            plan = _trade_plan(history, price, atr_multiple, reward_ratio) if buys else None
+            gets_plan = confident and verdict == "buy" and (lock is None or lock["state"] != "locked")
+            plan = _trade_plan(history, price, atr_multiple, reward_ratio) if gets_plan else None
             if fresh:
                 # Only a recorded buy lifts, so the Re-entry Hit Rate counts each lifting buy.
-                lifts = buys and lock is not None and lock["state"] == "armed"
+                lifts = gets_plan and lock is not None and lock["state"] == "armed"
                 re_entry = lock["armed_by"] if lock is not None and lifts else None
                 _record(conn, ticker, interval, signal, history, price, cut_loss, re_entry)
                 if lifts:
@@ -285,7 +285,7 @@ def _reentry_lock(
     held: bool,
 ) -> dict | None:
     """The Re-entry Lock on the ticker and Interval, or None when there's none; writes the arming when history() shows
-    a price trigger. It never lifts: only a fresh confident buy does, in after_classifier.
+    a bar that arms it. It never lifts: only a fresh confident buy does, in after_classifier.
 
     history is only called for a locked lock, so an armed or lifted one needs no fetch."""
     row = conn.execute(
@@ -301,10 +301,10 @@ def _reentry_lock(
         return _lock_view("lifted", cut, held=held, lifted_date=lifted_date, lifted_by=lifted_by)
     if armed_by is None:
         bars = history()
-        trigger = _find_trigger(bars, interval, now, cut)
-        if trigger is None:
+        arming = _find_arming(bars, interval, now, cut)
+        if arming is None:
             return _lock_view("locked", cut, held=held, **_re_entry_fields(cut, bars))
-        armed_date, armed_by = trigger
+        armed_date, armed_by = arming
         conn.execute(
             "UPDATE reentry_locks SET armed_date = ?, armed_by = ? WHERE ticker = ? AND interval = ?",
             (armed_date, armed_by, ticker, interval),
@@ -341,7 +341,7 @@ def _re_entry_fields(cut: _Cut, history: pd.DataFrame) -> dict:
     return {"ema": ema, "re_entry_price": None if ema is None else max(cut.price, ema)}
 
 
-def _find_trigger(history: pd.DataFrame, interval: Interval, now: datetime, cut: _Cut) -> tuple[str, str] | None:
+def _find_arming(history: pd.DataFrame, interval: Interval, now: datetime, cut: _Cut) -> tuple[str, str] | None:
     """The first bar of history after the cut that arms a Re-entry Lock, as (its date, "buyback" or "re_entry"), or None.
 
     Any bar, forming included, arms by buyback when its low is at or below the cut's Buyback Price; a completed bar

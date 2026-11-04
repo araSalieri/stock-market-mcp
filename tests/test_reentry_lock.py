@@ -235,13 +235,14 @@ def test_lock_rows_from_an_older_database_keep_working(signal_maker, tmp_path):
             [(PROMPT_VERSION,)] * 30,
         )
     # Not held, so only the missing cut quantity keeps buyback_quantity out.
-    locked, old_lifted, lifting = _calls(
+    locked, old_lifted, armed, lifting = _calls(
         signal_maker,
         tmp_path,
         [
             (bars(FLAT), _signal("buy"), "1d"),
             (bars(FLAT), _signal("buy"), "5m"),
-            (bars(FLAT + [101.0]), _signal("buy"), "1d"),  # arms by re-entry and lifts: tagged
+            (bars(FLAT + [101.0]), _signal("hold"), "1d"),  # arms by re-entry
+            (bars(FLAT + [101.0]), _signal("buy"), "1d"),  # lifts: tagged
         ],
         clear_at=0,
     )
@@ -261,6 +262,14 @@ def test_lock_rows_from_an_older_database_keep_working(signal_maker, tmp_path):
         "buyback_price": None,
         "lifted_date": "2024-03-01T00:00:00",
         "lifted_by": "buyback",
+    }
+    assert armed["re_entry_lock"] == {
+        "state": "armed",
+        "cut_price": 100.0,
+        "cut_date": "2024-02-29T00:00:00",
+        "buyback_price": 92.0,
+        "armed_by": "re_entry",
+        "armed_date": "2024-03-01T00:00:00",
     }
     assert lifting["re_entry_lock"]["lifted_by"] == "re_entry"
     assert lifting["re_entry_hit_rate"] == {"buyback": None, "re_entry": None}
@@ -384,14 +393,14 @@ ARMED = {
 
 
 @pytest.mark.parametrize("signal", [_signal("hold"), _signal("buy", 0.59)], ids=["hold", "weak buy"])
-def test_price_trigger_arms_the_lock_and_only_a_confident_buy_lifts_it(signal_maker, tmp_path, signal):
+def test_price_arms_the_lock_and_only_a_confident_buy_lifts_it(signal_maker, tmp_path, signal):
     _, waiting = _calls(signal_maker, tmp_path, [(bars(FLAT), _signal("cut")), (bars(FLAT + [101.0]), signal)])
 
     assert waiting["trade_plan"] is None
     assert waiting["re_entry_lock"] == ARMED
 
 
-def test_first_trigger_stays_after_later_triggers_and_the_price_moving_back(signal_maker, tmp_path):
+def test_first_arming_stays_after_later_armings_and_the_price_moving_back(signal_maker, tmp_path):
     armed = FLAT + [101.0]
     *_, later, back = _calls(
         signal_maker,
@@ -400,7 +409,7 @@ def test_first_trigger_stays_after_later_triggers_and_the_price_moving_back(sign
             (bars(FLAT), _signal("cut")),
             (bars(armed), _signal("hold")),  # arms by re-entry on 2024-03-01
             (bars(armed + [93.0]), _signal("hold")),  # low 92 touches the Buyback Price later
-            (bars(FLAT), _signal("buy", 0.59)),  # bars without either trigger
+            (bars(FLAT), _signal("buy", 0.59)),  # bars that arm by neither path
         ],
     )
 
