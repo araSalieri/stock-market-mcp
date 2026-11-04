@@ -13,6 +13,7 @@ import pytest
 from fakes import FakeClassifier, FakeFetcher, seed_signals
 
 from stock_market_mcp.portfolio import PortfolioStore
+from stock_market_mcp.prompt import PROMPT_VERSION
 
 
 def _signal(verdict, confidence=0.7):
@@ -200,26 +201,38 @@ def test_cached_buy_respects_the_lock_and_the_lift(signal_maker, tmp_path, buy_b
 
 
 def test_lock_rows_from_an_older_database_keep_working(signal_maker, tmp_path):
-    # An older file can only be built by hand: no tool writes the old lock table.
+    # An older file can only be built by hand: no tool writes the old lock table. This one is from before the Buyback
+    # Price and the armed state, with first-buy tags from the old price-only lift.
     db = tmp_path / "smm.db"
     with closing(sqlite3.connect(db)) as conn, conn:
         conn.execute(
             "CREATE TABLE reentry_locks (ticker TEXT NOT NULL, interval TEXT NOT NULL, cut_price REAL NOT NULL, "
-            "cut_date TEXT NOT NULL, lifted INTEGER NOT NULL, PRIMARY KEY (ticker, interval))"
+            "cut_date TEXT NOT NULL, lifted INTEGER NOT NULL, lifted_date TEXT, lifted_by TEXT, "
+            "PRIMARY KEY (ticker, interval))"
         )
-        conn.execute("INSERT INTO reentry_locks VALUES ('AAPL', '1d', 100.0, '2024-02-29T00:00:00', 0)")
-        conn.execute("INSERT INTO reentry_locks VALUES ('AAPL', '5m', 100.0, '2024-02-29T00:00:00', 1)")
+        conn.execute("INSERT INTO reentry_locks VALUES ('AAPL', '1d', 100.0, '2024-02-29T00:00:00', 0, NULL, NULL)")
+        conn.execute(
+            "INSERT INTO reentry_locks VALUES ('AAPL', '5m', 100.0, '2024-02-29T00:00:00', 1, '2024-03-01T00:00:00', "
+            "'buyback')"
+        )
         conn.execute(
             "CREATE TABLE signals (id INTEGER PRIMARY KEY, ticker TEXT NOT NULL, interval TEXT NOT NULL, "
             "prompt_version INTEGER NOT NULL, data_date TEXT NOT NULL, verdict TEXT NOT NULL, confidence REAL NOT NULL, "
             "price REAL NOT NULL, long_stop REAL, long_target REAL, short_stop REAL, short_target REAL, outcome TEXT, "
-            "scored_at TEXT)"
+            "scored_at TEXT, cut_loss INTEGER, re_entry TEXT)"
         )
         # The 1d lock's cut Signal, with its mirrored default Target as the short Target.
         conn.execute(
             "INSERT INTO signals (ticker, interval, prompt_version, data_date, verdict, confidence, price, "
             "long_stop, long_target, short_stop, short_target) "
-            "VALUES ('AAPL', '1d', 1, '2024-02-29T00:00:00', 'cut', 0.7, 100.0, 96.0, 108.0, 104.0, 92.0)"
+            "VALUES ('AAPL', '1d', ?, '2024-02-29T00:00:00', 'cut', 0.7, 100.0, 96.0, 108.0, 104.0, 92.0)",
+            (PROMPT_VERSION,),
+        )
+        # 30 scored first-buy tags under the old rule, at a band that keeps the Minimum Confidence at 0.1.
+        conn.executemany(
+            "INSERT INTO signals (ticker, interval, prompt_version, data_date, verdict, confidence, price, outcome, "
+            "re_entry) VALUES ('MSFT', '1d', ?, '2023-01-01T00:00:00', 'buy', 0.1, 100.0, 'target', 're_entry')",
+            [(PROMPT_VERSION,)] * 30,
         )
     # Not held, so only the missing cut quantity keeps buyback_quantity out.
     locked, old_lifted, lifting = _calls(
@@ -228,10 +241,13 @@ def test_lock_rows_from_an_older_database_keep_working(signal_maker, tmp_path):
         [
             (bars(FLAT), _signal("buy"), "1d"),
             (bars(FLAT), _signal("buy"), "5m"),
-            (bars(FLAT + [101.0]), _signal("buy"), "1d"),
+            (bars(FLAT + [101.0]), _signal("buy"), "1d"),  # arms by re-entry and lifts: tagged
         ],
         clear_at=0,
     )
+    # 29 more tags, so scoring the lifting buy as a Target completes 30 only if a later open keeps its tag.
+    seed_signals(db, ["target"] * 29, confidence=0.1, ticker="MSFT", re_entry="re_entry")
+    (later,) = _calls(signal_maker, tmp_path, [(bars(FLAT + [101.0, 300.0]), _signal("hold"), "1d")])
 
     assert locked["trade_plan"] is None
     assert locked["re_entry_lock"]["state"] == "locked"
@@ -243,10 +259,12 @@ def test_lock_rows_from_an_older_database_keep_working(signal_maker, tmp_path):
         "cut_price": 100.0,
         "cut_date": "2024-02-29T00:00:00",
         "buyback_price": None,
-        "lifted_date": None,
-        "lifted_by": None,
+        "lifted_date": "2024-03-01T00:00:00",
+        "lifted_by": "buyback",
     }
     assert lifting["re_entry_lock"]["lifted_by"] == "re_entry"
+    assert lifting["re_entry_hit_rate"] == {"buyback": None, "re_entry": None}
+    assert later["re_entry_hit_rate"] == {"buyback": None, "re_entry": 1.0}
 
 
 @pytest.mark.parametrize(("close", "lifted"), [(93.0, True), (93.5, False)])  # lows 92 and 92.5
