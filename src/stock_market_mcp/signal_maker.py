@@ -73,6 +73,7 @@ class SignalMaker:
             df,
             price,
             signal,
+            now=self._now(),
             fresh=fresh,
             losing=held.losing if held is not None else None,
             atr_multiple=atr_multiple,
