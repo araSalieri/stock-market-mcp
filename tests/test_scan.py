@@ -1,6 +1,8 @@
 """Tests for scan on ad-hoc tickers: daily numbers through the MCP surface with fake daily frames and a fixed clock."""
 
 import json
+import sqlite3
+from contextlib import closing
 from datetime import UTC, datetime
 
 import pandas as pd
@@ -182,8 +184,8 @@ async def test_scan_gives_a_failing_ticker_its_own_error_entry(server_url):
     aapl, nope, tlkm, bbca = entries(result)
     assert aapl["ticker"] == "AAPL"
     assert aapl["rsi"] == pytest.approx(0.0)
-    assert nope == {"ticker": "NOPE", "error": "no history data for ticker: NOPE"}
-    assert tlkm == {"ticker": "TLKM.JK", "error": "5m fetch failed"}
+    assert nope == {"ticker": "NOPE", "error": "no history data for ticker: NOPE", "re_entry_locks": []}
+    assert tlkm == {"ticker": "TLKM.JK", "error": "5m fetch failed", "re_entry_locks": []}
     assert bbca["ticker"] == "BBCA.JK"
     assert bbca["prev_close"] == 129.0
 
@@ -348,7 +350,7 @@ async def test_scan_lists_each_intervals_re_entry_lock_as_get_signal_shows_it(se
         "re_entry_price": 100.0,
         "buyback_quantity": 10,
     }
-    assert other == {"ticker": "TLKM.JK", "error": "no history data for ticker: TLKM.JK"}
+    assert other == {"ticker": "TLKM.JK", "error": "no history data for ticker: TLKM.JK", "re_entry_locks": []}
 
 
 async def test_scan_records_a_lift_it_finds_and_lists_lifted_locks_without_a_fetch(server_url, tmp_path):
@@ -402,3 +404,27 @@ async def test_scan_shows_a_lock_whose_fetch_fails_as_stale_and_keeps_the_rest(s
             "error": "1h fetch failed",
         },
     ]
+
+
+async def test_scan_keeps_a_tickers_locks_when_its_numbers_fail(server_url, tmp_path):
+    url, _, frames = lock_server(server_url, tmp_path, {"1h": lock_bars(FLAT)}, [CUT])
+    PortfolioStore(tmp_path / "smm.db").set("BBCA.JK", 10, 110.0)
+    lock = await lock_of(url, "1h")
+    frames["1d"] = LookupError("1d fetch failed")
+
+    [entry] = entries(await call_tool(url, "scan", {"tickers": ["BBCA.JK"]}))
+
+    assert entry == {"ticker": "BBCA.JK", "error": "1d fetch failed", "re_entry_locks": [{"interval": "1h", **lock}]}
+
+
+async def test_scan_keeps_a_tickers_numbers_when_its_locks_fail_on_a_short_position(server_url, tmp_path):
+    url, _, _ = lock_server(server_url, tmp_path, {}, [])
+    with closing(sqlite3.connect(tmp_path / "smm.db")) as conn, conn:
+        PortfolioStore(tmp_path / "smm.db").set("AAPL", 10, 180.0)
+        conn.execute("INSERT INTO positions VALUES ('MSFT', 'short', 1, 100.0)")
+
+    [entry] = entries(await call_tool(url, "scan", {"tickers": ["BBCA.JK"]}))
+
+    assert entry["prev_close"] == 129.0
+    assert "re_entry_locks" not in entry
+    assert entry["re_entry_locks_error"] == "short Positions MSFT; clear each with set_position quantity 0"
