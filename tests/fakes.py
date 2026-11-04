@@ -32,7 +32,7 @@ def audit_lines(caplog) -> list:
 def seed_signals(db, outcomes, *, verdict="buy", confidence=0.7, prompt_version=PROMPT_VERSION, ticker="AAPL", interval="1d", cut_loss=None, long_plan=True, short_plan=True, re_entry=None):
     """Store one scored Signal per Outcome (None for pending): scoring dozens of Signals over MCP would take dozens of calls.
 
-    long_plan and short_plan False store that default Trade Plan as nulls; re_entry tags them as the first buy after a lift by that path.
+    long_plan and short_plan False store that default Trade Plan as nulls; re_entry tags them as the buy that lifted a lock armed by that path.
 
     The only test code that knows the signals schema; SignalLog(db).track_record creates the table first.
     """

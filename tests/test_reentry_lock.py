@@ -1,6 +1,6 @@
-"""Tests for the Re-entry Lock: SignalMaker locks a ticker on an Interval after a confident cut, until a later bar's low
-touches the Buyback Price or a later completed bar closes above the Re-entry Price (the higher of the 10-bar EMA and the
-cut's Price), whichever comes first.
+"""Tests for the Re-entry Lock: SignalMaker locks a ticker on an Interval after a confident cut. A later bar's low
+touching the Buyback Price or a later completed bar closing above the Re-entry Price (the higher of the 10-bar EMA and
+the cut's Price), whichever comes first, arms it; the first fresh buy at or above the Minimum Confidence then lifts it.
 
 Drives SignalMaker with fakes, not the MCP surface, to step history bar by bar."""
 
@@ -147,14 +147,6 @@ def test_forming_bar_closing_above_the_re_entry_price_does_not_lift_until_comple
     }
 
 
-def test_buy_after_a_lift_still_needs_the_minimum_confidence(signal_maker, tmp_path):
-    lifted = FLAT + [101.0]
-    _, weak = _calls(signal_maker, tmp_path, [(bars(FLAT), _signal("cut")), (bars(lifted), _signal("buy", 0.59))])
-
-    assert _lifted(weak)
-    assert weak["trade_plan"] is None
-
-
 def test_lifted_lock_stays_lifted_after_a_dip_and_after_the_lifting_bar_leaves_the_window(signal_maker, tmp_path):
     lifted = FLAT + [101.0]
     *_, buy = _calls(
@@ -202,8 +194,9 @@ def test_cached_buy_respects_the_lock_and_the_lift(signal_maker, tmp_path, buy_b
 
     assert len(classifier.prompts) == 2  # the lock changes neither the prompt nor the Signal cache key
     assert first["trade_plan"] is not None
+    # A cached buy is never recorded, so it can't lift: a confident one on an armed lock gets a Trade Plan only.
     assert (cached["trade_plan"] is not None) is lifted
-    assert _lifted(cached) is lifted
+    assert cached["re_entry_lock"]["state"] == ("armed" if lifted else "locked")
 
 
 def test_lock_rows_from_an_older_database_keep_working(signal_maker, tmp_path):
@@ -289,10 +282,11 @@ def test_bar_touching_the_buyback_price_and_closing_above_the_re_entry_price_lif
     assert buy["re_entry_lock"]["lifted_by"] == "buyback"
 
 
-def test_buy_below_the_minimum_confidence_after_a_buyback_lift_gets_no_trade_plan(signal_maker, tmp_path):
+def test_buy_below_the_minimum_confidence_after_a_buyback_touch_leaves_the_lock_armed(signal_maker, tmp_path):
     _, weak = _calls(signal_maker, tmp_path, [(bars(FLAT), _signal("cut")), (bars(FLAT + [93.0]), _signal("buy", 0.59))])
 
-    assert weak["re_entry_lock"]["lifted_by"] == "buyback"
+    assert weak["re_entry_lock"]["state"] == "armed"
+    assert weak["re_entry_lock"]["armed_by"] == "buyback"
     assert weak["trade_plan"] is None
 
 
@@ -310,50 +304,136 @@ def test_next_confident_cut_after_a_buyback_lift_gives_a_fresh_buyback_price(sig
     assert cut["re_entry_lock"]["buyback_price"] == 72.0
 
 
-def test_cleared_position_gets_the_buyback_quantity_rounded_down_locked_or_lifted(signal_maker, tmp_path):
+def test_cleared_position_gets_the_buyback_quantity_rounded_down_locked_armed_or_lifted(signal_maker, tmp_path):
     # 10 shares cut at 100 free 1000, which buys 10.87 shares at the Buyback Price 92.
-    _, locked, lifted = _calls(
+    dip = bars(FLAT + [93.0])
+    _, locked, armed, lifted = _calls(
         signal_maker,
         tmp_path,
-        [(bars(FLAT), _signal("cut")), (bars(FLAT), _signal("buy")), (bars(FLAT + [93.0]), _signal("buy"))],
+        [(bars(FLAT), _signal("cut")), (bars(FLAT), _signal("buy")), (dip, _signal("hold")), (dip, _signal("buy"))],
         clear_at=1,
     )
 
-    assert locked["re_entry_lock"]["state"] == "locked"
-    assert locked["re_entry_lock"]["buyback_quantity"] == 10
-    assert lifted["re_entry_lock"]["state"] == "lifted"
-    assert lifted["re_entry_lock"]["buyback_quantity"] == 10
+    assert [reply["re_entry_lock"]["state"] for reply in (locked, armed, lifted)] == ["locked", "armed", "lifted"]
+    assert all(reply["re_entry_lock"]["buyback_quantity"] == 10 for reply in (locked, armed, lifted))
 
 
 def test_no_buyback_quantity_while_the_ticker_is_held(signal_maker, tmp_path):
-    cut, locked, lifted = _calls(
+    dip = bars(FLAT + [93.0])
+    replies = _calls(
         signal_maker,
         tmp_path,
-        [(bars(FLAT), _signal("cut")), (bars(FLAT), _signal("buy")), (bars(FLAT + [93.0]), _signal("buy"))],
+        [(bars(FLAT), _signal("cut")), (bars(FLAT), _signal("buy")), (dip, _signal("hold")), (dip, _signal("buy"))],
     )
 
-    assert all("buyback_quantity" not in reply["re_entry_lock"] for reply in (cut, locked, lifted))
+    assert [reply["re_entry_lock"]["state"] for reply in replies] == ["locked", "locked", "armed", "lifted"]
+    assert all("buyback_quantity" not in reply["re_entry_lock"] for reply in replies)
 
 
-def test_first_buy_after_each_lift_is_tagged_with_its_path_for_the_re_entry_hit_rate(signal_maker, tmp_path):
+def test_only_the_buy_lifting_each_lock_is_tagged_with_its_path_for_the_re_entry_hit_rate(signal_maker, tmp_path):
     # 29 scored buys per path elsewhere, at a band that keeps the Minimum Confidence at 0.1, so each tagged buy here
     # completes 30 when scored.
     for path in ("buyback", "re_entry"):
         seed_signals(tmp_path / "smm.db", ["target"] * 15 + ["stop"] * 14, confidence=0.1, ticker="MSFT", re_entry=path)
-    dip = FLAT + [93.0]  # low 92 lifts the cut at 100 by buyback
-    jump = dip + [200.0]  # closes above the EMA and the 93 cut: lifts by re-entry, and scores the buys at 93 as Targets
+    dip = FLAT + [93.0]  # low 92 arms the cut at 100 by buyback
+    jump = dip + [200.0]  # closes above the EMA and the 93 cut: arms by re-entry, and scores the buys at 93 as Targets
     *_, last = _calls(
         signal_maker,
         tmp_path,
         [
             (bars(FLAT), _signal("cut")),
-            (bars(dip), _signal("buy", 0.05)),  # first after the buyback lift, below the Minimum Confidence: tagged
-            (bars(dip), _signal("buy")),  # second on the same lock: not tagged
+            (bars(dip), _signal("buy", 0.05)),  # armed, below the Minimum Confidence: not tagged
+            (bars(dip), _signal("buy")),  # confident, lifts by buyback: tagged
+            (bars(dip), _signal("buy")),  # after the lift: not tagged
             (bars(dip), _signal("cut")),  # the next confident cut starts over
-            (bars(jump), _signal("buy")),  # first after the re-entry lift: tagged
+            (bars(jump), _signal("buy")),  # lifts by re-entry: tagged
             (bars(jump), _signal("buy")),
             (bars(jump + [300.0]), _signal("buy")),  # scores the buys at 200 as Targets
         ],
     )
 
     assert last["re_entry_hit_rate"] == {"buyback": pytest.approx(16 / 30), "re_entry": pytest.approx(16 / 30)}
+
+
+ARMED = {
+    "state": "armed",
+    "cut_price": 100.0,
+    "cut_date": "2024-02-29T00:00:00",
+    "buyback_price": 92.0,
+    "armed_by": "re_entry",
+    "armed_date": "2024-03-01T00:00:00",
+}
+
+
+@pytest.mark.parametrize("signal", [_signal("hold"), _signal("buy", 0.59)], ids=["hold", "weak buy"])
+def test_price_trigger_arms_the_lock_and_only_a_confident_buy_lifts_it(signal_maker, tmp_path, signal):
+    _, waiting = _calls(signal_maker, tmp_path, [(bars(FLAT), _signal("cut")), (bars(FLAT + [101.0]), signal)])
+
+    assert waiting["trade_plan"] is None
+    assert waiting["re_entry_lock"] == ARMED
+
+
+def test_first_trigger_stays_after_later_triggers_and_the_price_moving_back(signal_maker, tmp_path):
+    armed = FLAT + [101.0]
+    *_, later, back = _calls(
+        signal_maker,
+        tmp_path,
+        [
+            (bars(FLAT), _signal("cut")),
+            (bars(armed), _signal("hold")),  # arms by re-entry on 2024-03-01
+            (bars(armed + [93.0]), _signal("hold")),  # low 92 touches the Buyback Price later
+            (bars(FLAT), _signal("buy", 0.59)),  # bars without either trigger
+        ],
+    )
+
+    assert later["re_entry_lock"] == back["re_entry_lock"] == ARMED
+
+
+def test_confident_cut_on_an_armed_lock_locks_again_at_its_price(signal_maker, tmp_path):
+    armed = FLAT + [101.0, 110.0]
+    *_, buy = _calls(
+        signal_maker,
+        tmp_path,
+        [(bars(FLAT), _signal("cut")), (bars(armed), _signal("hold")), (bars(armed), _signal("cut"))]
+        + [(bars(armed), _signal("buy"))],
+    )
+
+    assert buy["trade_plan"] is None
+    assert buy["re_entry_lock"]["state"] == "locked"
+    assert buy["re_entry_lock"]["cut_price"] == 110.0
+
+
+def test_no_lock_lifts_while_the_minimum_confidence_is_null(signal_maker, tmp_path):
+    _calls(signal_maker, tmp_path, [(bars(FLAT), _signal("cut"))])
+    # 30 scored buys elsewhere, all Stops, so no band beats break-even.
+    seed_signals(tmp_path / "smm.db", ["stop"] * 30, confidence=0.95, ticker="MSFT")
+    [buy] = _calls(signal_maker, tmp_path, [(bars(FLAT + [101.0]), _signal("buy", 0.99))])
+
+    assert buy["min_confidence"] is None
+    assert buy["trade_plan"] is None
+    assert buy["re_entry_lock"] == ARMED
+
+
+def test_confident_buy_on_an_armed_lock_lifts_it_on_the_buys_data_date(signal_maker, tmp_path):
+    armed = FLAT + [101.0]
+    *_, buy, after = _calls(
+        signal_maker,
+        tmp_path,
+        [
+            (bars(FLAT), _signal("cut")),
+            (bars(armed), _signal("hold")),  # arms by re-entry on 2024-03-01
+            (bars(armed + [102.0]), _signal("buy")),
+            (bars(armed + [102.0]), _signal("hold")),
+        ],
+    )
+
+    lifted = {
+        "state": "lifted",
+        "cut_price": 100.0,
+        "cut_date": "2024-02-29T00:00:00",
+        "buyback_price": 92.0,
+        "lifted_date": "2024-03-02T00:00:00",
+        "lifted_by": "re_entry",
+    }
+    assert buy["trade_plan"] is not None
+    assert buy["re_entry_lock"] == after["re_entry_lock"] == lifted

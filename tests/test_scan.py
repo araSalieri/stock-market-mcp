@@ -297,6 +297,7 @@ def lock_bars(closes: list[float]) -> pd.DataFrame:
 FLAT = [100.0] * 60
 CUT = {"verdict": "cut", "confidence": 0.7, "rationale": "test"}
 HOLD = {"verdict": "hold", "confidence": 0.7, "rationale": "test"}
+BUY = {"verdict": "buy", "confidence": 0.7, "rationale": "test"}
 
 
 def lock_server(server_url, tmp_path, history: dict, replies: list[dict]):
@@ -353,8 +354,8 @@ async def test_scan_lists_each_intervals_re_entry_lock_as_get_signal_shows_it(se
     assert other == {"ticker": "TLKM.JK", "error": "no history data for ticker: TLKM.JK", "re_entry_locks": []}
 
 
-async def test_scan_records_a_lift_it_finds_and_lists_lifted_locks_without_a_fetch(server_url, tmp_path):
-    url, fetcher, frames = lock_server(server_url, tmp_path, {"1h": lock_bars(FLAT)}, [CUT, HOLD])
+async def test_scan_records_an_arming_it_finds_never_lifts_and_lists_armed_locks_without_a_fetch(server_url, tmp_path):
+    url, fetcher, frames = lock_server(server_url, tmp_path, {"1h": lock_bars(FLAT)}, [CUT, HOLD, BUY])
     PortfolioStore(tmp_path / "smm.db").set("BBCA.JK", 10, 110.0)
     await lock_of(url, "1h")
     # The 2024-03-01 bar's low (90) touches the Buyback Price (92).
@@ -364,20 +365,26 @@ async def test_scan_records_a_lift_it_finds_and_lists_lifted_locks_without_a_fet
     frames["1h"] = LookupError("1h fetch failed")
     fetcher.history_calls.clear()
     [second] = entries(await call_tool(url, "scan", {"tickers": ["BBCA.JK"]}))
-    # Back to bars without the lifting one, so only the recorded lift can show it lifted.
+    # Back to bars without the arming one, so only the recorded arming can show it armed.
     frames["1h"] = lock_bars(FLAT)
 
-    lifted = {
-        "state": "lifted",
+    armed = {
+        "state": "armed",
         "cut_price": 100.0,
         "cut_date": "2024-02-29T00:00:00",
         "buyback_price": 92.0,
-        "lifted_date": "2024-03-01T00:00:00",
-        "lifted_by": "buyback",
+        "armed_by": "buyback",
+        "armed_date": "2024-03-01T00:00:00",
     }
-    assert first["re_entry_locks"] == second["re_entry_locks"] == [{"interval": "1h", **lifted}]
+    assert first["re_entry_locks"] == second["re_entry_locks"] == [{"interval": "1h", **armed}]
     assert all(interval != "1h" for _, _, interval, _ in fetcher.history_calls)
-    assert await lock_of(url, "1h") == lifted
+    assert await lock_of(url, "1h") == armed
+    # Only get_signal's confident buy lifts it.
+    frames["1h"] = lock_bars(FLAT + [91.0])
+    lifted = await lock_of(url, "1h")
+    [third] = entries(await call_tool(url, "scan", {"tickers": ["BBCA.JK"]}))
+    assert lifted["state"] == "lifted"
+    assert third["re_entry_locks"] == [{"interval": "1h", **lifted}]
 
 
 async def test_scan_shows_a_lock_whose_fetch_fails_as_stale_and_keeps_the_rest(server_url, tmp_path):
