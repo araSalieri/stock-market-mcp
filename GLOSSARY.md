@@ -49,7 +49,7 @@ _Avoid_: Model version, schema version
 ### Trade Plan
 
 **Trade Plan**:
-The three prices for a long trade: Entry, Stop, and Target. Part of a buy Signal at or above the Minimum Confidence and not under a Re-entry Lock; every other Signal has none. Advisory only.
+The three prices for a long trade: Entry, Stop, and Target. Part of a buy Signal at or above the Minimum Confidence that is not under a locked Re-entry Lock; every other Signal has none. Advisory only.
 _Avoid_: Setup, strategy, levels
 
 **Entry**:
@@ -75,7 +75,7 @@ A named list of tickers the user saves to scan together, usually one market per 
 _Avoid_: Universe, list
 
 **Scan**:
-A quick set of numbers for each ticker in a Watchlist or ad-hoc list, used to pick which ones deserve a Signal, with each Re-entry Lock on the ticker, locked or lifted. Has no Verdict.
+A quick set of numbers for each ticker in a Watchlist or ad-hoc list, used to pick which ones deserve a Signal, with each Re-entry Lock on the ticker, locked, armed or lifted. Has no Verdict.
 _Avoid_: Screen, screener, filter
 
 **Gap**:
@@ -113,19 +113,19 @@ The Hit Rate over every scored cut on a losing Position, across all tickers and 
 _Avoid_: Exit accuracy, cut rate
 
 **Re-entry Lock**:
-The state of a ticker on one Interval from a cut at or above the Minimum Confidence until price on that Interval reaches the Buyback Price or a later completed bar closes above the Re-entry Price, whichever comes first. While locked, a buy gets no Trade Plan. Once lifted it stays lifted, and is shown as lifted with the date and the way it lifted (buyback or re-entry), until the next such cut. A lift opens re-entry but is not a buy: a buy still needs a buy Verdict at or above the Minimum Confidence.
+The state of a ticker on one Interval from a cut at or above the Minimum Confidence until a buy at or above the Minimum Confidence after the lock is armed. It is locked until price on that Interval reaches the Buyback Price or a later completed bar closes above the Re-entry Price, then armed by whichever came first (buyback or re-entry), and stays armed until that confident buy lifts it. While locked or armed, a buy below the Minimum Confidence gets no Trade Plan; the buy that lifts the lock gets one. Once lifted it stays lifted, and is shown with the lifting buy's date and the way it was armed, until the next such cut.
 _Avoid_: Cooldown, ban, penalty
 
 **Re-entry Hit Rate**:
-The Hit Rate over the first buy Signal after each lifted Re-entry Lock, across all tickers and Intervals and at any Confidence. Given separately for locks lifted by buyback and by re-entry, so the two can be compared. Measures whether getting back in after a lift was right. Reported only; it sets nothing.
+The Hit Rate over the buy Signal that lifted each Re-entry Lock, across all tickers and Intervals. Given separately for locks armed by buyback and by re-entry, so the two can be compared. Measures whether getting back in was right. Reported only; it sets nothing.
 _Avoid_: Buyback rate, re-entry accuracy
 
 **Re-entry Price**:
-The higher of a locked ticker's cut Price and its current 10-bar EMA. A completed bar closing above it lifts the Re-entry Lock. It moves with the EMA, so each Signal gives it afresh.
+The higher of a locked ticker's cut Price and its current 10-bar EMA. A completed bar closing above it arms the Re-entry Lock. It moves with the EMA, so each Signal gives it afresh.
 _Avoid_: Trigger
 
 **Buyback Price**:
-The price below a cut at which getting back in is cheaper: the cut's Price minus the default Target distance, the same price that makes the cut's Outcome a Target. Fixed at the cut. Price reaches it when a bar's low touches it, the same test that scores the cut. Reaching it lifts the Re-entry Lock; a buy still needs a buy Verdict at or above the Minimum Confidence.
+The price below a cut at which getting back in is cheaper: the cut's Price minus the default Target distance, the same price that makes the cut's Outcome a Target. Fixed at the cut. Price reaches it when a bar's low touches it, the same test that scores the cut. Reaching it arms the Re-entry Lock; a buy at or above the Minimum Confidence then lifts it.
 _Avoid_: Re-entry target, short target, buy-the-dip price
 
 **Buyback Quantity**:
