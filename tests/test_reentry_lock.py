@@ -1,5 +1,6 @@
-"""Tests for the Re-entry Lock: SignalMaker locks a ticker on an Interval after a confident cut, until a later
-completed bar closes above the Re-entry Price (the higher of the 10-bar EMA and the cut's Price).
+"""Tests for the Re-entry Lock: SignalMaker locks a ticker on an Interval after a confident cut, until a later bar's low
+touches the Buyback Price or a later completed bar closes above the Re-entry Price (the higher of the 10-bar EMA and the
+cut's Price), whichever comes first.
 
 Drives SignalMaker with fakes, not the MCP surface, to step history bar by bar."""
 
@@ -26,7 +27,7 @@ def bars(closes: list[float], window: int = 60) -> pd.DataFrame:
     return df.iloc[-window:]
 
 
-FLAT = [100.0] * 60  # EMA 100; a cut here is at Price 100 on 2024-02-29
+FLAT = [100.0] * 60  # EMA 100 and ATR 2; a cut here is at Price 100 on 2024-02-29, Buyback Price 100 - 2 * 2 * 2 = 92
 
 
 def _calls(signal_maker, tmp_path, steps, clocks=None):
@@ -58,6 +59,7 @@ def test_confident_cut_locks_out_the_next_buy(signal_maker, tmp_path):
         "state": "locked",
         "cut_price": 100.0,
         "cut_date": "2024-02-29T00:00:00",
+        "buyback_price": 92.0,
         "ema": 100.0,
         "re_entry_price": 100.0,
     }
@@ -107,7 +109,7 @@ def test_lock_is_per_interval(signal_maker, tmp_path):
     ("before", "after", "lifted"),
     [
         (FLAT, [101.0], True),  # above the EMA and the cut Price
-        (FLAT, [90.0] * 20 + [95.0], False),  # above the EMA only
+        (FLAT, [94.0] * 20 + [97.0], False),  # above the EMA only, lows above the Buyback Price
         ([120.0] * 59 + [100.0], [105.0], False),  # above the cut Price only
     ],
 )
@@ -135,6 +137,7 @@ def test_forming_bar_closing_above_the_re_entry_price_does_not_lift_until_comple
         "state": "lifted",
         "cut_price": 100.0,
         "cut_date": "2024-02-29T00:00:00",
+        "buyback_price": 92.0,
         "lifted_date": "2024-03-01T00:00:00",
         "lifted_by": "re_entry",
     }
@@ -209,6 +212,18 @@ def test_lock_rows_from_an_older_database_keep_working(signal_maker, tmp_path):
         )
         conn.execute("INSERT INTO reentry_locks VALUES ('AAPL', '1d', 100.0, '2024-02-29T00:00:00', 0)")
         conn.execute("INSERT INTO reentry_locks VALUES ('AAPL', '5m', 100.0, '2024-02-29T00:00:00', 1)")
+        conn.execute(
+            "CREATE TABLE signals (id INTEGER PRIMARY KEY, ticker TEXT NOT NULL, interval TEXT NOT NULL, "
+            "prompt_version INTEGER NOT NULL, data_date TEXT NOT NULL, verdict TEXT NOT NULL, confidence REAL NOT NULL, "
+            "price REAL NOT NULL, long_stop REAL, long_target REAL, short_stop REAL, short_target REAL, outcome TEXT, "
+            "scored_at TEXT)"
+        )
+        # The 1d lock's cut Signal, with its mirrored default Target as the short Target.
+        conn.execute(
+            "INSERT INTO signals (ticker, interval, prompt_version, data_date, verdict, confidence, price, "
+            "long_stop, long_target, short_stop, short_target) "
+            "VALUES ('AAPL', '1d', 1, '2024-02-29T00:00:00', 'cut', 0.7, 100.0, 96.0, 108.0, 104.0, 92.0)"
+        )
     locked, old_lifted, lifting = _calls(
         signal_maker,
         tmp_path,
@@ -221,12 +236,68 @@ def test_lock_rows_from_an_older_database_keep_working(signal_maker, tmp_path):
 
     assert locked["trade_plan"] is None
     assert locked["re_entry_lock"]["state"] == "locked"
+    assert locked["re_entry_lock"]["buyback_price"] == 92.0
     assert old_lifted["trade_plan"] is not None
     assert old_lifted["re_entry_lock"] == {
         "state": "lifted",
         "cut_price": 100.0,
         "cut_date": "2024-02-29T00:00:00",
+        "buyback_price": None,
         "lifted_date": None,
         "lifted_by": None,
     }
     assert lifting["re_entry_lock"]["lifted_by"] == "re_entry"
+
+
+@pytest.mark.parametrize(("close", "lifted"), [(93.0, True), (93.5, False)])  # lows 92 and 92.5
+def test_low_at_or_below_the_buyback_price_lifts_the_lock_on_a_forming_bar(signal_maker, tmp_path, close, lifted):
+    # The bar starts 2024-03-01 and is still forming at noon.
+    noon = datetime(2024, 3, 1, 12, tzinfo=UTC)
+    _, buy = _calls(
+        signal_maker,
+        tmp_path,
+        [(bars(FLAT), _signal("cut"), "1d"), (bars(FLAT + [close]), _signal("buy"), "1d")],
+        clocks=[noon, noon],
+    )
+
+    assert (buy["trade_plan"] is not None) is lifted
+    if lifted:
+        assert buy["re_entry_lock"] == {
+            "state": "lifted",
+            "cut_price": 100.0,
+            "cut_date": "2024-02-29T00:00:00",
+            "buyback_price": 92.0,
+            "lifted_date": "2024-03-01T00:00:00",
+            "lifted_by": "buyback",
+        }
+    else:
+        assert buy["re_entry_lock"]["state"] == "locked"
+
+
+def test_bar_touching_the_buyback_price_and_closing_above_the_re_entry_price_lifts_by_buyback(signal_maker, tmp_path):
+    both = bars(FLAT + [101.0])
+    both.loc[both.index[-1], "Low"] = 92.0
+    _, buy = _calls(signal_maker, tmp_path, [(bars(FLAT), _signal("cut")), (both, _signal("buy"))])
+
+    assert buy["re_entry_lock"]["lifted_by"] == "buyback"
+
+
+def test_buy_below_the_minimum_confidence_after_a_buyback_lift_gets_no_trade_plan(signal_maker, tmp_path):
+    _, weak = _calls(signal_maker, tmp_path, [(bars(FLAT), _signal("cut")), (bars(FLAT + [93.0]), _signal("buy", 0.59))])
+
+    assert weak["re_entry_lock"]["lifted_by"] == "buyback"
+    assert weak["trade_plan"] is None
+
+
+def test_next_confident_cut_after_a_buyback_lift_gives_a_fresh_buyback_price(signal_maker, tmp_path):
+    # 60 bars at 80 fill the window: ATR 2, so a cut at 80 has Buyback Price 72.
+    lower = FLAT + [93.0] + [80.0] * 60
+    _, lifted, cut = _calls(
+        signal_maker,
+        tmp_path,
+        [(bars(FLAT), _signal("cut")), (bars(FLAT + [93.0]), _signal("buy")), (bars(lower), _signal("cut"))],
+    )
+
+    assert lifted["re_entry_lock"]["lifted_by"] == "buyback"
+    assert cut["re_entry_lock"]["state"] == "locked"
+    assert cut["re_entry_lock"]["buyback_price"] == 72.0

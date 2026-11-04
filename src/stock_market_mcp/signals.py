@@ -57,13 +57,15 @@ SCHEMA = """CREATE TABLE IF NOT EXISTS signals (
     cut_loss INTEGER
 )"""
 
-# Re-entry Lock per ticker and Interval: the confident cut's Price and data date; lifted stays 1 until the next such cut.
+# Re-entry Lock per ticker and Interval: the confident cut's Price, data date and Buyback Price (its mirrored default
+# Target, null when that plan can't be made); lifted stays 1 until the next such cut.
 # lifted_date is the lifting bar's date and lifted_by buyback or re_entry; both null on rows lifted before they existed.
 LOCK_SCHEMA = """CREATE TABLE IF NOT EXISTS reentry_locks (
     ticker TEXT NOT NULL,
     interval TEXT NOT NULL,
     cut_price REAL NOT NULL,
     cut_date TEXT NOT NULL,
+    buyback_price REAL,
     lifted INTEGER NOT NULL,
     lifted_date TEXT,
     lifted_by TEXT,
@@ -72,7 +74,7 @@ LOCK_SCHEMA = """CREATE TABLE IF NOT EXISTS reentry_locks (
 # Columns added to tables after their first release, as table -> (column, type); missing ones are added on open.
 _ADDED_COLUMNS = {
     "signals": (("cut_loss", "INTEGER"),),
-    "reentry_locks": (("lifted_date", "TEXT"), ("lifted_by", "TEXT")),
+    "reentry_locks": (("lifted_date", "TEXT"), ("lifted_by", "TEXT"), ("buyback_price", "REAL")),
 }
 
 
@@ -91,7 +93,8 @@ class SignalLog:
 
     @contextmanager
     def _open(self) -> Iterator[sqlite3.Connection]:
-        """A transaction on the signals and reentry_locks tables, adding columns a file from before them lacks (null on old rows)."""
+        """A transaction on the signals and reentry_locks tables, adding columns a file from before them lacks (null on old
+        rows, except an unlifted lock's buyback_price)."""
         with transaction(self.path, SCHEMA) as conn:
             conn.execute(LOCK_SCHEMA)
             for table, columns in _ADDED_COLUMNS.items():
@@ -100,6 +103,8 @@ class SignalLog:
                     # shortcut: two servers upgrading one file at once can fail one call on a duplicate column; retry succeeds.
                     if name not in have:
                         conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {type_}")
+                        if name == "buyback_price":
+                            _backfill_buyback_prices(conn)
             yield conn
 
     def before_classifier(
@@ -147,12 +152,13 @@ class SignalLog:
             if fresh:
                 _record(conn, ticker, interval, signal, history, price, cut_loss)
                 if confident and verdict == "cut":
+                    _, buyback_price = _default_plan(history, price, long=False)
                     conn.execute(
-                        "INSERT OR REPLACE INTO reentry_locks (ticker, interval, cut_price, cut_date, lifted) "
-                        "VALUES (?, ?, ?, ?, 0)",
-                        (ticker, interval, price, signal["data_date"]),
+                        "INSERT OR REPLACE INTO reentry_locks (ticker, interval, cut_price, cut_date, buyback_price, lifted) "
+                        "VALUES (?, ?, ?, ?, ?, 0)",
+                        (ticker, interval, price, signal["data_date"], buyback_price),
                     )
-                    lock = _lock_view(price, signal["data_date"], history)
+                    lock = _lock_view(price, signal["data_date"], buyback_price, history)
             fields = {"hit_rate": hit_rate, "min_confidence": min_confidence, "trade_plan": plan}
             if lock is not None:
                 fields["re_entry_lock"] = lock
@@ -168,6 +174,16 @@ class SignalLog:
                 "min_confidence": _min_confidence(conn),
                 "cut_loss_hit_rate": _cut_loss_hit_rate(conn),
             }
+
+
+def _backfill_buyback_prices(conn: sqlite3.Connection) -> None:
+    """Give unlifted locks from before buyback_price their cut Signal's mirrored default Target."""
+    conn.execute(
+        "UPDATE reentry_locks SET buyback_price = (SELECT short_target FROM signals s "
+        "WHERE s.ticker = reentry_locks.ticker AND s.interval = reentry_locks.interval "
+        "AND s.data_date = reentry_locks.cut_date AND s.verdict = 'cut' ORDER BY s.id DESC LIMIT 1) "
+        "WHERE lifted = 0"
+    )
 
 
 def _record(
@@ -205,27 +221,20 @@ def _record(
 def _reentry_lock(
     conn: sqlite3.Connection, ticker: str, interval: Interval, history: pd.DataFrame, now: datetime
 ) -> dict | None:
-    """The Re-entry Lock on the ticker and Interval, or None when there's none; writes the lift when history shows one.
-
-    A lock lifts, for good, on the first completed bar of history after the cut that closes above both its EMA
-    (EMA_LENGTH bars) and the cut's Price; a forming bar can't lift it.
-    """
+    """The Re-entry Lock on the ticker and Interval, or None when there's none; writes the lift when history shows one."""
     row = conn.execute(
-        "SELECT cut_price, cut_date, lifted, lifted_date, lifted_by FROM reentry_locks WHERE ticker = ? AND interval = ?",
+        "SELECT cut_price, cut_date, buyback_price, lifted, lifted_date, lifted_by FROM reentry_locks "
+        "WHERE ticker = ? AND interval = ?",
         (ticker, interval),
     ).fetchone()
     if row is None:
         return None
-    cut_price, cut_date, lifted, lifted_date, lifted_by = row
+    cut_price, cut_date, buyback_price, lifted, lifted_date, lifted_by = row
     if not lifted:
-        index = cast("pd.DatetimeIndex", history.index)
-        # tz_convert(None) gives naive UTC, for bars without a timezone.
-        completed = index + BAR_LENGTH[interval] <= pd.Timestamp(now).tz_convert(index.tz)
-        later = cast("pd.DataFrame", history[(index > pd.Timestamp(cut_date)) & completed])
-        above = cast("pd.DataFrame", later[(later["Close"] > later[f"EMA_{EMA_LENGTH}"]) & (later["Close"] > cut_price)])
-        if above.empty:
-            return _lock_view(cut_price, cut_date, history)
-        lifted_date, lifted_by = cast("pd.Timestamp", above.index[0]).isoformat(), "re_entry"
+        lift = find_lift(history, interval, now, cut_price, cut_date, buyback_price)
+        if lift is None:
+            return _lock_view(cut_price, cut_date, buyback_price, history)
+        lifted_date, lifted_by = lift
         conn.execute(
             "UPDATE reentry_locks SET lifted = 1, lifted_date = ?, lifted_by = ? WHERE ticker = ? AND interval = ?",
             (lifted_date, lifted_by, ticker, interval),
@@ -234,18 +243,47 @@ def _reentry_lock(
         "state": "lifted",
         "cut_price": cut_price,
         "cut_date": cut_date,
+        "buyback_price": buyback_price,
         "lifted_date": lifted_date,
         "lifted_by": lifted_by,
     }
 
 
-def _lock_view(cut_price: float, cut_date: str, history: pd.DataFrame) -> dict:
+def find_lift(
+    history: pd.DataFrame,
+    interval: Interval,
+    now: datetime,
+    cut_price: float,
+    cut_date: str,
+    buyback_price: float | None,
+) -> tuple[str, str] | None:
+    """The first bar of history after the cut that lifts a Re-entry Lock, as (its date, "buyback" or "re_entry"), or None.
+
+    Any bar, forming included, lifts by buyback when its low is at or below buyback_price; a completed bar lifts by
+    re-entry when it closes above both its EMA (EMA_LENGTH bars) and cut_price. A bar doing both lifts by buyback.
+    """
+    index = cast("pd.DatetimeIndex", history.index)
+    # tz_convert(None) gives naive UTC, for bars without a timezone.
+    completed = index + BAR_LENGTH[interval] <= pd.Timestamp(now).tz_convert(index.tz)
+    later = pd.Series(index > pd.Timestamp(cut_date), index=index)
+    # A null Buyback Price (older or plan-less locks) never lifts by buyback.
+    buyback = later & (history["Low"] <= (-math.inf if buyback_price is None else buyback_price))
+    re_entry = later & completed & (history["Close"] > history[f"EMA_{EMA_LENGTH}"]) & (history["Close"] > cut_price)
+    lifting = cast("pd.DataFrame", history[buyback | re_entry])
+    if lifting.empty:
+        return None
+    date = cast("pd.Timestamp", lifting.index[0])
+    return date.isoformat(), "buyback" if buyback[date] else "re_entry"
+
+
+def _lock_view(cut_price: float, cut_date: str, buyback_price: float | None, history: pd.DataFrame) -> dict:
     """A locked Re-entry Lock as the reply shows it, with the Re-entry Price from the current EMA."""
     ema = finite(float(history[f"EMA_{EMA_LENGTH}"].iloc[-1]))
     return {
         "state": "locked",
         "cut_price": cut_price,
         "cut_date": cut_date,
+        "buyback_price": buyback_price,
         "ema": ema,
         "re_entry_price": None if ema is None else max(cut_price, ema),
     }
