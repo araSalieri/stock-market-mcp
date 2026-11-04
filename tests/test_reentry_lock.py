@@ -30,10 +30,11 @@ def bars(closes: list[float], window: int = 60) -> pd.DataFrame:
 FLAT = [100.0] * 60  # EMA 100 and ATR 2; a cut here is at Price 100 on 2024-02-29, Buyback Price 100 - 2 * 2 * 2 = 92
 
 
-def _calls(signal_maker, tmp_path, steps, clocks=None):
+def _calls(signal_maker, tmp_path, steps, clocks=None, clear_at=None):
     """One make() per (history, signal[, interval]) step on a held AAPL, 5m by default; ttl 0, so every call is fresh.
 
-    clocks (optional) is the server's clock at each step; without it, the real clock, so every bar is completed."""
+    clocks (optional) is the server's clock at each step; without it, the real clock, so every bar is completed.
+    clear_at (optional) is the step from which AAPL is no longer held."""
     PortfolioStore(tmp_path / "smm.db").set("AAPL", 10, 110.0)
     fetcher = FakeFetcher(history=[step[0] for step in steps])
     classifier = FakeClassifier(replies=[step[1] for step in steps])
@@ -43,6 +44,8 @@ def _calls(signal_maker, tmp_path, steps, clocks=None):
     for i, step in enumerate(steps):
         if clocks is not None:
             clock[0] = clocks[i]
+        if i == clear_at:
+            PortfolioStore(tmp_path / "smm.db").delete("AAPL")
         replies.append(maker.make("aapl", *step[2:]))
     return replies
 
@@ -225,6 +228,7 @@ def test_lock_rows_from_an_older_database_keep_working(signal_maker, tmp_path):
             "long_stop, long_target, short_stop, short_target) "
             "VALUES ('AAPL', '1d', 1, '2024-02-29T00:00:00', 'cut', 0.7, 100.0, 96.0, 108.0, 104.0, 92.0)"
         )
+    # Not held, so only the missing cut quantity keeps buyback_quantity out.
     locked, old_lifted, lifting = _calls(
         signal_maker,
         tmp_path,
@@ -233,11 +237,13 @@ def test_lock_rows_from_an_older_database_keep_working(signal_maker, tmp_path):
             (bars(FLAT), _signal("buy"), "5m"),
             (bars(FLAT + [101.0]), _signal("buy"), "1d"),
         ],
+        clear_at=0,
     )
 
     assert locked["trade_plan"] is None
     assert locked["re_entry_lock"]["state"] == "locked"
     assert locked["re_entry_lock"]["buyback_price"] == 92.0
+    assert "buyback_quantity" not in locked["re_entry_lock"]
     assert old_lifted["trade_plan"] is not None
     assert old_lifted["re_entry_lock"] == {
         "state": "lifted",
@@ -302,6 +308,31 @@ def test_next_confident_cut_after_a_buyback_lift_gives_a_fresh_buyback_price(sig
     assert lifted["re_entry_lock"]["lifted_by"] == "buyback"
     assert cut["re_entry_lock"]["state"] == "locked"
     assert cut["re_entry_lock"]["buyback_price"] == 72.0
+
+
+def test_cleared_position_gets_the_buyback_quantity_rounded_down_locked_or_lifted(signal_maker, tmp_path):
+    # 10 shares cut at 100 free 1000, which buys 10.87 shares at the Buyback Price 92.
+    _, locked, lifted = _calls(
+        signal_maker,
+        tmp_path,
+        [(bars(FLAT), _signal("cut")), (bars(FLAT), _signal("buy")), (bars(FLAT + [93.0]), _signal("buy"))],
+        clear_at=1,
+    )
+
+    assert locked["re_entry_lock"]["state"] == "locked"
+    assert locked["re_entry_lock"]["buyback_quantity"] == 10
+    assert lifted["re_entry_lock"]["state"] == "lifted"
+    assert lifted["re_entry_lock"]["buyback_quantity"] == 10
+
+
+def test_no_buyback_quantity_while_the_ticker_is_held(signal_maker, tmp_path):
+    cut, locked, lifted = _calls(
+        signal_maker,
+        tmp_path,
+        [(bars(FLAT), _signal("cut")), (bars(FLAT), _signal("buy")), (bars(FLAT + [93.0]), _signal("buy"))],
+    )
+
+    assert all("buyback_quantity" not in reply["re_entry_lock"] for reply in (cut, locked, lifted))
 
 
 def test_first_buy_after_each_lift_is_tagged_with_its_path_for_the_re_entry_hit_rate(signal_maker, tmp_path):
