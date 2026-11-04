@@ -30,6 +30,8 @@ HIT_RATE_MIN_SCORED = 10
 BAND_MIN_SCORED = 30
 # Targets plus Stops among Cut Loss Signals needed before the Cut Loss Hit Rate is reported.
 CUT_LOSS_MIN_SCORED = 30
+# Targets plus Stops among one lift path's tagged buys needed before its Re-entry Hit Rate is reported.
+RE_ENTRY_MIN_SCORED = 30
 # Minimum Confidence until a band has BAND_MIN_SCORED.
 MIN_CONFIDENCE = 0.6
 # Confidence bands are 1 / BANDS_PER_CONFIDENCE wide: 0.1.
@@ -39,6 +41,7 @@ BAND = f"CAST(confidence * {BANDS_PER_CONFIDENCE} + 1e-9 AS INTEGER)"
 
 # Outcome is null while pending; plan prices are the default Trade Plans, null when one has non-positive prices.
 # cut_loss: 1 when the Verdict was cut on a losing Position at any Confidence, 0 when held otherwise, null when not held.
+# re_entry: the lift path (buyback or re_entry) on the first buy after a Re-entry Lock lifted, at any Confidence; else null.
 SCHEMA = """CREATE TABLE IF NOT EXISTS signals (
     id INTEGER PRIMARY KEY,
     ticker TEXT NOT NULL,
@@ -54,7 +57,8 @@ SCHEMA = """CREATE TABLE IF NOT EXISTS signals (
     short_target REAL,
     outcome TEXT,
     scored_at TEXT,
-    cut_loss INTEGER
+    cut_loss INTEGER,
+    re_entry TEXT
 )"""
 
 # Re-entry Lock per ticker and Interval: the confident cut's Price, data date and Buyback Price (its mirrored default
@@ -73,7 +77,7 @@ LOCK_SCHEMA = """CREATE TABLE IF NOT EXISTS reentry_locks (
 )"""
 # Columns added to tables after their first release, as table -> (column, type); missing ones are added on open.
 _ADDED_COLUMNS = {
-    "signals": (("cut_loss", "INTEGER"),),
+    "signals": (("cut_loss", "INTEGER"), ("re_entry", "TEXT")),
     "reentry_locks": (("lifted_date", "TEXT"), ("lifted_by", "TEXT"), ("buyback_price", "REAL")),
 }
 
@@ -134,11 +138,13 @@ class SignalLog:
         atr_multiple: float,
         reward_ratio: float,
     ) -> dict:
-        """The reply fields for a Signal made on history's last bar: hit_rate, min_confidence, trade_plan, re_entry_lock once
-        a confident cut has made one (locked or lifted), and cut_loss and cut_loss_hit_rate when held (losing not None).
+        """The reply fields for a Signal made on history's last bar: hit_rate, min_confidence, trade_plan, re_entry_lock and
+        re_entry_hit_rate once a confident cut has made a lock (locked or lifted), and cut_loss and cut_loss_hit_rate when
+        held (losing not None).
 
         A fresh Signal is recorded with both default Trade Plans at price and its cut_loss: a cut on a losing Position at
-        any Confidence, null when not held. A confident cut also starts a Re-entry Lock at price, replacing any earlier one.
+        any Confidence, null when not held. The first buy recorded after a lock lifted, at any Confidence, is tagged with
+        the lift path. A confident cut also starts a Re-entry Lock at price, replacing any earlier one.
         """
         verdict = signal["verdict"]
         cut_loss = None if losing is None else verdict == "cut" and losing
@@ -150,7 +156,8 @@ class SignalLog:
             buys = confident and verdict == "buy" and (lock is None or lock["state"] == "lifted")
             plan = _trade_plan(history, price, atr_multiple, reward_ratio) if buys else None
             if fresh:
-                _record(conn, ticker, interval, signal, history, price, cut_loss)
+                re_entry = _re_entry_tag(conn, ticker, interval, lock) if verdict == "buy" else None
+                _record(conn, ticker, interval, signal, history, price, cut_loss, re_entry)
                 if confident and verdict == "cut":
                     _, buyback_price = _default_plan(history, price, long=False)
                     conn.execute(
@@ -161,18 +168,20 @@ class SignalLog:
                     lock = _lock_view(price, signal["data_date"], buyback_price, history)
             fields = {"hit_rate": hit_rate, "min_confidence": min_confidence, "trade_plan": plan}
             if lock is not None:
-                fields["re_entry_lock"] = lock
+                fields |= {"re_entry_lock": lock, "re_entry_hit_rate": _re_entry_hit_rate(conn)}
             if cut_loss is not None:
                 fields |= {"cut_loss": confident and cut_loss, "cut_loss_hit_rate": _cut_loss_hit_rate(conn)}
         return fields
 
     def track_record(self, ticker: str | None, interval: str | None) -> dict:
-        """The Track Record's bands, with the server-wide Minimum Confidence and Cut Loss Hit Rate get_signal reports."""
+        """The Track Record's bands, with the server-wide Minimum Confidence, Cut Loss Hit Rate and Re-entry Hit Rate
+        get_signal reports."""
         with self._open() as conn:
             return {
                 "bands": _bands(conn, ticker, interval),
                 "min_confidence": _min_confidence(conn),
                 "cut_loss_hit_rate": _cut_loss_hit_rate(conn),
+                "re_entry_hit_rate": _re_entry_hit_rate(conn),
             }
 
 
@@ -194,13 +203,14 @@ def _record(
     history: pd.DataFrame,
     price: float,
     cut_loss: bool | None,
+    re_entry: str | None,
 ) -> None:
     """Store one pending Signal at its data_date, with both default Trade Plans at price."""
     long_stop, long_target = _default_plan(history, price, long=True)
     short_stop, short_target = _default_plan(history, price, long=False)
     conn.execute(
         "INSERT INTO signals (ticker, interval, prompt_version, data_date, verdict, confidence, price, "
-        "long_stop, long_target, short_stop, short_target, cut_loss) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "long_stop, long_target, short_stop, short_target, cut_loss, re_entry) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             ticker,
             interval,
@@ -214,8 +224,21 @@ def _record(
             short_stop,
             short_target,
             cut_loss,
+            re_entry,
         ),
     )
+
+
+def _re_entry_tag(conn: sqlite3.Connection, ticker: str, interval: str, lock: dict | None) -> str | None:
+    """The lift path to tag a buy with: the lock's, when it has lifted and no buy since its cut is tagged yet."""
+    if lock is None or lock["state"] != "lifted":
+        return None
+    # A tagged buy comes after its lift, so one after this cut belongs to this lock; an earlier cut's never does.
+    tagged = conn.execute(
+        "SELECT 1 FROM signals WHERE ticker = ? AND interval = ? AND re_entry IS NOT NULL AND data_date > ?",
+        (ticker, interval, lock["cut_date"]),
+    ).fetchone()
+    return None if tagged else lock["lifted_by"]
 
 
 def _reentry_lock(
@@ -382,6 +405,21 @@ def _cut_loss_hit_rate(conn: sqlite3.Connection) -> float | None:
         (cut.hit, cut.miss, PROMPT_VERSION),
     ).fetchone()
     return _rate(targets, stops, CUT_LOSS_MIN_SCORED)
+
+
+def _re_entry_hit_rate(conn: sqlite3.Connection) -> dict[str, float | None]:
+    """Targets / (Targets + Stops) over the current prompt version's tagged buys per lift path, all tickers and
+    Intervals; each None under RE_ENTRY_MIN_SCORED."""
+    buy = _RULES["buy"]
+    rates = {}
+    for path in ("buyback", "re_entry"):
+        targets, stops = conn.execute(
+            "SELECT COUNT(*) FILTER (WHERE outcome = ?), COUNT(*) FILTER (WHERE outcome = ?) "
+            "FROM signals WHERE prompt_version = ? AND verdict = 'buy' AND re_entry = ?",
+            (buy.hit, buy.miss, PROMPT_VERSION, path),
+        ).fetchone()
+        rates[path] = _rate(targets, stops, RE_ENTRY_MIN_SCORED)
+    return rates
 
 
 def _rate(hits: int, misses: int, min_scored: int = HIT_RATE_MIN_SCORED) -> float | None:
