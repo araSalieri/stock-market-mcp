@@ -6,15 +6,17 @@ import sqlite3
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime
 from functools import partial
-from typing import cast
+from typing import NamedTuple, cast
 
 import pandas as pd
 
-from stock_market_mcp.bars import EMA_LENGTH, finite, last_value
+from stock_market_mcp.bars import BAR_LENGTH, EMA_LENGTH, Interval, finite, last_value
 from stock_market_mcp.prompt import PROMPT_VERSION, PreviousSignal
 from stock_market_mcp.db import transaction
 from stock_market_mcp.errors import InputError
+from stock_market_mcp.portfolio import PricedPosition
 
 PLAN_ATR_MULTIPLE = 2.0
 PLAN_REWARD_RATIO = 2.0
@@ -29,6 +31,8 @@ HIT_RATE_MIN_SCORED = 10
 BAND_MIN_SCORED = 30
 # Targets plus Stops among Cut Loss Signals needed before the Cut Loss Hit Rate is reported.
 CUT_LOSS_MIN_SCORED = 30
+# Targets plus Stops among one lift path's tagged buys needed before its Re-entry Hit Rate is reported.
+RE_ENTRY_MIN_SCORED = 30
 # Minimum Confidence until a band has BAND_MIN_SCORED.
 MIN_CONFIDENCE = 0.6
 # Confidence bands are 1 / BANDS_PER_CONFIDENCE wide: 0.1.
@@ -38,6 +42,7 @@ BAND = f"CAST(confidence * {BANDS_PER_CONFIDENCE} + 1e-9 AS INTEGER)"
 
 # Outcome is null while pending; plan prices are the default Trade Plans, null when one has non-positive prices.
 # cut_loss: 1 when the Verdict was cut on a losing Position at any Confidence, 0 when held otherwise, null when not held.
+# re_entry: the lift path (buyback or re_entry) on the first buy after a Re-entry Lock lifted, at any Confidence; else null.
 SCHEMA = """CREATE TABLE IF NOT EXISTS signals (
     id INTEGER PRIMARY KEY,
     ticker TEXT NOT NULL,
@@ -53,18 +58,31 @@ SCHEMA = """CREATE TABLE IF NOT EXISTS signals (
     short_target REAL,
     outcome TEXT,
     scored_at TEXT,
-    cut_loss INTEGER
+    cut_loss INTEGER,
+    re_entry TEXT
 )"""
 
-# Re-entry Lock per ticker and Interval: the confident cut's Price and data date; lifted stays 1 until the next such cut.
+# Re-entry Lock per ticker and Interval: the confident cut's Price, data date and Buyback Price (its mirrored default
+# Target, null when that plan can't be made); lifted stays 1 until the next such cut.
+# lifted_date is the lifting bar's date and lifted_by buyback or re_entry; both null on rows lifted before they existed.
+# cut_quantity is the held Position's quantity at the cut; null when not held or on rows from before it existed.
 LOCK_SCHEMA = """CREATE TABLE IF NOT EXISTS reentry_locks (
     ticker TEXT NOT NULL,
     interval TEXT NOT NULL,
     cut_price REAL NOT NULL,
     cut_date TEXT NOT NULL,
+    buyback_price REAL,
     lifted INTEGER NOT NULL,
+    lifted_date TEXT,
+    lifted_by TEXT,
+    cut_quantity REAL,
     PRIMARY KEY (ticker, interval)
 )"""
+# Columns added to tables after their first release, as table -> (column, type); missing ones are added on open.
+_ADDED_COLUMNS = {
+    "signals": (("cut_loss", "INTEGER"), ("re_entry", "TEXT")),
+    "reentry_locks": (("lifted_date", "TEXT"), ("lifted_by", "TEXT"), ("buyback_price", "REAL"), ("cut_quantity", "REAL")),
+}
 
 
 class SignalLog:
@@ -82,12 +100,20 @@ class SignalLog:
 
     @contextmanager
     def _open(self) -> Iterator[sqlite3.Connection]:
-        """A transaction on the signals and reentry_locks tables, adding cut_loss to a file from before it existed (null on old rows)."""
+        """A transaction on the signals and reentry_locks tables, adding columns a file from before them lacks (null on old
+        rows, except an unlifted lock's buyback_price)."""
         with transaction(self.path, SCHEMA) as conn:
             conn.execute(LOCK_SCHEMA)
-            # shortcut: two servers upgrading one file at once can fail one call on a duplicate column; retry succeeds.
-            if "cut_loss" not in {column[1] for column in conn.execute("PRAGMA table_info(signals)")}:
-                conn.execute("ALTER TABLE signals ADD COLUMN cut_loss INTEGER")
+            added = set()
+            for table, columns in _ADDED_COLUMNS.items():
+                have = {column[1] for column in conn.execute(f"PRAGMA table_info({table})")}
+                for name, type_ in columns:
+                    # shortcut: two servers upgrading one file at once can fail one call on a duplicate column; retry succeeds.
+                    if name not in have:
+                        conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {type_}")
+                        added.add(name)
+            if "buyback_price" in added:
+                _backfill_buyback_prices(conn)
             yield conn
 
     def before_classifier(
@@ -106,54 +132,95 @@ class SignalLog:
     def after_classifier(
         self,
         ticker: str,
-        interval: str,
+        interval: Interval,
         history: pd.DataFrame,
         price: float,
         signal: dict,
         *,
+        now: datetime,
         fresh: bool,
-        losing: bool | None,
+        held: PricedPosition | None,
         atr_multiple: float,
         reward_ratio: float,
     ) -> dict:
-        """The reply fields for a Signal made on history's last bar: hit_rate, min_confidence, trade_plan, re_entry_lock when
-        locked, and cut_loss and cut_loss_hit_rate when held (losing not None).
+        """The reply fields for a Signal made on history's last bar: hit_rate, min_confidence, trade_plan, re_entry_lock and
+        re_entry_hit_rate once a confident cut has made a lock (locked or lifted), and cut_loss and cut_loss_hit_rate when
+        held.
 
         A fresh Signal is recorded with both default Trade Plans at price and its cut_loss: a cut on a losing Position at
-        any Confidence, null when not held. A confident cut also starts a Re-entry Lock at price, replacing any earlier one.
+        any Confidence, null when not held. The first buy recorded after a lock lifted, at any Confidence, is tagged with
+        the lift path. A confident cut also starts a Re-entry Lock at price, replacing any earlier one.
         """
         verdict = signal["verdict"]
-        cut_loss = None if losing is None else verdict == "cut" and losing
+        cut_loss = None if held is None else verdict == "cut" and held.losing
         with self._open() as conn:
             min_confidence = _min_confidence(conn)
             hit_rate = _hit_rate(conn, ticker, interval, verdict)
             confident = min_confidence is not None and signal["confidence"] >= min_confidence
-            lock = _reentry_lock(conn, ticker, interval, history)
-            buys = confident and verdict == "buy" and lock is None
+            lock = _reentry_lock(conn, ticker, interval, lambda: history, now, held=held is not None)
+            buys = confident and verdict == "buy" and (lock is None or lock["state"] == "lifted")
             plan = _trade_plan(history, price, atr_multiple, reward_ratio) if buys else None
             if fresh:
-                _record(conn, ticker, interval, signal, history, price, cut_loss)
+                re_entry = _re_entry_tag(conn, ticker, interval, lock) if verdict == "buy" else None
+                _record(conn, ticker, interval, signal, history, price, cut_loss, re_entry)
                 if confident and verdict == "cut":
+                    _, buyback_price = _default_plan(history, price, long=False)
+                    quantity = None if held is None else held.quantity
+                    cut = _Cut(price, signal["data_date"], buyback_price, quantity)
                     conn.execute(
-                        "INSERT OR REPLACE INTO reentry_locks VALUES (?, ?, ?, ?, 0)",
-                        (ticker, interval, price, signal["data_date"]),
+                        "INSERT OR REPLACE INTO reentry_locks "
+                        "(ticker, interval, cut_price, cut_date, buyback_price, cut_quantity, lifted) "
+                        "VALUES (?, ?, ?, ?, ?, ?, 0)",
+                        (ticker, interval, *cut),
                     )
-                    lock = _lock_view(price, signal["data_date"], history)
+                    # Still held at the cut, so no Buyback Quantity.
+                    lock = _lock_view("locked", cut, held=True, **_re_entry_fields(cut, history))
             fields = {"hit_rate": hit_rate, "min_confidence": min_confidence, "trade_plan": plan}
             if lock is not None:
-                fields["re_entry_lock"] = lock
+                fields |= {"re_entry_lock": lock, "re_entry_hit_rate": _re_entry_hit_rate(conn)}
             if cut_loss is not None:
                 fields |= {"cut_loss": confident and cut_loss, "cut_loss_hit_rate": _cut_loss_hit_rate(conn)}
         return fields
 
+    def scan_locks(
+        self, ticker: str, history: Callable[[Interval], pd.DataFrame], now: datetime, *, held: bool
+    ) -> list[dict]:
+        """Every Re-entry Lock on the ticker, one per Interval with its Interval, as get_signal shows it; writes any lift
+        history(interval) shows. An unlifted lock whose history or lift check fails shows its stored state with stale and
+        the error."""
+        with self._open() as conn:
+            rows = conn.execute(
+                f"SELECT interval, {_CUT_COLUMNS} FROM reentry_locks WHERE ticker = ? ORDER BY interval", (ticker,)
+            ).fetchall()
+            locks = []
+            for interval, *cut in rows:
+                try:
+                    lock = _reentry_lock(conn, ticker, interval, partial(history, interval), now, held=held)
+                except Exception as exc:
+                    lock = _lock_view("locked", _Cut(*cut), held=held, stale=True, error=str(exc))
+                locks.append({"interval": interval, **cast("dict", lock)})
+        return locks
+
     def track_record(self, ticker: str | None, interval: str | None) -> dict:
-        """The Track Record's bands, with the server-wide Minimum Confidence and Cut Loss Hit Rate get_signal reports."""
+        """The Track Record's bands, with the server-wide Minimum Confidence, Cut Loss Hit Rate and Re-entry Hit Rate
+        get_signal reports."""
         with self._open() as conn:
             return {
                 "bands": _bands(conn, ticker, interval),
                 "min_confidence": _min_confidence(conn),
                 "cut_loss_hit_rate": _cut_loss_hit_rate(conn),
+                "re_entry_hit_rate": _re_entry_hit_rate(conn),
             }
+
+
+def _backfill_buyback_prices(conn: sqlite3.Connection) -> None:
+    """Give unlifted locks from before buyback_price their cut Signal's mirrored default Target."""
+    conn.execute(
+        "UPDATE reentry_locks SET buyback_price = (SELECT short_target FROM signals s "
+        "WHERE s.ticker = reentry_locks.ticker AND s.interval = reentry_locks.interval "
+        "AND s.data_date = reentry_locks.cut_date AND s.verdict = 'cut' ORDER BY s.id DESC LIMIT 1) "
+        "WHERE lifted = 0"
+    )
 
 
 def _record(
@@ -164,13 +231,14 @@ def _record(
     history: pd.DataFrame,
     price: float,
     cut_loss: bool | None,
+    re_entry: str | None,
 ) -> None:
     """Store one pending Signal at its data_date, with both default Trade Plans at price."""
     long_stop, long_target = _default_plan(history, price, long=True)
     short_stop, short_target = _default_plan(history, price, long=False)
     conn.execute(
         "INSERT INTO signals (ticker, interval, prompt_version, data_date, verdict, confidence, price, "
-        "long_stop, long_target, short_stop, short_target, cut_loss) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "long_stop, long_target, short_stop, short_target, cut_loss, re_entry) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             ticker,
             interval,
@@ -184,32 +252,104 @@ def _record(
             short_stop,
             short_target,
             cut_loss,
+            re_entry,
         ),
     )
 
 
-def _reentry_lock(conn: sqlite3.Connection, ticker: str, interval: str, history: pd.DataFrame) -> dict | None:
-    """The Re-entry Lock on the ticker and Interval, or None when there's none; writes the lift when history shows one.
+def _re_entry_tag(conn: sqlite3.Connection, ticker: str, interval: str, lock: dict | None) -> str | None:
+    """The lift path to tag a buy with: the lock's, when it has lifted and no buy since its cut is tagged yet."""
+    if lock is None or lock["state"] != "lifted":
+        return None
+    # A tagged buy comes after its lift, so one after this cut belongs to this lock; an earlier cut's never does.
+    tagged = conn.execute(
+        "SELECT 1 FROM signals WHERE ticker = ? AND interval = ? AND re_entry IS NOT NULL AND data_date > ?",
+        (ticker, interval, lock["cut_date"]),
+    ).fetchone()
+    return None if tagged else lock["lifted_by"]
 
-    A lock lifts, for good, once a bar of history after the cut closes above both the EMA (EMA_LENGTH bars) and the cut's Price.
-    """
+
+def _reentry_lock(
+    conn: sqlite3.Connection,
+    ticker: str,
+    interval: Interval,
+    history: Callable[[], pd.DataFrame],
+    now: datetime,
+    *,
+    held: bool,
+) -> dict | None:
+    """The Re-entry Lock on the ticker and Interval, or None when there's none; writes the lift when history() shows one.
+
+    history is only called for an unlifted lock, so a lifted one needs no fetch."""
     row = conn.execute(
-        "SELECT cut_price, cut_date FROM reentry_locks WHERE ticker = ? AND interval = ? AND lifted = 0",
+        f"SELECT {_CUT_COLUMNS}, lifted, lifted_date, lifted_by FROM reentry_locks WHERE ticker = ? AND interval = ?",
         (ticker, interval),
     ).fetchone()
     if row is None:
         return None
-    cut_price, cut_date = row
-    later = cast("pd.DataFrame", history[history.index > pd.Timestamp(cut_date)])
-    if ((later["Close"] > later[f"EMA_{EMA_LENGTH}"]) & (later["Close"] > cut_price)).any():
-        conn.execute("UPDATE reentry_locks SET lifted = 1 WHERE ticker = ? AND interval = ?", (ticker, interval))
+    cut = _Cut(*row[:4])
+    lifted, lifted_date, lifted_by = row[4:]
+    if not lifted:
+        bars = history()
+        lift = _find_lift(bars, interval, now, cut)
+        if lift is None:
+            return _lock_view("locked", cut, held=held, **_re_entry_fields(cut, bars))
+        lifted_date, lifted_by = lift
+        conn.execute(
+            "UPDATE reentry_locks SET lifted = 1, lifted_date = ?, lifted_by = ? WHERE ticker = ? AND interval = ?",
+            (lifted_date, lifted_by, ticker, interval),
+        )
+    return _lock_view("lifted", cut, held=held, lifted_date=lifted_date, lifted_by=lifted_by)
+
+
+class _Cut(NamedTuple):
+    """The confident cut a Re-entry Lock starts from; buyback_price and quantity are null when unknown."""
+
+    price: float
+    date: str
+    buyback_price: float | None
+    quantity: float | None
+
+
+# A Re-entry Lock's _Cut fields, in order.
+_CUT_COLUMNS = "cut_price, cut_date, buyback_price, cut_quantity"
+
+
+def _lock_view(state: str, cut: _Cut, *, held: bool, **extra: object) -> dict:
+    """A Re-entry Lock as the reply shows it, with extra after the cut's fields. While not held it adds the Buyback
+    Quantity: whole shares the cut's proceeds buy at the Buyback Price, fees left out; absent while held (buying more
+    then is averaging down) or when the cut quantity or Buyback Price is unknown."""
+    view = {"state": state, "cut_price": cut.price, "cut_date": cut.date, "buyback_price": cut.buyback_price, **extra}
+    if not held and cut.quantity is not None and cut.buyback_price is not None:
+        view["buyback_quantity"] = math.floor(cut.quantity * cut.price / cut.buyback_price)
+    return view
+
+
+def _re_entry_fields(cut: _Cut, history: pd.DataFrame) -> dict:
+    """A locked Re-entry Lock's current EMA and Re-entry Price."""
+    ema = finite(float(history[f"EMA_{EMA_LENGTH}"].iloc[-1]))
+    return {"ema": ema, "re_entry_price": None if ema is None else max(cut.price, ema)}
+
+
+def _find_lift(history: pd.DataFrame, interval: Interval, now: datetime, cut: _Cut) -> tuple[str, str] | None:
+    """The first bar of history after the cut that lifts a Re-entry Lock, as (its date, "buyback" or "re_entry"), or None.
+
+    Any bar, forming included, lifts by buyback when its low is at or below the cut's Buyback Price; a completed bar
+    lifts by re-entry when it closes above both its EMA (EMA_LENGTH bars) and the cut's Price. A bar doing both lifts by
+    buyback.
+    """
+    index = cast("pd.DatetimeIndex", history.index)
+    # tz_convert(None) gives naive UTC, for bars without a timezone.
+    completed = index + BAR_LENGTH[interval] <= pd.Timestamp(now).tz_convert(index.tz)
+    later = pd.Series(index > pd.Timestamp(cut.date), index=index)
+    # A null Buyback Price (older or plan-less locks) never lifts by buyback.
+    buyback = later & (history["Low"] <= (-math.inf if cut.buyback_price is None else cut.buyback_price))
+    re_entry = later & completed & (history["Close"] > history[f"EMA_{EMA_LENGTH}"]) & (history["Close"] > cut.price)
+    lifting = cast("pd.DataFrame", history[buyback | re_entry])
+    if lifting.empty:
         return None
-    return _lock_view(cut_price, cut_date, history)
-
-
-def _lock_view(cut_price: float, cut_date: str, history: pd.DataFrame) -> dict:
-    """A Re-entry Lock as the reply shows it: {cut_price, cut_date, ema}."""
-    return {"cut_price": cut_price, "cut_date": cut_date, "ema": finite(float(history[f"EMA_{EMA_LENGTH}"].iloc[-1]))}
+    date = cast("pd.Timestamp", lifting.index[0])
+    return date.isoformat(), "buyback" if buyback[date] else "re_entry"
 
 
 def _score(conn: sqlite3.Connection, ticker: str, interval: str, history: pd.DataFrame, scored_at: str) -> None:
@@ -305,6 +445,21 @@ def _cut_loss_hit_rate(conn: sqlite3.Connection) -> float | None:
         (cut.hit, cut.miss, PROMPT_VERSION),
     ).fetchone()
     return _rate(targets, stops, CUT_LOSS_MIN_SCORED)
+
+
+def _re_entry_hit_rate(conn: sqlite3.Connection) -> dict[str, float | None]:
+    """Targets / (Targets + Stops) over the current prompt version's tagged buys per lift path, all tickers and
+    Intervals; each None under RE_ENTRY_MIN_SCORED."""
+    buy = _RULES["buy"]
+    rates = {}
+    for path in ("buyback", "re_entry"):
+        targets, stops = conn.execute(
+            "SELECT COUNT(*) FILTER (WHERE outcome = ?), COUNT(*) FILTER (WHERE outcome = ?) "
+            "FROM signals WHERE prompt_version = ? AND verdict = 'buy' AND re_entry = ?",
+            (buy.hit, buy.miss, PROMPT_VERSION, path),
+        ).fetchone()
+        rates[path] = _rate(targets, stops, RE_ENTRY_MIN_SCORED)
+    return rates
 
 
 def _rate(hits: int, misses: int, min_scored: int = HIT_RATE_MIN_SCORED) -> float | None:

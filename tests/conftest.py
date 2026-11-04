@@ -48,9 +48,9 @@ def app_log(caplog):
 
 @pytest.fixture
 def signal_maker(tmp_path):
-    """Factory for a SignalMaker over a fetcher and classifier; db_path defaults to tmp_path / "server.db"."""
+    """Factory for a SignalMaker over a fetcher and classifier; db_path defaults to tmp_path / "server.db", now to the real clock."""
 
-    def make(fetcher, classifier, *, db_path=None, ttl=SIGNAL_TTL_SECONDS):
-        return SignalMaker(fetcher, classifier, db_path or tmp_path / "server.db", ttl, lambda: datetime.now(UTC))
+    def make(fetcher, classifier, *, db_path=None, ttl=SIGNAL_TTL_SECONDS, now=lambda: datetime.now(UTC)):
+        return SignalMaker(fetcher, classifier, db_path or tmp_path / "server.db", ttl, now)
 
     return make
