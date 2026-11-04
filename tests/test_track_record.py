@@ -58,6 +58,7 @@ async def test_counts_signals_by_band_and_verdict_in_ascending_order(server_url,
         ],
         "min_confidence": 0.6,
         "cut_loss_hit_rate": None,
+        "re_entry_hit_rate": {"buyback": None, "re_entry": None},
     }
 
 
@@ -177,3 +178,17 @@ async def test_min_confidence_and_cut_loss_hit_rate_match_get_signal(server_url,
 
     assert track_record["min_confidence"] == signal["min_confidence"] == 0.7
     assert track_record["cut_loss_hit_rate"] == signal["position"]["cut_loss_hit_rate"] == pytest.approx(0.6)
+
+
+@pytest.mark.parametrize("args", [{}, {"ticker": "aapl", "interval": "1d"}])
+async def test_re_entry_hit_rate_is_per_lift_path_over_tagged_buys_null_at_29_and_server_wide(server_url, tmp_path, args):
+    seeds = [
+        _seed({"target": 18, "stop": 12, "expired": 4, None: 4}, ticker="MSFT", interval="1h", re_entry="buyback"),
+        _seed({"target": 10, "stop": 19}, ticker="MSFT", interval="1h", re_entry="re_entry"),
+        # Untagged buys and other prompt versions are left out.
+        _seed({"stop": 10}, ticker="MSFT", interval="1h"),
+        _seed({"stop": 10}, re_entry="re_entry", prompt_version=PROMPT_VERSION - 1),
+    ]
+    reply = await _track_record(server_url, tmp_path, seeds, args)
+
+    assert reply["re_entry_hit_rate"] == {"buyback": pytest.approx(0.6), "re_entry": None}

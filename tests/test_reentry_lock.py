@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 
 import pandas as pd
 import pytest
-from fakes import FakeClassifier, FakeFetcher
+from fakes import FakeClassifier, FakeFetcher, seed_signals
 
 from stock_market_mcp.portfolio import PortfolioStore
 
@@ -86,6 +86,7 @@ def test_buy_without_a_lock_has_no_lock_key(signal_maker, tmp_path):
 
     assert buy["trade_plan"] is not None
     assert "re_entry_lock" not in buy
+    assert "re_entry_hit_rate" not in buy
 
 
 def test_weak_cut_does_not_lock(signal_maker, tmp_path):
@@ -332,3 +333,27 @@ def test_no_buyback_quantity_while_the_ticker_is_held(signal_maker, tmp_path):
     )
 
     assert all("buyback_quantity" not in reply["re_entry_lock"] for reply in (cut, locked, lifted))
+
+
+def test_first_buy_after_each_lift_is_tagged_with_its_path_for_the_re_entry_hit_rate(signal_maker, tmp_path):
+    # 29 scored buys per path elsewhere, at a band that keeps the Minimum Confidence at 0.1, so each tagged buy here
+    # completes 30 when scored.
+    for path in ("buyback", "re_entry"):
+        seed_signals(tmp_path / "smm.db", ["target"] * 15 + ["stop"] * 14, confidence=0.1, ticker="MSFT", re_entry=path)
+    dip = FLAT + [93.0]  # low 92 lifts the cut at 100 by buyback
+    jump = dip + [200.0]  # closes above the EMA and the 93 cut: lifts by re-entry, and scores the buys at 93 as Targets
+    *_, last = _calls(
+        signal_maker,
+        tmp_path,
+        [
+            (bars(FLAT), _signal("cut")),
+            (bars(dip), _signal("buy", 0.05)),  # first after the buyback lift, below the Minimum Confidence: tagged
+            (bars(dip), _signal("buy")),  # second on the same lock: not tagged
+            (bars(dip), _signal("cut")),  # the next confident cut starts over
+            (bars(jump), _signal("buy")),  # first after the re-entry lift: tagged
+            (bars(jump), _signal("buy")),
+            (bars(jump + [300.0]), _signal("buy")),  # scores the buys at 200 as Targets
+        ],
+    )
+
+    assert last["re_entry_hit_rate"] == {"buyback": pytest.approx(16 / 30), "re_entry": pytest.approx(16 / 30)}
