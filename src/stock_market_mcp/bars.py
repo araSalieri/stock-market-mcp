@@ -1,6 +1,7 @@
 """Price history for one Interval: its period rules and the indicators joined onto the bars."""
 
 import math
+from datetime import timedelta
 from typing import Literal, NamedTuple, cast
 
 import pandas as pd
@@ -28,6 +29,16 @@ _PERIODS: dict[Interval, _Periods] = {
     "15m": _Periods("1mo", "60 days", ("1d", "5d", "1mo")),
     "1h": _Periods("6mo", "730 days", ("1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "ytd")),
     "1d": _Periods("1y", None, ()),
+}
+
+
+# How long one bar of each Interval lasts: a bar is completed once its start plus this is at or before the clock.
+BAR_LENGTH: dict[Interval, timedelta] = {
+    "1m": timedelta(minutes=1),
+    "5m": timedelta(minutes=5),
+    "15m": timedelta(minutes=15),
+    "1h": timedelta(hours=1),
+    "1d": timedelta(days=1),
 }
 
 
