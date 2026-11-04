@@ -1,5 +1,7 @@
 > [!WARNING]
-> This repository is written by AI, except for this text :P. Its just for my own curiosity how to use [mattpock skills](https://github.com/mattpocock/skills) and how MCP works
+> This repository is written by AI, except for this text :P. It's just for my own curiosity about how to use [mattpocock skills](https://github.com/mattpocock/skills) and how MCP works
+>
+> You can contribute to this repository or clone it. I don't mind :D
 
 # stock-market-mcp
 
