@@ -76,6 +76,7 @@ class SignalMaker:
             now=self._now(),
             fresh=fresh,
             losing=held.losing if held is not None else None,
+            quantity=held.quantity if held is not None else None,
             atr_multiple=atr_multiple,
             reward_ratio=reward_ratio,
         )
