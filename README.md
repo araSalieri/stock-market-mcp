@@ -1,3 +1,6 @@
+> [!WARNING]
+> This repository is written by AI, except for this text :P. Its just for my own curiosity how to use [mattpock skills](https://github.com/mattpocock/skills) and how MCP works
+
 # stock-market-mcp
 
 An MCP server that gives coding agents stock market data, indicators and advisory trading guidance from Yahoo Finance. It never places orders. It writes only its own state: your Watchlists, your Portfolio and a log of past Signals.
@@ -8,13 +11,13 @@ An MCP server that gives coding agents stock market data, indicators and advisor
 |------|--------------|
 | `get_quote` | Current price and currency |
 | `get_fundamentals` | Name, sector, industry, market cap |
-| `get_signal` | Long-only Verdict with confidence, rationale and a Trade Plan (entry, stop, target): buy or hold on a ticker not held, buy (add), hold or cut (exit now) on a held Position. Only a buy at or above the Minimum Confidence gets a Trade Plan, and not under a Re-entry Lock: a cut at or above the Minimum Confidence locks the ticker on that Interval until a later bar closes above both the 10-bar EMA and the cut's Price. While locked, `re_entry_lock` carries `cut_price`, `cut_date` and the current `ema`; the key is absent otherwise. The server sets that from past buy Signals' Hit Rates (there is no `min_confidence` argument) and shows it as `min_confidence`; null means no buy gets a Trade Plan. `hit_rate` is the Hit Rate of past Signals of the same kind for the ticker and Interval, null until enough are scored. On a held ticker, `position` carries the Position, its Unrealised P&L at the Signal's Price, and `cut_loss`: true when the Verdict is cut on a losing Position at or above the Minimum Confidence (a Cut Loss), and `cut_loss_hit_rate`: the Cut Loss Hit Rate over scored past cuts on a losing Position at any Confidence, across all tickers and Intervals, null until 30 are scored. A cut is scored against the default Trade Plan distances mirrored below the Price. Needs an OpenRouter key. |
-| `get_track_record` | Track Record: how the current prompt version's Signals turned out, per 0.1 Confidence band (ascending, bands with Signals only) and Verdict. Buy and cut show Target, Stop, Expired and pending counts and a Hit Rate (Targets / (Targets + Stops)); hold shows Quiet, Missed and pending and a Hit Rate (Quiet / (Quiet + Missed)). Each Hit Rate is null until 10 are scored. Each band also has `buy_hit_rate`, buy Targets / (Targets + Stops), the rate the Minimum Confidence is set from (null until 30 are scored). The reply carries the server-wide `min_confidence` and `cut_loss_hit_rate`, the same as `get_signal` shows, unaffected by the filters. Optional `ticker` and `interval` narrow it; Signals with no default Trade Plan are left out. Reads the Signal log only, no market data or OpenRouter call. |
+| `get_signal` | Long-only advice for a ticker: buy or hold, plus cut (exit now) if you hold it. Comes with a confidence, a rationale and, for a confident buy, a Trade Plan (entry, stop, target). After a confident cut, buys get no Trade Plan until the price recovers (Re-entry Lock). On a held ticker it also shows your Unrealised P&L. Needs an OpenRouter key. |
+| `get_track_record` | How past Signals turned out, by confidence and Verdict, optionally for one ticker or Interval |
 | `set_watchlist` | Save a Watchlist of up to 15 tickers. An empty list deletes it. |
 | `get_watchlists` | Every saved Watchlist |
-| `scan` | Price, previous day's range, ATR, RSI, Gap, Relative Volume and VWAP distance for a Watchlist or list of tickers |
-| `set_position` | Save the long Position for a ticker: quantity and average cost. Replaces any held one; quantity 0 deletes it and replies with just the ticker and quantity 0. At most 15 Positions. |
-| `get_portfolio` | Every Position with its latest price and Unrealised P&L in the ticker's own currency, with no total |
+| `scan` | Quick numbers (price, ATR, RSI, Gap, Relative Volume, VWAP distance) for a Watchlist or list of tickers, to pick which deserve a Signal |
+| `set_position` | Save the quantity and average cost you hold in a ticker. Quantity 0 deletes it. At most 15 Positions. |
+| `get_portfolio` | Every Position with its latest price and Unrealised P&L |
 
 Each tool's arguments and output are described in its MCP schema. Domain terms are defined in [GLOSSARY.md](GLOSSARY.md).
 
@@ -35,13 +38,35 @@ From source (needs [uv](https://docs.astral.sh/uv/)):
 uv run stock-market-mcp
 ```
 
-The server listens at `http://127.0.0.1:8000/mcp` (streamable HTTP). Connect Claude Code with:
+The server listens at `http://127.0.0.1:8000/mcp` (streamable HTTP). The compose setup listens on all interfaces and has no auth, so anyone on your LAN can read and replace your Watchlists and Portfolio. Both are kept in a SQLite file on a named volume and survive restarts. Older `watchlists.json` files are not imported: re-create those lists with `set_watchlist`.
+
+## Connect an agent
+
+Start the server first; each agent connects to `http://127.0.0.1:8000/mcp`.
+
+**Claude Code:**
 
 ```sh
 claude mcp add --transport http stock-market http://127.0.0.1:8000/mcp
 ```
 
-The compose setup listens on all interfaces and has no auth, so anyone on your LAN can read and replace your Watchlists and Portfolio. Both are kept in a SQLite file on a named volume and survive restarts. Older `watchlists.json` files are not imported: re-create those lists with `set_watchlist`.
+**Pi:** Pi has no built-in MCP support, so install [pi-mcp-adapter](https://github.com/nicobailon/pi-mcp-adapter) with `pi install npm:pi-mcp-adapter` and restart Pi. Then add the server to `.mcp.json` in your project or `~/.config/mcp/mcp.json` for all projects:
+
+```json
+{
+  "mcpServers": {
+    "stock-market": { "url": "http://127.0.0.1:8000/mcp" }
+  }
+}
+```
+
+**Hermes:** add the server to `~/.hermes/config.yaml`, then run `/reload-mcp` or restart Hermes:
+
+```yaml
+mcp_servers:
+  stock-market:
+    url: "http://127.0.0.1:8000/mcp"
+```
 
 ## Configuration
 
