@@ -14,7 +14,7 @@ from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import Strict
 
-from stock_market_mcp.bars import Interval, finite
+from stock_market_mcp.bars import Interval, finite, history
 from stock_market_mcp.cache import (
     FUNDAMENTALS_TTL_SECONDS,
     HISTORY_TTL_SECONDS,
@@ -156,7 +156,7 @@ def build_server(
 
     @audited_tool
     def scan(watchlist: str | None = None, tickers: list[str] | None = None) -> list[dict]:
-        """Scan a Watchlist or an ad-hoc ticker list: per ticker the Price and its time, the previous day's high, low and close, daily ATR % and RSI, the Gap, Relative Volume and distance from this session's VWAP. No Verdict, no classifier call; a failing ticker gets its own error entry."""
+        """Scan a Watchlist or an ad-hoc ticker list: per ticker the Price and its time, the previous day's high, low and close, daily ATR % and RSI, the Gap, Relative Volume and distance from this session's VWAP, and re_entry_locks: one entry per Interval with a Re-entry Lock on the ticker (empty when none), as {interval} plus the fields get_signal's re_entry_lock has; an unlifted lock is checked for a lift against that Interval's bars at its default period, and a lift found is recorded, so get_signal shows it too; a lifted one needs no fetch; when that check fails the entry has the lock's stored state (state, cut_price, cut_date, buyback_price and any buyback_quantity, no ema or re_entry_price) with stale: true and the error, and the ticker's other numbers still come through. No Verdict, no classifier call; a failing ticker gets its own error entry."""
         if (watchlist is None) == (tickers is None):
             raise ToolError("give exactly one of watchlist or tickers")
         if watchlist is not None:
@@ -165,10 +165,15 @@ def build_server(
                 raise ToolError(f"no Watchlist named {watchlist!r}")
             tickers = lists[watchlist]
         names = normalise_tickers(cast("list[str]", tickers))
+        held = portfolio.load()
         results = []
         for ticker in names:
             try:
-                results.append({"ticker": ticker, **scan_ticker(fetcher, ticker, now())})
+                clock = now()
+                locks = signal_log.scan_locks(
+                    ticker, lambda interval: history(fetcher, ticker, interval, None), clock, held=ticker in held
+                )
+                results.append({"ticker": ticker, **scan_ticker(fetcher, ticker, clock), "re_entry_locks": locks})
             except Exception as exc:
                 log.exception(_error_line(f"scan ticker={ticker}", exc))
                 results.append({"ticker": ticker, "error": str(exc)})

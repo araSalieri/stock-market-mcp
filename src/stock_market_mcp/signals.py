@@ -155,7 +155,7 @@ class SignalLog:
             min_confidence = _min_confidence(conn)
             hit_rate = _hit_rate(conn, ticker, interval, verdict)
             confident = min_confidence is not None and signal["confidence"] >= min_confidence
-            lock = _reentry_lock(conn, ticker, interval, history, now, held=quantity is not None)
+            lock = _reentry_lock(conn, ticker, interval, lambda: history, now, held=quantity is not None)
             buys = confident and verdict == "buy" and (lock is None or lock["state"] == "lifted")
             plan = _trade_plan(history, price, atr_multiple, reward_ratio) if buys else None
             if fresh:
@@ -177,6 +177,29 @@ class SignalLog:
             if cut_loss is not None:
                 fields |= {"cut_loss": confident and cut_loss, "cut_loss_hit_rate": _cut_loss_hit_rate(conn)}
         return fields
+
+    def scan_locks(
+        self, ticker: str, history: Callable[[Interval], pd.DataFrame], now: datetime, *, held: bool
+    ) -> list[dict]:
+        """Every Re-entry Lock on the ticker, one per Interval with its Interval, as get_signal shows it; writes any lift
+        history(interval) shows. An unlifted lock whose history or lift check fails shows its stored state with stale and
+        the error."""
+        with self._open() as conn:
+            rows = conn.execute(
+                "SELECT interval, cut_price, cut_date, buyback_price, cut_quantity FROM reentry_locks "
+                "WHERE ticker = ? ORDER BY interval",
+                (ticker,),
+            ).fetchall()
+            locks = []
+            for interval, cut_price, cut_date, buyback_price, cut_quantity in rows:
+                try:
+                    lock = _reentry_lock(conn, ticker, interval, partial(history, interval), now, held=held)
+                except Exception as exc:
+                    stored = {"state": "locked", "cut_price": cut_price, "cut_date": cut_date, "buyback_price": buyback_price}
+                    quantity = _buyback_quantity(cut_price, buyback_price, cut_quantity, held=held)
+                    lock = stored | quantity | {"stale": True, "error": str(exc)}
+                locks.append({"interval": interval, **cast("dict", lock)})
+        return locks
 
     def track_record(self, ticker: str | None, interval: str | None) -> dict:
         """The Track Record's bands, with the server-wide Minimum Confidence, Cut Loss Hit Rate and Re-entry Hit Rate
@@ -247,9 +270,17 @@ def _re_entry_tag(conn: sqlite3.Connection, ticker: str, interval: str, lock: di
 
 
 def _reentry_lock(
-    conn: sqlite3.Connection, ticker: str, interval: Interval, history: pd.DataFrame, now: datetime, *, held: bool
+    conn: sqlite3.Connection,
+    ticker: str,
+    interval: Interval,
+    history: Callable[[], pd.DataFrame],
+    now: datetime,
+    *,
+    held: bool,
 ) -> dict | None:
-    """The Re-entry Lock on the ticker and Interval, or None when there's none; writes the lift when history shows one."""
+    """The Re-entry Lock on the ticker and Interval, or None when there's none; writes the lift when history() shows one.
+
+    history is only called for an unlifted lock, so a lifted one needs no fetch."""
     row = conn.execute(
         "SELECT cut_price, cut_date, buyback_price, lifted, lifted_date, lifted_by, cut_quantity FROM reentry_locks "
         "WHERE ticker = ? AND interval = ?",
@@ -260,9 +291,10 @@ def _reentry_lock(
     cut_price, cut_date, buyback_price, lifted, lifted_date, lifted_by, cut_quantity = row
     quantity = _buyback_quantity(cut_price, buyback_price, cut_quantity, held=held)
     if not lifted:
-        lift = find_lift(history, interval, now, cut_price, cut_date, buyback_price)
+        bars = history()
+        lift = find_lift(bars, interval, now, cut_price, cut_date, buyback_price)
         if lift is None:
-            return _lock_view(cut_price, cut_date, buyback_price, history) | quantity
+            return _lock_view(cut_price, cut_date, buyback_price, bars) | quantity
         lifted_date, lifted_by = lift
         conn.execute(
             "UPDATE reentry_locks SET lifted = 1, lifted_date = ?, lifted_by = ? WHERE ticker = ? AND interval = ?",

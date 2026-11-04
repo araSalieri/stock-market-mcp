@@ -17,7 +17,7 @@ An MCP server that gives coding agents stock market data, indicators and advisor
 | `get_track_record` | How past Signals turned out, by confidence and Verdict, optionally for one ticker or Interval |
 | `set_watchlist` | Save a Watchlist of up to 15 tickers. An empty list deletes it. |
 | `get_watchlists` | Every saved Watchlist |
-| `scan` | Quick numbers (price, ATR, RSI, Gap, Relative Volume, VWAP distance) for a Watchlist or list of tickers, to pick which deserve a Signal |
+| `scan` | Quick numbers (price, ATR, RSI, Gap, Relative Volume, VWAP distance) for a Watchlist or list of tickers, to pick which deserve a Signal, with each ticker's Re-entry Locks: whether each Interval is still locked or open to buy back |
 | `set_position` | Save the quantity and average cost you hold in a ticker. Quantity 0 deletes it. At most 15 Positions. |
 | `get_portfolio` | Every Position with its latest price and Unrealised P&L |
 
