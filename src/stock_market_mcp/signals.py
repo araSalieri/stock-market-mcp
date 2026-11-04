@@ -107,7 +107,7 @@ class SignalLog:
     @contextmanager
     def _open(self) -> Iterator[sqlite3.Connection]:
         """A transaction on the signals and reentry_locks tables, adding columns a file from before them lacks (null on old
-        rows, except an unlifted lock's buyback_price)."""
+        rows, except an unlifted lock's buyback_price, and first-buy tags from before the armed state are cleared)."""
         with transaction(self.path, SCHEMA) as conn:
             conn.execute(LOCK_SCHEMA)
             added = set()
@@ -120,6 +120,9 @@ class SignalLog:
                         added.add(name)
             if "buyback_price" in added:
                 _backfill_buyback_prices(conn)
+            if "armed_by" in added:
+                # Tags from the old price-only lift, at any Confidence, aren't buys that lifted an armed lock.
+                conn.execute("UPDATE signals SET re_entry = NULL")
             yield conn
 
     def before_classifier(
