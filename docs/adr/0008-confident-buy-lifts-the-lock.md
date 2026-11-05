@@ -1,6 +1,6 @@
 # A confident buy lifts the Re-entry Lock
 
-Partly supersedes ADR-0006 and ADR-0007: the price triggers stay, but they now arm the Re-entry Lock instead of lifting it.
+Partly supersedes ADR-0006 and ADR-0007: the Buyback Price touch and the close above the Re-entry Price stay, but they now arm the Re-entry Lock instead of lifting it.
 
 A lift on price alone said nothing about whether the classifier agreed, so a lock could show as lifted and count toward the Re-entry Hit Rate while every buy after it was below the Minimum Confidence. Now the lock goes locked, then armed, then lifted. It is armed when a bar's low touches the Buyback Price or a completed bar closes above the Re-entry Price, by whichever comes first, and stays armed until the next confident cut. It lifts at the first buy at or above the Minimum Confidence while armed. That buy's Confidence is the lift's Confidence, so no new classifier question is asked. Trade Plans come out the same as before; what changes is what "lifted" means and what the Re-entry Hit Rate counts.
 
@@ -8,7 +8,7 @@ A lift on price alone said nothing about whether the classifier agreed, so a loc
 
 - Keep the price-only lift (ADR-0007). Rejected: "lifted" and the Re-entry Hit Rate included re-entries the classifier never backed.
 - A separate "has the move finished?" question with its own Confidence. Rejected for the reason ADR-0006 gave: a second Confidence with no calibrated Minimum Confidence, plus a `PROMPT_VERSION` bump.
-- Make each Signal re-check the trigger. Rejected: a buyback touch is a past event, and making price touch it again would throw it away.
+- Make each Signal re-check the price that armed the lock. Rejected: a buyback touch is a past event, and making price touch it again would throw it away.
 - Set a separate Minimum Confidence for the lifting buy from the Re-entry Hit Rate. Rejected: too few lifts to calibrate it. The rate stays reported only.
 
 ## Consequences
