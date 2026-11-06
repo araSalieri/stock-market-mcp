@@ -67,8 +67,9 @@ class SignalMaker:
         if fresh:
             classified = self._classifier.classify(prompt.state, prompt.questions)
             signal = {**classified, "data_date": cast("pd.Timestamp", df.index[-1]).isoformat()}
-            if prompt.levels is not None:
-                signal["levels"] = _picks(classified["levels"], prompt.levels)
+            if prompt.candidates is not None:
+                # No picks when neither side has a candidate.
+                signal["cut_levels"] = _cut_levels(signal.pop("picks", {}), prompt.candidates)
         fields = self._signals.after_classifier(
             ticker,
             interval,
@@ -84,8 +85,8 @@ class SignalMaker:
         if fresh:
             self._cache.put(prompt.cache_key, signal)
         reply = {**signal, "price": price, **fields}
-        # The picks reach the reply only through fields, on a confident cut.
-        reply.pop("levels", None)
+        # The cut levels reach the reply only through fields, on a confident cut.
+        reply.pop("cut_levels", None)
         if held is not None:
             reply["position"] = {
                 **asdict(held),
@@ -95,12 +96,14 @@ class SignalMaker:
         return reply
 
 
-def _picks(answers: dict, offered: dict[str, dict[str, float]]) -> dict:
-    """Each level answer as its price and confidence, both None for a none pick."""
-    picks = {}
+def _cut_levels(picks: dict, candidates: dict[str, dict[str, float]]) -> dict:
+    """The picked Buyback Price and Cut Stop with each pick's confidence, both None for a none pick or a side with no
+    candidate (not asked)."""
+    cut_levels = {}
     for question, price_key in (("buyback", "buyback_price"), ("cut_stop", "cut_stop")):
-        answer = answers[question]
-        level = offered[question].get(answer["choice"])
-        picks[price_key] = level
-        picks[f"{question}_confidence"] = None if level is None else answer["confidence"]
-    return picks
+        offered = candidates[question]
+        pick = picks[question] if offered else {"choice": "none"}
+        price = offered.get(pick["choice"])
+        cut_levels[price_key] = price
+        cut_levels[f"{question}_confidence"] = None if price is None else pick["confidence"]
+    return cut_levels

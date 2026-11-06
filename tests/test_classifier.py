@@ -224,7 +224,7 @@ def test_a_prompt_with_a_position_is_asked_the_verdict_and_both_levels(monkeypat
     signal = classifier.classify(prompt, questions(HELD_LEVELS))
 
     assert signal["verdict"] == "cut"
-    assert signal["levels"] == {
+    assert signal["picks"] == {
         "buyback": {"choice": "low_20", "confidence": 0.8},
         "cut_stop": {"choice": "none", "confidence": 0.6},
     }

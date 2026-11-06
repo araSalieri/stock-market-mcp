@@ -4,11 +4,10 @@ import json
 
 import pandas as pd
 import pytest
-from fakes import FakeClassifier, FakeFetcher, flat_history, seed_signals
+from fakes import FakeClassifier, FakeFetcher, call_tool, flat_history, seed_signals, text_of
 
 from stock_market_mcp.portfolio import PortfolioStore
 from stock_market_mcp.prompt import PROMPT_VERSION
-from stock_market_mcp.signals import SignalLog
 
 
 def _signal(verdict, confidence=0.7):
@@ -49,7 +48,7 @@ def _cut_outcome(signal_maker, tmp_path, *bars, buyback="low_20", cut_stop="high
     """
     PortfolioStore(tmp_path / "server.db").set("AAPL", 50, 90.0)
     picks = {"buyback": {"choice": buyback, "confidence": 0.8}, "cut_stop": {"choice": cut_stop, "confidence": 0.6}}
-    classifier = FakeClassifier(replies=[{**_signal("cut", 0.3), "levels": picks}, _signal("hold")])
+    classifier = FakeClassifier(replies=[{**_signal("cut", 0.3), "picks": picks}, _signal("hold")])
     maker = signal_maker(FakeFetcher(history=[flat_history(), _later(*bars)]), classifier, ttl=0)
     maker.make("AAPL", "1d")
     maker.make("AAPL", "1d")
@@ -76,10 +75,11 @@ def test_cut_reaching_neither_level_within_20_later_bars_is_expired(signal_maker
 
 
 @pytest.mark.parametrize("picks", [{"buyback": "none"}, {"cut_stop": "none"}])
-def test_cut_with_a_none_pick_is_never_scored(signal_maker, tmp_path, picks):
+async def test_cut_with_a_none_pick_is_never_scored(signal_maker, server_url, tmp_path, picks):
     assert _cut_outcome(signal_maker, tmp_path, (101.5, 98.5), *[QUIET] * 20, **picks) == "pending"
+    track_record = json.loads(text_of(await call_tool(server_url(FakeFetcher()), "get_track_record", {})))
     # Only the later hold's 0.7 band: the 0.3 cut is left out.
-    assert [band["band"] for band in SignalLog(tmp_path / "server.db").track_record(None, None)["bands"]] == [0.7]
+    assert [band["band"] for band in track_record["bands"]] == [0.7]
 
 
 def test_pending_cut_from_prompt_version_3_is_scored_at_its_stored_distances(signal_maker, tmp_path):
