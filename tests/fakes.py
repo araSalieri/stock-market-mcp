@@ -8,7 +8,7 @@ from mcp import ClientSession, types
 from mcp.client.streamable_http import streamable_http_client
 from mcp.types import CallToolResult
 
-from stock_market_mcp.prompt import PROMPT_VERSION
+from stock_market_mcp.prompt import PROMPT_VERSION, level_questions
 from stock_market_mcp.signals import SignalLog
 
 
@@ -29,10 +29,10 @@ def audit_lines(caplog) -> list:
     return [r for r in caplog.records if " outcome=" in r.getMessage()]
 
 
-def seed_signals(db, outcomes, *, verdict="buy", confidence=0.7, prompt_version=PROMPT_VERSION, ticker="AAPL", interval="1d", cut_loss=None, long_plan=True, short_plan=True, re_entry=None):
+def seed_signals(db, outcomes, *, verdict="buy", confidence=0.7, prompt_version=PROMPT_VERSION, ticker="AAPL", interval="1d", cut_loss=None, long_plan=True, short_plan=True):
     """Store one scored Signal per Outcome (None for pending): scoring dozens of Signals over MCP would take dozens of calls.
 
-    long_plan and short_plan False store that default Trade Plan as nulls; re_entry tags them as the buy that lifted a lock armed by that path.
+    long_plan and short_plan False store that default Trade Plan as nulls.
 
     The only test code that knows the signals schema; SignalLog(db).track_record creates the table first.
     """
@@ -42,10 +42,10 @@ def seed_signals(db, outcomes, *, verdict="buy", confidence=0.7, prompt_version=
     with closing(sqlite3.connect(db)) as conn, conn:
         conn.executemany(
             "INSERT INTO signals (ticker, interval, prompt_version, data_date, verdict, confidence, price, outcome, "
-            "cut_loss, long_stop, long_target, short_stop, short_target, re_entry) "
-            "VALUES (?, ?, ?, '2023-01-01T00:00:00', ?, ?, 100.0, ?, ?, ?, ?, ?, ?, ?)",
+            "cut_loss, long_stop, long_target, short_stop, short_target) "
+            "VALUES (?, ?, ?, '2023-01-01T00:00:00', ?, ?, 100.0, ?, ?, ?, ?, ?, ?)",
             [
-                (ticker, interval, prompt_version, verdict, confidence, outcome, cut_loss, *long, *short, re_entry)
+                (ticker, interval, prompt_version, verdict, confidence, outcome, cut_loss, *long, *short)
                 for outcome in outcomes
             ],
         )
@@ -151,7 +151,7 @@ class FakeClassifier:
     """Fake transport below the classifier boundary; no network, records prompts.
 
     replies (optional) is a sequence of verdicts handed out one per classify call;
-    without it every call returns verdict.
+    without it every call returns verdict. A reply without picks picks none for each level question asked.
     """
 
     def __init__(self, verdict=None, error=None, replies=None):
@@ -163,14 +163,18 @@ class FakeClassifier:
         self.error = error
         self.replies = list(replies) if replies is not None else None
         self.prompts = []
+        self.questions = []
 
-    def classify(self, prompt, held):
+    def classify(self, prompt, questions):
         self.prompts.append(prompt)
+        self.questions.append(questions)
         if self.error is not None:
             raise self.error
-        if self.replies is not None:
-            return self.replies.pop(0)
-        return self.verdict
+        reply = self.replies.pop(0) if self.replies is not None else self.verdict
+        asked = level_questions(questions)
+        if asked and isinstance(reply, dict) and "picks" not in reply:
+            reply = {**reply, "picks": {question: {"choice": "none", "confidence": 0.5} for question in asked}}
+        return reply
 
 
 def daily_bars(

@@ -65,15 +65,17 @@ class SignalMaker:
         signal = self._cache.get(prompt.cache_key, self._ttl)
         fresh = signal is None
         if fresh:
-            classified = self._classifier.classify(prompt.state, prompt.held)
+            classified = self._classifier.classify(prompt.state, prompt.questions)
             signal = {**classified, "data_date": cast("pd.Timestamp", df.index[-1]).isoformat()}
+            if prompt.candidates is not None:
+                # No picks when neither side has a candidate.
+                signal["cut_levels"] = _cut_levels(signal.pop("picks", {}), prompt.candidates)
         fields = self._signals.after_classifier(
             ticker,
             interval,
             df,
             price,
             signal,
-            now=self._now(),
             fresh=fresh,
             held=held,
             atr_multiple=atr_multiple,
@@ -83,6 +85,8 @@ class SignalMaker:
         if fresh:
             self._cache.put(prompt.cache_key, signal)
         reply = {**signal, "price": price, **fields}
+        # The cut levels reach the reply only through fields, on a confident cut.
+        reply.pop("cut_levels", None)
         if held is not None:
             reply["position"] = {
                 **asdict(held),
@@ -90,3 +94,16 @@ class SignalMaker:
                 "cut_loss_hit_rate": reply.pop("cut_loss_hit_rate"),
             }
         return reply
+
+
+def _cut_levels(picks: dict, candidates: dict[str, dict[str, float]]) -> dict:
+    """The picked Buyback Price and Cut Stop with each pick's confidence, both None for a none pick or a side with no
+    candidate (not asked)."""
+    cut_levels = {}
+    for question, price_key in (("buyback", "buyback_price"), ("cut_stop", "cut_stop")):
+        offered = candidates[question]
+        pick = picks[question] if offered else {"choice": "none"}
+        price = offered.get(pick["choice"])
+        cut_levels[price_key] = price
+        cut_levels[f"{question}_confidence"] = None if price is None else pick["confidence"]
+    return cut_levels

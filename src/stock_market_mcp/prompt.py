@@ -5,16 +5,18 @@ unit-tested with literals as truth.
 """
 
 import json
+import math
 import os
 from dataclasses import dataclass
 from typing import NamedTuple
 
 import pandas as pd
 
+from stock_market_mcp.bars import EMA_LENGTH
 from stock_market_mcp.portfolio import PricedPosition
 
 # Stored with each Signal; bump whenever anything below changes what the classifier sees (the golden prompt test checks).
-PROMPT_VERSION = 3
+PROMPT_VERSION = 4
 
 # typesafe/jev-1.13 rejects states over ~32k input tokens with a 400
 # max_tokens_exceeded (verified live); this payload tokenizes at ~1.2 chars per
@@ -32,7 +34,7 @@ class PreviousSignal(NamedTuple):
 _BUY = "Bullish momentum or trend evidence in the supplied data."
 _HOLD = "Mixed or insufficient evidence in the supplied data."
 
-# The single question the Verdict hinges on: _NOT_HELD_QUESTIONS without a Position, _HELD_QUESTIONS with one.
+# The question the Verdict hinges on: _NOT_HELD_QUESTIONS without a Position, _HELD_QUESTIONS with one.
 _NOT_HELD_QUESTIONS = {
     "verdict": {
         "type": "choice",
@@ -60,23 +62,102 @@ _HELD_QUESTIONS = {
 }
 
 
-def questions(held: bool) -> dict:
-    """The Decisions questions for a state with (held) or without a Position."""
-    return _HELD_QUESTIONS if held else _NOT_HELD_QUESTIONS
+# The questions a held ticker is also asked (ADR-0010): each picks a chart level on its side of the Price, or none.
+_LEVEL_INSTRUCTIONS = {
+    "buyback": (
+        "If the holder cuts now, which level below the price is the buyback price: where buying back is cheaper "
+        "and price is likely to reach? Pick none if no level fits."
+    ),
+    "cut_stop": (
+        "If the holder cuts now, which level above the price is the cut stop: where the cut is proven wrong? "
+        "Pick none if no level fits."
+    ),
+}
+_NONE = {"buyback": "No level below the Price fits.", "cut_stop": "No level above the Price fits."}
 
 
-def verdicts(held: bool) -> list[str]:
-    """The Verdicts a Signal may have: buy or hold, plus cut on a held Position."""
-    return list(questions(held)["verdict"]["criteria"])
+def questions(candidates: dict[str, dict[str, float]] | None) -> dict:
+    """The Decisions questions: the Verdict alone without a Position (candidates None), else also one per side of
+    candidates that has any, offering them by name with the price in the description, plus none. A side with no
+    candidate isn't asked, since a choice of none alone may be rejected."""
+    if candidates is None:
+        return _NOT_HELD_QUESTIONS
+    return _HELD_QUESTIONS | {
+        question: {
+            "type": "choice",
+            "instructions": _LEVEL_INSTRUCTIONS[question],
+            "criteria": {
+                **{name: f"{_LEVEL_NAMES[name]} at {price:.6g}" for name, price in offered.items()},
+                "none": _NONE[question],
+            },
+        }
+        for question, offered in candidates.items()
+        if offered
+    }
+
+
+def level_questions(questions: dict) -> list[str]:
+    """The level questions among questions: every one but the Verdict."""
+    return [question for question in questions if question != "verdict"]
+
+
+# The bar windows whose lowest low and highest high are candidate levels.
+LEVEL_WINDOWS = (20, 50)
+
+
+_LEVEL_NAMES = {
+    **{f"low_{bars}": f"{bars}-bar low" for bars in LEVEL_WINDOWS},
+    **{f"high_{bars}": f"{bars}-bar high" for bars in LEVEL_WINDOWS},
+    "lower_band": "Lower Bollinger Band",
+    "upper_band": "Upper Bollinger Band",
+    "ema": f"{EMA_LENGTH}-bar EMA",
+    "sma": "SMA",
+    "vwap": "VWAP",
+}
+# Indicator columns read by prefix, since pandas-ta suffixes them with their parameters.
+_SHARED_LEVELS = (("ema", "EMA_"), ("sma", "SMA_"), ("vwap", "VWAP_"))
+
+
+def candidate_levels(df: pd.DataFrame) -> dict[str, dict[str, float]]:
+    """Candidate Buyback Prices and Cut Stops as of the latest bar: finite levels strictly below (buyback) or above
+    (cut_stop) its close, by name, the first of any at the same price kept."""
+    price = float(df["Close"].iloc[-1])
+    last = df.iloc[-1]
+
+    def column(prefix: str) -> float:
+        return next((float(last[c]) for c in df.columns if str(c).startswith(prefix)), math.nan)
+
+    def extreme(side: str, bars: int) -> float:
+        window = df[side].iloc[-bars:]
+        return float(window.min() if side == "Low" else window.max()) if len(df) >= bars else math.nan
+
+    shared = [(name, column(prefix)) for name, prefix in _SHARED_LEVELS]
+    sides = {
+        "buyback": [*((f"low_{bars}", extreme("Low", bars)) for bars in LEVEL_WINDOWS), ("lower_band", column("BBL_")), *shared],
+        "cut_stop": [*((f"high_{bars}", extreme("High", bars)) for bars in LEVEL_WINDOWS), ("upper_band", column("BBU_")), *shared],
+    }
+    candidates: dict[str, dict[str, float]] = {}
+    for question, side in sides.items():
+        below = question == "buyback"
+        offered: dict[str, float] = {}
+        for name, value in side:
+            if math.isfinite(value) and (value < price if below else value > price) and value not in offered.values():
+                offered[name] = value
+        candidates[question] = offered
+    return candidates
 
 
 @dataclass(frozen=True)
 class SignalPrompt:
-    """cache_key is the state without the previous Signal, so storing a Signal doesn't defeat the Signal cache."""
+    """cache_key is the state without the previous Signal, so storing a Signal doesn't defeat the Signal cache.
+
+    questions are what the classifier is asked about the state; candidates the candidate levels by question and
+    name, a side's empty when it has none, None when not held."""
 
     cache_key: str
     state: str
-    held: bool
+    questions: dict
+    candidates: dict[str, dict[str, float]] | None
 
 
 def signal_prompt(
@@ -114,7 +195,8 @@ def signal_prompt(
     if previous is not None:
         previous_view = {"verdict": previous.verdict, "confidence": previous.confidence, "outcome": previous.outcome or "pending"}
         state = json.dumps({**head, "previous_signal": previous_view, "rows": rows})
-    return SignalPrompt(cache_key, state, position is not None)
+    candidates = None if position is None else candidate_levels(df)
+    return SignalPrompt(cache_key, state, questions(candidates), candidates)
 
 
 def _rows(df: pd.DataFrame, head: dict, max_chars: int | None) -> list:

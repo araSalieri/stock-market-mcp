@@ -154,5 +154,60 @@ def test_prompt_for_an_empty_frame_has_no_rows():
 def test_the_position_the_classifier_sees_leaves_quantity_out():
     prompt = signal_prompt("AAPL", "1mo", prompt_frame(), position=Position(10, 90.0).priced(100.0))
 
-    assert prompt.held
+    assert list(prompt.questions["verdict"]["criteria"]) == ["buy", "hold", "cut"]
     assert json.loads(prompt.state)["position"] == {"avg_cost": 90.0, "unrealised_pnl_pct": pytest.approx(100 / 9)}
+
+
+def levels_frame(indicators: dict[str, float], rows: int = 50) -> pd.DataFrame:
+    """Close 100 on every bar, High 101 and Low 99, except bar -30 (inside 50 bars, not 20) at High 105 and Low 90."""
+    idx = pd.date_range("2024-01-01", periods=rows, freq="D", name="Date")
+    high = [101.0] * rows
+    low = [99.0] * rows
+    if rows >= 30:
+        high[-30], low[-30] = 105.0, 90.0
+    return pd.DataFrame(
+        {"Open": 100.0, "High": high, "Low": low, "Close": 100.0, "Volume": 1000, **indicators}, index=idx
+    )
+
+
+HELD = Position(10, 90.0).priced(100.0)
+
+
+def test_a_held_ticker_is_asked_for_levels_on_each_side_of_the_price():
+    # EMA ties the 20-bar low, so it's offered once; VWAP at the Price is on neither side.
+    df = levels_frame({"BBL_5_2.0_2.0": 97.0, "BBU_5_2.0_2.0": 103.0, "EMA_10": 99.0, "SMA_10": 102.0, "VWAP_D": 100.0})
+
+    questions = signal_prompt("AAPL", "1y", df, position=HELD).questions
+
+    assert list(questions) == ["verdict", "buyback", "cut_stop"]
+    assert questions["buyback"]["type"] == "choice"
+    assert questions["buyback"]["criteria"] == {
+        "low_20": "20-bar low at 99",
+        "low_50": "50-bar low at 90",
+        "lower_band": "Lower Bollinger Band at 97",
+        "none": "No level below the Price fits.",
+    }
+    assert questions["cut_stop"]["criteria"] == {
+        "high_20": "20-bar high at 101",
+        "high_50": "50-bar high at 105",
+        "upper_band": "Upper Bollinger Band at 103",
+        "sma": "SMA at 102",
+        "none": "No level above the Price fits.",
+    }
+
+
+def test_missing_levels_are_never_offered():
+    # 30 bars have no 50-bar low or high; NaN bands and an infinite EMA are left out.
+    nan = float("nan")
+    df = levels_frame({"BBL_5_2.0_2.0": nan, "BBU_5_2.0_2.0": nan, "EMA_10": float("inf"), "SMA_10": 98.0, "VWAP_D": 104.0}, 30)
+
+    questions = signal_prompt("AAPL", "1y", df, position=HELD).questions
+
+    assert list(questions["buyback"]["criteria"]) == ["low_20", "sma", "none"]
+    assert list(questions["cut_stop"]["criteria"]) == ["high_20", "vwap", "none"]
+
+
+def test_a_ticker_not_held_is_asked_only_the_verdict():
+    df = levels_frame({"SMA_10": 98.0})
+
+    assert list(signal_prompt("AAPL", "1y", df).questions) == ["verdict"]

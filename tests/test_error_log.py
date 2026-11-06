@@ -97,7 +97,7 @@ async def test_scan_logs_a_failing_ticker_at_error_and_still_returns_ok(server_u
     good, bad = result.structured_content["result"]
     assert good["ticker"] == "BBCA.JK"
     assert "error" not in good
-    assert bad == {"ticker": "BAD", "error": "yahoo is down", "re_entry_locks": []}
+    assert bad == {"ticker": "BAD", "error": "yahoo is down"}
     [record] = error_records(app_log)
     assert record.levelno == logging.ERROR
     assert record.getMessage() == "tool=scan ticker=BAD error=yahoo is down"
