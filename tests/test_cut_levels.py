@@ -14,18 +14,18 @@ def _signal(verdict="cut", confidence=0.7, buyback="low_20", cut_stop="high_20")
         "verdict": verdict,
         "confidence": confidence,
         "rationale": "test",
-        "levels": {
+        "picks": {
             "buyback": {"choice": buyback, "confidence": 0.8},
             "cut_stop": {"choice": cut_stop, "confidence": 0.6},
         },
     }
 
 
-def _make(signal_maker, tmp_path, classifier, held="AAPL", calls=1):
-    """Replies for AAPL at a flat close of 100, a Position of 50 @ 90 in held."""
+def _make(signal_maker, tmp_path, classifier, held="AAPL", calls=1, history=None):
+    """Replies for AAPL at a flat close of 100 (or history), a Position of 50 @ 90 in held."""
     db = tmp_path / "smm.db"
     PortfolioStore(db).set(held, 50, 90.0)
-    maker = signal_maker(FakeFetcher(history=flat_history()), classifier, db_path=db)
+    maker = signal_maker(FakeFetcher(history=flat_history() if history is None else history), classifier, db_path=db)
     return [maker.make("aapl", "1d") for _ in range(calls)]
 
 
@@ -40,7 +40,7 @@ def test_confident_cut_gives_the_picked_levels_and_the_buyback_quantity(signal_m
         "cut_stop": 101.0,
         "cut_stop_confidence": 0.6,
     }
-    assert "levels" not in reply
+    assert not {"picks", "cut_levels"} & reply.keys()
 
 
 def test_a_none_pick_is_null_with_its_confidence_and_quantity(signal_maker, tmp_path):
@@ -53,7 +53,7 @@ def test_a_none_pick_is_null_with_its_confidence_and_quantity(signal_maker, tmp_
 def test_only_a_confident_cut_has_levels(signal_maker, tmp_path, verdict, confidence):
     [reply] = _make(signal_maker, tmp_path, FakeClassifier(_signal(verdict, confidence)))
 
-    assert not (LEVEL_KEYS | {"levels"}) & reply.keys()
+    assert not (LEVEL_KEYS | {"picks", "cut_levels"}) & reply.keys()
 
 
 def test_a_cached_signal_reuses_its_picks(signal_maker, tmp_path):
@@ -71,3 +71,23 @@ def test_only_a_held_ticker_is_asked_for_levels(signal_maker, tmp_path, held, as
     _make(signal_maker, tmp_path, classifier, held=held)
 
     assert list(classifier.questions[0]) == asked
+
+
+def test_a_side_with_no_level_is_not_asked_and_is_null(signal_maker, tmp_path):
+    # Every bar's High at its close of 100: the bands, EMA and SMA sit at the Price and VWAP below it, so nothing is above.
+    history = flat_history()
+    history["High"] = 100.0
+    signal = _signal()
+    del signal["picks"]["cut_stop"]
+    classifier = FakeClassifier(signal)
+    [reply] = _make(signal_maker, tmp_path, classifier, history=history)
+
+    assert list(classifier.questions[0]) == ["verdict", "buyback"]
+    # 50 shares at 100 buy back 5000 / 99 = 50.5 shares at 99, rounded down.
+    assert {key: reply[key] for key in LEVEL_KEYS} == {
+        "buyback_price": 99.0,
+        "buyback_quantity": 50,
+        "buyback_confidence": 0.8,
+        "cut_stop": None,
+        "cut_stop_confidence": None,
+    }

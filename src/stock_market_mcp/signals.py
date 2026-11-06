@@ -135,10 +135,10 @@ class SignalLog:
             if cut_loss is not None:
                 fields |= {"cut_loss": confident and cut_loss, "cut_loss_hit_rate": _cut_loss_hit_rate(conn)}
         if confident and verdict == "cut" and held is not None:
-            levels = signal["levels"]
-            buyback = levels["buyback_price"]
+            cut_levels = signal["cut_levels"]
+            buyback = cut_levels["buyback_price"]
             quantity = None if buyback is None else math.floor(held.quantity * price / buyback)
-            fields |= {**levels, "buyback_quantity": quantity}
+            fields |= {**cut_levels, "buyback_quantity": quantity}
         return fields
 
     def track_record(self, ticker: str | None, interval: str | None) -> dict:
@@ -165,8 +165,8 @@ def _record(
     long_stop, long_target = _default_plan(history, price, long=True)
     short_stop, short_target = _default_plan(history, price, long=False)
     if signal["verdict"] == "cut":
-        levels = signal.get("levels", {})
-        short_stop, short_target = levels.get("cut_stop"), levels.get("buyback_price")
+        cut_levels = signal["cut_levels"]
+        short_stop, short_target = cut_levels["cut_stop"], cut_levels["buyback_price"]
     conn.execute(
         "INSERT INTO signals (ticker, interval, prompt_version, data_date, verdict, confidence, price, "
         "long_stop, long_target, short_stop, short_target, cut_loss) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",

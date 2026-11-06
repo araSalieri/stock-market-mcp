@@ -72,7 +72,7 @@ def test_cached_signal_shows_the_current_position(signal_maker, tmp_path):
 
 @pytest.mark.parametrize("change", [{"avg_cost": 95.0}, "deleted"])
 def test_changing_the_position_beyond_quantity_reclassifies(signal_maker, tmp_path, change):
-    classifier = FakeClassifier(_signal())
+    classifier = FakeClassifier(_signal("hold"))
     maker = _maker(signal_maker, tmp_path, classifier)
     set_position(tmp_path, "AAPL")
 
@@ -105,7 +105,7 @@ def test_prompt_carries_the_held_position_without_quantity(signal_maker, tmp_pat
 
 
 def test_prompt_says_no_position_for_an_unheld_ticker(signal_maker, tmp_path):
-    classifier = FakeClassifier(_signal())
+    classifier = FakeClassifier(_signal("hold"))
     maker = _maker(signal_maker, tmp_path, classifier)
     set_position(tmp_path, "MSFT")
     maker.make("aapl")
@@ -201,7 +201,7 @@ def _stored_cut_loss(db) -> list:
     [
         ("AAPL", "cut", 0.3, 110.0, 1),  # below the Minimum Confidence still counts
         ("AAPL", "cut", 0.7, 90.0, 0),  # profitable
-        ("MSFT", "cut", 0.7, 110.0, None),  # AAPL not held
+        ("MSFT", "hold", 0.7, 110.0, None),  # AAPL not held
     ],
 )
 def test_fresh_signal_stores_cut_loss(signal_maker, tmp_path, held, verdict, confidence, avg_cost, stored):

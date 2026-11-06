@@ -8,7 +8,7 @@ from mcp import ClientSession, types
 from mcp.client.streamable_http import streamable_http_client
 from mcp.types import CallToolResult
 
-from stock_market_mcp.prompt import PROMPT_VERSION
+from stock_market_mcp.prompt import PROMPT_VERSION, level_questions
 from stock_market_mcp.signals import SignalLog
 
 
@@ -151,7 +151,7 @@ class FakeClassifier:
     """Fake transport below the classifier boundary; no network, records prompts.
 
     replies (optional) is a sequence of verdicts handed out one per classify call;
-    without it every call returns verdict. A reply without levels picks none for each level question asked.
+    without it every call returns verdict. A reply without picks picks none for each level question asked.
     """
 
     def __init__(self, verdict=None, error=None, replies=None):
@@ -171,9 +171,9 @@ class FakeClassifier:
         if self.error is not None:
             raise self.error
         reply = self.replies.pop(0) if self.replies is not None else self.verdict
-        asked = [question for question in questions if question != "verdict"]
-        if asked and isinstance(reply, dict) and "levels" not in reply:
-            reply = {**reply, "levels": {question: {"choice": "none", "confidence": 0.5} for question in asked}}
+        asked = level_questions(questions)
+        if asked and isinstance(reply, dict) and "picks" not in reply:
+            reply = {**reply, "picks": {question: {"choice": "none", "confidence": 0.5} for question in asked}}
         return reply
 
 

@@ -9,6 +9,8 @@ from typing import Protocol
 
 import requests
 
+from stock_market_mcp.prompt import level_questions
+
 DEFAULT_CLASSIFIER_MODEL = "typesafe/jev-1.13"
 
 # Endpoint pinned as a constant: https only, and requests.post with a timeout
@@ -45,12 +47,12 @@ def _check_confidence(confidence: object, name: str) -> None:
 def validate_signal(payload: object, questions: dict) -> dict:
     """Enforce the strict verdict schema; raise SignalContractError naming the violation.
 
-    When questions ask for levels, the reply also has levels: each level question's choice, one of its offered
+    When questions ask for levels, the reply also has picks: each level question's choice, one of its offered
     options, and confidence."""
     if not isinstance(payload, dict):
         raise SignalContractError(f"reply is not a JSON object: {type(payload).__name__}")
-    level_questions = [question for question in questions if question != "verdict"]
-    keys = _VERDICT_KEYS | {"levels"} if level_questions else _VERDICT_KEYS
+    asked = level_questions(questions)
+    keys = _VERDICT_KEYS | {"picks"} if asked else _VERDICT_KEYS
     missing = keys - payload.keys()
     if missing:
         raise SignalContractError(f"reply missing key(s): {', '.join(sorted(missing))}")
@@ -65,12 +67,12 @@ def validate_signal(payload: object, questions: dict) -> dict:
     _check_confidence(payload["confidence"], "confidence")
     if not isinstance(payload["rationale"], str):
         raise SignalContractError(f"rationale must be a string, got: {payload['rationale']!r}")
-    if level_questions:
-        levels = payload["levels"]
-        if not isinstance(levels, dict) or sorted(levels) != sorted(level_questions):
-            raise SignalContractError(f"levels must answer {'/'.join(level_questions)}, got: {levels!r}")
-        for question in level_questions:
-            answer = levels[question]
+    if asked:
+        picks = payload["picks"]
+        if not isinstance(picks, dict) or sorted(picks) != sorted(asked):
+            raise SignalContractError(f"picks must answer {'/'.join(asked)}, got: {picks!r}")
+        for question in asked:
+            answer = picks[question]
             offered = list(questions[question]["criteria"])
             if not isinstance(answer, dict) or answer.get("choice") not in offered:
                 raise SignalContractError(f"{question} must be one of {'/'.join(offered)}, got: {answer!r}")
@@ -142,12 +144,12 @@ class OpenRouterClassifier:
             "confidence": confidence,
             "rationale": f"Decisions API chose {choice} (probabilities: {probs_desc})",
         }
-        level_questions = [question for question in questions if question != "verdict"]
-        if level_questions:
-            signal["levels"] = {}
-            for question in level_questions:
+        asked = level_questions(questions)
+        if asked:
+            signal["picks"] = {}
+            for question in asked:
                 choice, confidence, _ = _choice(answers, question)
-                signal["levels"][question] = {"choice": choice, "confidence": confidence}
+                signal["picks"][question] = {"choice": choice, "confidence": confidence}
         return signal
 
 
