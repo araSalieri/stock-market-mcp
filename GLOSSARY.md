@@ -19,7 +19,7 @@ The classifier's own 0–1 estimate that the Verdict is right. Self-reported, no
 _Avoid_: Probability, certainty, score
 
 **Minimum Confidence**:
-The lowest Confidence at which a buy gets a Trade Plan or a cut counts. Set by the server from buy Hit Rates: 0.6 until enough Signals are scored.
+The lowest Confidence at which a buy gets a Trade Plan or a cut counts. Set by the server from buy Hit Rates: 0.6 until enough Signals are scored, and none when enough are scored but no Confidence band beats break-even, so no buy gets a Trade Plan.
 _Avoid_: Threshold, cut-off
 
 **Price**:
@@ -27,7 +27,7 @@ The last close in the data the Signal was made from; during the session that is 
 _Avoid_: Current price, last price, quote
 
 **Outcome**:
-What happened to a Signal within 20 bars of its Interval, scored even when it was below the Minimum Confidence. A buy is judged against the default Trade Plan: Target (reached first), Stop (reached first, or on the same bar as the Target), or Expired (neither). A cut is judged against the same distances mirrored below the Price: Target if price falls the Target distance first, Stop if it rises the Stop distance first, else Expired. A hold's Outcome is Quiet (price moved the Target distance neither up nor down) or Missed (it did).
+What happened to a Signal within 20 bars of its Interval, scored even when it was below the Minimum Confidence. A buy is judged against the default Trade Plan: Target (reached first), Stop (reached first, or on the same bar as the Target), or Expired (neither). A cut is judged against its Buyback Price and Cut Stop: Target (Buyback Price reached first), Stop (Cut Stop reached first, or on the same bar), or Expired (neither); a cut missing either is never scored. A hold's Outcome is Quiet (price moved the Target distance neither up nor down) or Missed (it did).
 _Avoid_: Result, win/loss
 
 **Hit Rate**:
@@ -49,7 +49,7 @@ _Avoid_: Model version, schema version
 ### Trade Plan
 
 **Trade Plan**:
-The three prices for a long trade: Entry, Stop, and Target. Part of a buy Signal at or above the Minimum Confidence that is not under a locked Re-entry Lock; every other Signal has none. Advisory only.
+The three prices for a long trade: Entry, Stop, and Target. Part of a buy Signal at or above the Minimum Confidence; every other Signal has none. Advisory only.
 _Avoid_: Setup, strategy, levels
 
 **Entry**:
@@ -75,7 +75,7 @@ A named list of tickers the user saves to scan together, usually one market per 
 _Avoid_: Universe, list
 
 **Scan**:
-A quick set of numbers for each ticker in a Watchlist or ad-hoc list, used to pick which ones deserve a Signal, with each Re-entry Lock on the ticker, locked, armed or lifted. Has no Verdict.
+A quick set of numbers for each ticker in a Watchlist or ad-hoc list, used to pick which ones deserve a Signal. Has no Verdict.
 _Avoid_: Screen, screener, filter
 
 **Gap**:
@@ -112,22 +112,14 @@ _Avoid_: Stop out, exit signal, bail
 The Hit Rate over every scored cut on a losing Position, across all tickers and Intervals and at any Confidence. Measures whether cutting was right. Reported only; it sets nothing.
 _Avoid_: Exit accuracy, cut rate
 
-**Re-entry Lock**:
-The state of a ticker on one Interval from a cut at or above the Minimum Confidence until a buy at or above the Minimum Confidence after the lock is armed. It is locked until price on that Interval reaches the Buyback Price or a later completed bar closes above the Re-entry Price, then armed by whichever came first (buyback or re-entry), and stays armed until that confident buy lifts it. While locked or armed, a buy below the Minimum Confidence gets no Trade Plan; the buy that lifts the lock gets one. Once lifted it stays lifted, and is shown with the lifting buy's date and the way it was armed, until the next such cut.
-_Avoid_: Cooldown, ban, penalty
-
-**Re-entry Hit Rate**:
-The Hit Rate over the buy Signal that lifted each Re-entry Lock, across all tickers and Intervals. Given separately for locks armed by buyback and by re-entry, so the two can be compared. Measures whether getting back in was right. Reported only; it sets nothing.
-_Avoid_: Buyback rate, re-entry accuracy
-
-**Re-entry Price**:
-The higher of a locked ticker's cut Price and its current 10-bar EMA. A completed bar closing above it arms the Re-entry Lock. It moves with the EMA, so each Signal gives it afresh.
-_Avoid_: Trigger
-
 **Buyback Price**:
-The price below a cut at which getting back in is cheaper: the cut's Price minus the default Target distance, the same price that makes the cut's Outcome a Target. Fixed at the cut. Price reaches it when a bar's low touches it, the same test that scores the cut. Reaching it arms the Re-entry Lock; a buy at or above the Minimum Confidence then lifts it.
+The level below a cut's Price at which getting back in is cheaper, picked by the classifier from chart levels below the Price (the 20-bar and 50-bar lows, the lower Bollinger Band, the 10-bar EMA, the SMA, VWAP), or none when no level fits. Given on a cut at or above the Minimum Confidence, in that Signal. Reaching it first makes the cut's Outcome a Target; otherwise it changes nothing.
 _Avoid_: Re-entry target, short target, buy-the-dip price
 
+**Cut Stop**:
+The level above a cut's Price at which the cut was wrong, picked by the classifier from the same kinds of chart levels above the Price (the 20-bar and 50-bar highs, the upper Bollinger Band, the 10-bar EMA, the SMA, VWAP), or none when no level fits. Given with the Buyback Price. Reaching it first makes the cut's Outcome a Stop. Not the Trade Plan's Stop.
+_Avoid_: Invalidation, re-entry price
+
 **Buyback Quantity**:
-The whole number of shares the cut's proceeds buy at the Buyback Price: the cut quantity times the cut's Price, divided by the Buyback Price, rounded down. Fees left out. Given only while the ticker is not held, since buying more while still holding is averaging down, not a buyback.
+The whole number of shares a cut's proceeds buy at the Buyback Price: the Position's quantity times the cut's Price, divided by the Buyback Price, rounded down. Fees left out. Given with the Buyback Price.
 _Avoid_: Re-entry size, position size
