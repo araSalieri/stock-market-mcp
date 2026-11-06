@@ -117,7 +117,8 @@ class SignalLog:
         """The reply fields for a Signal made on history's last bar: hit_rate, min_confidence, trade_plan, cut_loss and
         cut_loss_hit_rate when held, and on a confident cut its picked levels with the Buyback Quantity.
 
-        A fresh Signal is recorded with both default Trade Plans at price and its cut_loss: a cut on a losing Position at
+        A fresh Signal is recorded with both default Trade Plans at price (a cut with its picked levels instead of the
+        mirrored one) and its cut_loss: a cut on a losing Position at
         any Confidence, null when not held.
         """
         verdict = signal["verdict"]
@@ -159,9 +160,13 @@ def _record(
     price: float,
     cut_loss: bool | None,
 ) -> None:
-    """Store one pending Signal at its data_date, with both default Trade Plans at price."""
+    """Store one pending Signal at its data_date, with the default Trade Plan at price and its mirror, except that a
+    cut's mirrored Stop and Target are its picked Cut Stop and Buyback Price (null for none)."""
     long_stop, long_target = _default_plan(history, price, long=True)
     short_stop, short_target = _default_plan(history, price, long=False)
+    if signal["verdict"] == "cut":
+        levels = signal.get("levels", {})
+        short_stop, short_target = levels.get("cut_stop"), levels.get("buyback_price")
     conn.execute(
         "INSERT INTO signals (ticker, interval, prompt_version, data_date, verdict, confidence, price, "
         "long_stop, long_target, short_stop, short_target, cut_loss) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -358,7 +363,7 @@ class _Rule:
     other: tuple[str, ...] = ()
 
 
-# long_* is the default Trade Plan, short_* the same distances mirrored, which a cut is judged by.
+# long_* is the default Trade Plan, short_* the same distances mirrored, or on a cut its picked Cut Stop and Buyback Price.
 _PLAN_COLUMNS = ("long_stop", "long_target", "short_stop", "short_target")
 _CUT = _Rule(("short_stop", "short_target"), partial(_outcome, long=False), "target", "stop", ("expired",))
 _RULES = {
