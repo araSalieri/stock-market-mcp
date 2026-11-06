@@ -9,8 +9,6 @@ from typing import Protocol
 
 import requests
 
-from stock_market_mcp.prompt import questions, verdicts
-
 DEFAULT_CLASSIFIER_MODEL = "typesafe/jev-1.13"
 
 # Endpoint pinned as a constant: https only, and requests.post with a timeout
@@ -27,8 +25,8 @@ def classifier_model_id() -> str:
 
 
 class SignalClassifier(Protocol):
-    def classify(self, prompt: str, held: bool) -> dict:
-        """The Signal for prompt; held says the prompt supplies a Position, which allows a cut."""
+    def classify(self, prompt: str, questions: dict) -> dict:
+        """The Signal for prompt, answering questions; the verdict question's criteria are the Verdicts allowed."""
         ...
 
 
@@ -39,7 +37,7 @@ class SignalContractError(Exception):
 _VERDICT_KEYS = frozenset({"verdict", "confidence", "rationale"})
 
 
-def validate_signal(payload: object, held: bool) -> dict:
+def validate_signal(payload: object, questions: dict) -> dict:
     """Enforce the strict verdict schema; raise SignalContractError naming the violation."""
     if not isinstance(payload, dict):
         raise SignalContractError(f"reply is not a JSON object: {type(payload).__name__}")
@@ -49,9 +47,10 @@ def validate_signal(payload: object, held: bool) -> dict:
     extra = payload.keys() - _VERDICT_KEYS
     if extra:
         raise SignalContractError(f"reply has unexpected key(s): {', '.join(sorted(extra))}")
-    if payload["verdict"] not in verdicts(held):
+    verdicts = list(questions["verdict"]["criteria"])
+    if payload["verdict"] not in verdicts:
         raise SignalContractError(
-            f"verdict must be one of {'/'.join(verdicts(held))}, got: {payload['verdict']!r}"
+            f"verdict must be one of {'/'.join(verdicts)}, got: {payload['verdict']!r}"
         )
     confidence = payload["confidence"]
     if (
@@ -78,12 +77,12 @@ class EnforcingClassifier:
     def __init__(self, classifier: SignalClassifier) -> None:
         self._classifier = classifier
 
-    def classify(self, prompt: str, held: bool) -> dict:
+    def classify(self, prompt: str, questions: dict) -> dict:
         try:
-            return validate_signal(self._classifier.classify(prompt, held), held)
+            return validate_signal(self._classifier.classify(prompt, questions), questions)
         except SignalContractError as first_error:
             try:
-                return validate_signal(self._classifier.classify(prompt, held), held)
+                return validate_signal(self._classifier.classify(prompt, questions), questions)
             except SignalContractError as second_error:
                 raise SignalContractError(
                     f"classifier reply violated the signal contract twice, "
@@ -94,7 +93,7 @@ class EnforcingClassifier:
 class OpenRouterClassifier:
     """Decisions-API transport against OpenRouter's /api/alpha/decisions endpoint."""
 
-    def classify(self, prompt: str, held: bool) -> dict:
+    def classify(self, prompt: str, questions: dict) -> dict:
         # Key is read at call time and never stored; a missing key is a loud
         # error naming the cause, before any HTTP request is attempted.
         api_key = os.environ.get("SMM_OPENROUTER_API_KEY")
@@ -106,7 +105,7 @@ class OpenRouterClassifier:
         request = {
             "model": classifier_model_id(),
             "state": prompt,
-            "questions": questions(held),
+            "questions": questions,
         }
         response = requests.post(
             OPENROUTER_DECISIONS_URL,

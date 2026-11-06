@@ -22,6 +22,7 @@ from stock_market_mcp.classifier import (
     classifier_model_id,
 )
 from stock_market_mcp.portfolio import PortfolioStore
+from stock_market_mcp.prompt import questions
 
 
 def test_classifier_model_id_default_and_env_override(monkeypatch):
@@ -181,7 +182,7 @@ def test_decisions_answer_maps_to_strict_signal(monkeypatch):
         monkeypatch, [_decisions_body(_choice_answer())]
     )
 
-    verdict = classifier.classify(PROMPT, held=False)
+    verdict = classifier.classify(PROMPT, questions(held=False))
 
     assert verdict == {
         "verdict": "hold",
@@ -206,7 +207,7 @@ def test_a_prompt_with_a_position_is_asked_buy_hold_or_cut(monkeypatch):
         monkeypatch, [_decisions_body(_choice_answer(choice="cut", probabilities={"buy": 0.1, "hold": 0.2, "cut": 0.7}))]
     )
 
-    assert classifier.classify(prompt, held=True)["verdict"] == "cut"
+    assert classifier.classify(prompt, questions(held=True))["verdict"] == "cut"
     assert list(posts[0][1]["json"]["questions"]["verdict"]["criteria"]) == ["buy", "hold", "cut"]
 
 
@@ -218,7 +219,7 @@ def test_missing_confidence_falls_back_to_chosen_probability(monkeypatch):
         [_decisions_body(_choice_answer(confidence=None))],
     )
 
-    verdict = classifier.classify(PROMPT, held=False)
+    verdict = classifier.classify(PROMPT, questions(held=False))
 
     assert verdict["verdict"] == "hold"
     assert verdict["confidence"] == 0.7
@@ -235,7 +236,7 @@ def test_missing_verdict_answer_retried_once_then_valid(monkeypatch):
         ],
     )
 
-    assert classifier.classify(PROMPT, held=False)["verdict"] == "hold"
+    assert classifier.classify(PROMPT, questions(held=False))["verdict"] == "hold"
     assert len(posts) == 2  # exactly one retry
 
 
@@ -251,7 +252,7 @@ def test_unexpected_answer_type_retried_once_then_loud(monkeypatch):
     )
 
     with pytest.raises(SignalContractError) as exc_info:
-        classifier.classify(PROMPT, held=False)
+        classifier.classify(PROMPT, questions(held=False))
 
     assert "twice" in str(exc_info.value)
     assert "type" in str(exc_info.value)
@@ -275,7 +276,7 @@ def test_choice_outside_buy_hold_retried_once_then_loud(monkeypatch, answer):
     )
 
     with pytest.raises(SignalContractError) as exc_info:
-        classifier.classify(PROMPT, held=False)
+        classifier.classify(PROMPT, questions(held=False))
 
     assert "twice" in str(exc_info.value)
     assert "maybe" in str(exc_info.value)
@@ -294,7 +295,7 @@ def test_missing_confidence_and_probability_is_a_contract_error(monkeypatch):
     )
 
     with pytest.raises(SignalContractError) as exc_info:
-        classifier.classify(PROMPT, held=False)
+        classifier.classify(PROMPT, questions(held=False))
 
     assert "twice" in str(exc_info.value)
     assert len(posts) == 2
@@ -314,7 +315,7 @@ def test_provider_http_error_is_loud_and_never_retried(monkeypatch):
     monkeypatch.setattr("stock_market_mcp.classifier.requests.post", failing_post)
 
     with pytest.raises(requests.HTTPError):
-        classifier.classify(PROMPT, held=False)
+        classifier.classify(PROMPT, questions(held=False))
 
     assert len(posts) == 1
 
