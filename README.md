@@ -13,7 +13,7 @@ An MCP server that gives coding agents stock market data, indicators and advisor
 |------|--------------|
 | `get_quote` | Current price and currency |
 | `get_fundamentals` | Name, sector, industry, market cap |
-| `get_signal` | Long-only advice for a ticker: buy or hold, plus cut (exit now) if you hold it. Comes with a confidence, a rationale and, for a confident buy, a Trade Plan (entry, stop, target). On a held ticker it also shows your Unrealised P&L. Needs an OpenRouter key. |
+| `get_signal` | Long-only advice for a ticker: buy or hold, plus cut (exit now) if you hold it. Comes with a confidence, a rationale and, for a confident buy, a Trade Plan (entry, stop, target). On a held ticker it also shows your Unrealised P&L, and a confident cut gives a Buyback Price (a chart level below the price where buying back is cheaper), the Buyback Quantity (shares the proceeds buy back there, fees left out) and a Cut Stop (a chart level above the price where the cut was wrong), each picked by the classifier with its confidence, or null when no level fits. The pick confidences are not calibrated and set nothing. Needs an OpenRouter key. |
 | `get_track_record` | How past Signals turned out, by confidence and Verdict, optionally for one ticker or Interval, with the Cut Loss Hit Rate |
 | `set_watchlist` | Save a Watchlist of up to 15 tickers. An empty list deletes it. |
 | `get_watchlists` | Every saved Watchlist |

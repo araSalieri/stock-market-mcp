@@ -67,6 +67,8 @@ class SignalMaker:
         if fresh:
             classified = self._classifier.classify(prompt.state, prompt.questions)
             signal = {**classified, "data_date": cast("pd.Timestamp", df.index[-1]).isoformat()}
+            if prompt.levels is not None:
+                signal["levels"] = _picks(classified["levels"], prompt.levels)
         fields = self._signals.after_classifier(
             ticker,
             interval,
@@ -82,6 +84,8 @@ class SignalMaker:
         if fresh:
             self._cache.put(prompt.cache_key, signal)
         reply = {**signal, "price": price, **fields}
+        # The picks reach the reply only through fields, on a confident cut.
+        reply.pop("levels", None)
         if held is not None:
             reply["position"] = {
                 **asdict(held),
@@ -89,3 +93,14 @@ class SignalMaker:
                 "cut_loss_hit_rate": reply.pop("cut_loss_hit_rate"),
             }
         return reply
+
+
+def _picks(answers: dict, offered: dict[str, dict[str, float]]) -> dict:
+    """Each level answer as its price and confidence, both None for a none pick."""
+    picks = {}
+    for question, price_key in (("buyback", "buyback_price"), ("cut_stop", "cut_stop")):
+        answer = answers[question]
+        level = offered[question].get(answer["choice"])
+        picks[price_key] = level
+        picks[f"{question}_confidence"] = None if level is None else answer["confidence"]
+    return picks

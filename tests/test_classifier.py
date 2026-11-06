@@ -182,7 +182,7 @@ def test_decisions_answer_maps_to_strict_signal(monkeypatch):
         monkeypatch, [_decisions_body(_choice_answer())]
     )
 
-    verdict = classifier.classify(PROMPT, questions(held=False))
+    verdict = classifier.classify(PROMPT, questions(None))
 
     assert verdict == {
         "verdict": "hold",
@@ -201,14 +201,57 @@ def test_decisions_answer_maps_to_strict_signal(monkeypatch):
     assert kwargs["headers"]["Authorization"] == "Bearer test-key"
 
 
-def test_a_prompt_with_a_position_is_asked_buy_hold_or_cut(monkeypatch):
-    prompt = json.dumps({**json.loads(PROMPT), "position": {"avg_cost": 90.0, "unrealised_pnl_pct": 5.0}})
-    classifier, posts = _real_transport_with_bodies(
-        monkeypatch, [_decisions_body(_choice_answer(choice="cut", probabilities={"buy": 0.1, "hold": 0.2, "cut": 0.7}))]
-    )
+HELD_LEVELS = {"buyback": {"low_20": 95.0}, "cut_stop": {"high_20": 105.0}}
 
-    assert classifier.classify(prompt, questions(held=True))["verdict"] == "cut"
-    assert list(posts[0][1]["json"]["questions"]["verdict"]["criteria"]) == ["buy", "hold", "cut"]
+
+def _held_body(buyback=None, cut_stop=None):
+    """A Decisions reply for a held ticker: a cut, with level answers (a missing one left out)."""
+    answers = {"verdict": _choice_answer(choice="cut", probabilities={"buy": 0.1, "hold": 0.2, "cut": 0.7})}
+    if buyback is not None:
+        answers["buyback"] = buyback
+    if cut_stop is not None:
+        answers["cut_stop"] = cut_stop
+    return {"answers": answers}
+
+
+def test_a_prompt_with_a_position_is_asked_the_verdict_and_both_levels(monkeypatch):
+    prompt = json.dumps({**json.loads(PROMPT), "position": {"avg_cost": 90.0, "unrealised_pnl_pct": 5.0}})
+    buyback = {"type": "choice", "choice": "low_20", "confidence": 0.8, "probabilities": {"low_20": 0.8, "none": 0.2}}
+    # Without confidence, the pick's probability stands in, as for the Verdict.
+    cut_stop = {"type": "choice", "choice": "none", "probabilities": {"high_20": 0.4, "none": 0.6}}
+    classifier, posts = _real_transport_with_bodies(monkeypatch, [_held_body(buyback, cut_stop)])
+
+    signal = classifier.classify(prompt, questions(HELD_LEVELS))
+
+    assert signal["verdict"] == "cut"
+    assert signal["levels"] == {
+        "buyback": {"choice": "low_20", "confidence": 0.8},
+        "cut_stop": {"choice": "none", "confidence": 0.6},
+    }
+    asked = posts[0][1]["json"]["questions"]
+    assert list(asked) == ["verdict", "buyback", "cut_stop"]
+    assert list(asked["verdict"]["criteria"]) == ["buy", "hold", "cut"]
+
+
+@pytest.mark.parametrize(
+    ("buyback", "named"),
+    [
+        ({"type": "choice", "choice": "low_50", "confidence": 0.8}, "low_50"),  # not offered
+        (None, "buyback"),
+    ],
+    ids=["unknown-pick", "missing-answer"],
+)
+def test_a_bad_level_answer_is_retried_once_then_loud(monkeypatch, buyback, named):
+    cut_stop = {"type": "choice", "choice": "high_20", "confidence": 0.7}
+    body = _held_body(buyback, cut_stop)
+    classifier, posts = _real_transport_with_bodies(monkeypatch, [body, body])
+
+    with pytest.raises(SignalContractError) as exc_info:
+        classifier.classify(PROMPT, questions(HELD_LEVELS))
+
+    assert "twice" in str(exc_info.value)
+    assert named in str(exc_info.value)
+    assert len(posts) == 2
 
 
 def test_missing_confidence_falls_back_to_chosen_probability(monkeypatch):
@@ -219,7 +262,7 @@ def test_missing_confidence_falls_back_to_chosen_probability(monkeypatch):
         [_decisions_body(_choice_answer(confidence=None))],
     )
 
-    verdict = classifier.classify(PROMPT, questions(held=False))
+    verdict = classifier.classify(PROMPT, questions(None))
 
     assert verdict["verdict"] == "hold"
     assert verdict["confidence"] == 0.7
@@ -236,7 +279,7 @@ def test_missing_verdict_answer_retried_once_then_valid(monkeypatch):
         ],
     )
 
-    assert classifier.classify(PROMPT, questions(held=False))["verdict"] == "hold"
+    assert classifier.classify(PROMPT, questions(None))["verdict"] == "hold"
     assert len(posts) == 2  # exactly one retry
 
 
@@ -252,7 +295,7 @@ def test_unexpected_answer_type_retried_once_then_loud(monkeypatch):
     )
 
     with pytest.raises(SignalContractError) as exc_info:
-        classifier.classify(PROMPT, questions(held=False))
+        classifier.classify(PROMPT, questions(None))
 
     assert "twice" in str(exc_info.value)
     assert "type" in str(exc_info.value)
@@ -276,7 +319,7 @@ def test_choice_outside_buy_hold_retried_once_then_loud(monkeypatch, answer):
     )
 
     with pytest.raises(SignalContractError) as exc_info:
-        classifier.classify(PROMPT, questions(held=False))
+        classifier.classify(PROMPT, questions(None))
 
     assert "twice" in str(exc_info.value)
     assert "maybe" in str(exc_info.value)
@@ -295,7 +338,7 @@ def test_missing_confidence_and_probability_is_a_contract_error(monkeypatch):
     )
 
     with pytest.raises(SignalContractError) as exc_info:
-        classifier.classify(PROMPT, questions(held=False))
+        classifier.classify(PROMPT, questions(None))
 
     assert "twice" in str(exc_info.value)
     assert len(posts) == 2
@@ -315,7 +358,7 @@ def test_provider_http_error_is_loud_and_never_retried(monkeypatch):
     monkeypatch.setattr("stock_market_mcp.classifier.requests.post", failing_post)
 
     with pytest.raises(requests.HTTPError):
-        classifier.classify(PROMPT, questions(held=False))
+        classifier.classify(PROMPT, questions(None))
 
     assert len(posts) == 1
 

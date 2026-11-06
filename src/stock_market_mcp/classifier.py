@@ -37,14 +37,24 @@ class SignalContractError(Exception):
 _VERDICT_KEYS = frozenset({"verdict", "confidence", "rationale"})
 
 
+def _check_confidence(confidence: object, name: str) -> None:
+    if isinstance(confidence, bool) or not isinstance(confidence, (int, float)) or not 0 <= confidence <= 1:
+        raise SignalContractError(f"{name} must be a number in [0, 1], got: {confidence!r}")
+
+
 def validate_signal(payload: object, questions: dict) -> dict:
-    """Enforce the strict verdict schema; raise SignalContractError naming the violation."""
+    """Enforce the strict verdict schema; raise SignalContractError naming the violation.
+
+    When questions ask for levels, the reply also has levels: each level question's choice, one of its offered
+    options, and confidence."""
     if not isinstance(payload, dict):
         raise SignalContractError(f"reply is not a JSON object: {type(payload).__name__}")
-    missing = _VERDICT_KEYS - payload.keys()
+    level_questions = [question for question in questions if question != "verdict"]
+    keys = _VERDICT_KEYS | {"levels"} if level_questions else _VERDICT_KEYS
+    missing = keys - payload.keys()
     if missing:
         raise SignalContractError(f"reply missing key(s): {', '.join(sorted(missing))}")
-    extra = payload.keys() - _VERDICT_KEYS
+    extra = payload.keys() - keys
     if extra:
         raise SignalContractError(f"reply has unexpected key(s): {', '.join(sorted(extra))}")
     verdicts = list(questions["verdict"]["criteria"])
@@ -52,17 +62,19 @@ def validate_signal(payload: object, questions: dict) -> dict:
         raise SignalContractError(
             f"verdict must be one of {'/'.join(verdicts)}, got: {payload['verdict']!r}"
         )
-    confidence = payload["confidence"]
-    if (
-        isinstance(confidence, bool)
-        or not isinstance(confidence, (int, float))
-        or not 0 <= confidence <= 1
-    ):
-        raise SignalContractError(
-            f"confidence must be a number in [0, 1], got: {confidence!r}"
-        )
+    _check_confidence(payload["confidence"], "confidence")
     if not isinstance(payload["rationale"], str):
         raise SignalContractError(f"rationale must be a string, got: {payload['rationale']!r}")
+    if level_questions:
+        levels = payload["levels"]
+        if not isinstance(levels, dict) or sorted(levels) != sorted(level_questions):
+            raise SignalContractError(f"levels must answer {'/'.join(level_questions)}, got: {levels!r}")
+        for question in level_questions:
+            answer = levels[question]
+            offered = list(questions[question]["criteria"])
+            if not isinstance(answer, dict) or answer.get("choice") not in offered:
+                raise SignalContractError(f"{question} must be one of {'/'.join(offered)}, got: {answer!r}")
+            _check_confidence(answer.get("confidence"), f"{question} confidence")
     return payload
 
 
@@ -116,35 +128,48 @@ class OpenRouterClassifier:
         # Non-200 is a provider failure, not a bad answer: the HTTPError propagates
         # loudly and is never retried or converted into a contract violation.
         response.raise_for_status()
-        body = response.json()
-        answers = body.get("answers")
-        if not isinstance(answers, dict) or "verdict" not in answers:
-            raise SignalContractError("decisions reply missing answer for 'verdict'")
-        answer = answers["verdict"]
-        # The type field must be checked before reading; an unexpected type is an
-        # error, never a default.
-        if not isinstance(answer, dict) or answer.get("type") != "choice":
-            raise SignalContractError(f"answer for 'verdict' has unexpected type: {answer!r}")
-        # The Verdict itself is checked once, by validate_signal in EnforcingClassifier.
-        choice = answer.get("choice")
-        probabilities = answer.get("probabilities")
-        confidence = answer.get("confidence")
-        # confidence and probabilities are schema-optional; read through presence
-        # checks, and with neither there is no schema-valid confidence.
-        if confidence is None:
-            # A non-string choice (e.g. a list) is unhashable, so check it before the lookup.
-            if not isinstance(choice, str) or not isinstance(probabilities, dict) or choice not in probabilities:
-                raise SignalContractError(
-                    f"answer has neither confidence nor a probability for '{choice}'"
-                )
-            confidence = probabilities[choice]
+        answers = response.json().get("answers")
+        if not isinstance(answers, dict):
+            raise SignalContractError("decisions reply has no answers")
+        choice, confidence, probabilities = _choice(answers, "verdict")
         probs_desc = (
             ", ".join(f"{key}={value}" for key, value in probabilities.items())
             if isinstance(probabilities, dict)
             else "unavailable"
         )
-        return {
+        signal: dict = {
             "verdict": choice,
             "confidence": confidence,
             "rationale": f"Decisions API chose {choice} (probabilities: {probs_desc})",
         }
+        level_questions = [question for question in questions if question != "verdict"]
+        if level_questions:
+            signal["levels"] = {}
+            for question in level_questions:
+                choice, confidence, _ = _choice(answers, question)
+                signal["levels"][question] = {"choice": choice, "confidence": confidence}
+        return signal
+
+
+def _choice(answers: dict, question: str) -> tuple[object, object, object]:
+    """The choice, confidence and probabilities of one choice answer; the choice itself is checked by validate_signal."""
+    if question not in answers:
+        raise SignalContractError(f"decisions reply missing answer for '{question}'")
+    answer = answers[question]
+    # The type field must be checked before reading; an unexpected type is an
+    # error, never a default.
+    if not isinstance(answer, dict) or answer.get("type") != "choice":
+        raise SignalContractError(f"answer for '{question}' has unexpected type: {answer!r}")
+    choice = answer.get("choice")
+    probabilities = answer.get("probabilities")
+    confidence = answer.get("confidence")
+    # confidence and probabilities are schema-optional; read through presence
+    # checks, and with neither there is no schema-valid confidence.
+    if confidence is None:
+        # A non-string choice (e.g. a list) is unhashable, so check it before the lookup.
+        if not isinstance(choice, str) or not isinstance(probabilities, dict) or choice not in probabilities:
+            raise SignalContractError(
+                f"answer has neither confidence nor a probability for '{choice}'"
+            )
+        confidence = probabilities[choice]
+    return choice, confidence, probabilities

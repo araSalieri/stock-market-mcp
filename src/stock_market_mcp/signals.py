@@ -114,8 +114,8 @@ class SignalLog:
         atr_multiple: float,
         reward_ratio: float,
     ) -> dict:
-        """The reply fields for a Signal made on history's last bar: hit_rate, min_confidence, trade_plan, and cut_loss and
-        cut_loss_hit_rate when held.
+        """The reply fields for a Signal made on history's last bar: hit_rate, min_confidence, trade_plan, cut_loss and
+        cut_loss_hit_rate when held, and on a confident cut its picked levels with the Buyback Quantity.
 
         A fresh Signal is recorded with both default Trade Plans at price and its cut_loss: a cut on a losing Position at
         any Confidence, null when not held.
@@ -133,6 +133,11 @@ class SignalLog:
             fields = {"hit_rate": hit_rate, "min_confidence": min_confidence, "trade_plan": plan}
             if cut_loss is not None:
                 fields |= {"cut_loss": confident and cut_loss, "cut_loss_hit_rate": _cut_loss_hit_rate(conn)}
+        if confident and verdict == "cut" and held is not None:
+            levels = signal["levels"]
+            buyback = levels["buyback_price"]
+            quantity = None if buyback is None else math.floor(held.quantity * price / buyback)
+            fields |= {**levels, "buyback_quantity": quantity}
         return fields
 
     def track_record(self, ticker: str | None, interval: str | None) -> dict:

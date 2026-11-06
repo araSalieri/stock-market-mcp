@@ -151,7 +151,7 @@ class FakeClassifier:
     """Fake transport below the classifier boundary; no network, records prompts.
 
     replies (optional) is a sequence of verdicts handed out one per classify call;
-    without it every call returns verdict.
+    without it every call returns verdict. A reply without levels picks none for each level question asked.
     """
 
     def __init__(self, verdict=None, error=None, replies=None):
@@ -163,14 +163,18 @@ class FakeClassifier:
         self.error = error
         self.replies = list(replies) if replies is not None else None
         self.prompts = []
+        self.questions = []
 
     def classify(self, prompt, questions):
         self.prompts.append(prompt)
+        self.questions.append(questions)
         if self.error is not None:
             raise self.error
-        if self.replies is not None:
-            return self.replies.pop(0)
-        return self.verdict
+        reply = self.replies.pop(0) if self.replies is not None else self.verdict
+        asked = [question for question in questions if question != "verdict"]
+        if asked and isinstance(reply, dict) and "levels" not in reply:
+            reply = {**reply, "levels": {question: {"choice": "none", "confidence": 0.5} for question in asked}}
+        return reply
 
 
 def daily_bars(
