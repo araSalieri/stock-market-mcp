@@ -65,7 +65,7 @@ class SignalMaker:
         signal = self._cache.get(prompt.cache_key, self._ttl)
         fresh = signal is None
         if fresh:
-            classified = self._classifier.classify(prompt.state, prompt.held)
+            classified = self._classifier.classify(prompt.state, prompt.questions)
             signal = {**classified, "data_date": cast("pd.Timestamp", df.index[-1]).isoformat()}
         fields = self._signals.after_classifier(
             ticker,

@@ -65,18 +65,15 @@ def questions(held: bool) -> dict:
     return _HELD_QUESTIONS if held else _NOT_HELD_QUESTIONS
 
 
-def verdicts(held: bool) -> list[str]:
-    """The Verdicts a Signal may have: buy or hold, plus cut on a held Position."""
-    return list(questions(held)["verdict"]["criteria"])
-
-
 @dataclass(frozen=True)
 class SignalPrompt:
-    """cache_key is the state without the previous Signal, so storing a Signal doesn't defeat the Signal cache."""
+    """cache_key is the state without the previous Signal, so storing a Signal doesn't defeat the Signal cache.
+
+    questions are what the classifier is asked about the state."""
 
     cache_key: str
     state: str
-    held: bool
+    questions: dict
 
 
 def signal_prompt(
@@ -114,7 +111,7 @@ def signal_prompt(
     if previous is not None:
         previous_view = {"verdict": previous.verdict, "confidence": previous.confidence, "outcome": previous.outcome or "pending"}
         state = json.dumps({**head, "previous_signal": previous_view, "rows": rows})
-    return SignalPrompt(cache_key, state, position is not None)
+    return SignalPrompt(cache_key, state, questions(position is not None))
 
 
 def _rows(df: pd.DataFrame, head: dict, max_chars: int | None) -> list:

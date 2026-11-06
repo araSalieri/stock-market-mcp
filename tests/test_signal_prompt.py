@@ -154,5 +154,5 @@ def test_prompt_for_an_empty_frame_has_no_rows():
 def test_the_position_the_classifier_sees_leaves_quantity_out():
     prompt = signal_prompt("AAPL", "1mo", prompt_frame(), position=Position(10, 90.0).priced(100.0))
 
-    assert prompt.held
+    assert list(prompt.questions["verdict"]["criteria"]) == ["buy", "hold", "cut"]
     assert json.loads(prompt.state)["position"] == {"avg_cost": 90.0, "unrealised_pnl_pct": pytest.approx(100 / 9)}
