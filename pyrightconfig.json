@@ -1,5 +1,5 @@
 {
-  "include": ["src", "tests"],
+  "include": ["src", "tests", "scripts"],
   "venvPath": ".",
   "venv": ".venv",
   "reportPrivateImportUsage": false,
