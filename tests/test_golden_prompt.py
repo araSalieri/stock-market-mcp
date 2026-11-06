@@ -13,6 +13,7 @@ from stock_market_mcp.portfolio import PortfolioStore
 # One fingerprint per Prompt Version. Never edit an existing one: add the new version's instead.
 FINGERPRINTS = {
     3: "c9c7ffa3ffa594021d200f27cd11062ebb91eefc51cd4210ceebaea4a2e562b5",
+    4: "8a4923b535b016f8c31fcb906364e6d10f7d2bc0a85081b1398e753fec5d80ba",
 }
 
 
@@ -24,8 +25,11 @@ def test_what_the_classifier_sees_is_pinned_to_the_prompt_version(signal_maker, 
 
     def fake_post(url, **kwargs):
         requests.append(kwargs["json"])
-        answer = {"type": "choice", "choice": "hold", "confidence": 0.5}
-        return SimpleNamespace(raise_for_status=lambda: None, json=lambda: {"answers": {"verdict": answer}})
+        answers = {
+            question: {"type": "choice", "choice": "hold" if question == "verdict" else "none", "confidence": 0.5}
+            for question in kwargs["json"]["questions"]
+        }
+        return SimpleNamespace(raise_for_status=lambda: None, json=lambda: {"answers": answers})
 
     monkeypatch.setattr("stock_market_mcp.classifier.requests.post", fake_post)
     db = tmp_path / "server.db"

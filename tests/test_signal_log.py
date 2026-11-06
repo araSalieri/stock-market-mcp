@@ -78,7 +78,7 @@ def test_hold_is_stored_with_both_default_plans_whatever_the_caller_asked(signal
         "id": 1,
         "ticker": "AAPL",
         "interval": "1d",
-        "prompt_version": 3,
+        "prompt_version": 4,
         "data_date": "2024-02-29T00:00:00",
         "verdict": "hold",
         "confidence": 0.4,
