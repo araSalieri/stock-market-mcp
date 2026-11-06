@@ -177,6 +177,19 @@ def test_buy_on_a_held_position_carries_a_long_trade_plan(signal_maker, tmp_path
     assert payload["trade_plan"]["stop"] < payload["trade_plan"]["entry"] < payload["trade_plan"]["target"]
 
 
+def test_confident_buy_right_after_a_confident_cut_gets_a_trade_plan(signal_maker, tmp_path):
+    classifier = FakeClassifier(replies=[_signal("cut", 0.7), _signal("buy", 0.7)])
+    maker = signal_maker(FakeFetcher(history=flat_history()), classifier, db_path=tmp_path / "smm.db", ttl=0)
+    set_position(tmp_path, "AAPL")
+    cut = maker.make("aapl")
+    buy = maker.make("aapl")
+
+    assert buy["trade_plan"] == {
+        "entry": 100.0, "stop": 96.0, "target": 108.0, "atr": 2.0, "atr_multiple": 2.0, "reward_ratio": 2.0
+    }
+    assert not {"re_entry_lock", "re_entry_hit_rate"} & (cut.keys() | buy.keys())
+
+
 def _stored_cut_loss(db) -> list:
     # The stored flag never reaches the reply except through the Cut Loss Hit Rate, so these tests read the table.
     with closing(sqlite3.connect(db)) as conn:

@@ -1,6 +1,8 @@
 """Tests for get_track_record over MCP: Outcome counts and Hit Rates by Confidence band and Verdict."""
 
 import json
+import sqlite3
+from contextlib import closing
 
 import pytest
 
@@ -58,7 +60,6 @@ async def test_counts_signals_by_band_and_verdict_in_ascending_order(server_url,
         ],
         "min_confidence": 0.6,
         "cut_loss_hit_rate": None,
-        "re_entry_hit_rate": {"buyback": None, "re_entry": None},
     }
 
 
@@ -180,15 +181,20 @@ async def test_min_confidence_and_cut_loss_hit_rate_match_get_signal(server_url,
     assert track_record["cut_loss_hit_rate"] == signal["position"]["cut_loss_hit_rate"] == pytest.approx(0.6)
 
 
-@pytest.mark.parametrize("args", [{}, {"ticker": "aapl", "interval": "1d"}])
-async def test_re_entry_hit_rate_is_per_lift_path_over_tagged_buys_null_at_29_and_server_wide(server_url, tmp_path, args):
-    seeds = [
-        _seed({"target": 18, "stop": 12, "expired": 4, None: 4}, ticker="MSFT", interval="1h", re_entry="buyback"),
-        _seed({"target": 10, "stop": 19}, ticker="MSFT", interval="1h", re_entry="re_entry"),
-        # Untagged buys and other prompt versions are left out.
-        _seed({"stop": 10}, ticker="MSFT", interval="1h"),
-        _seed({"stop": 10}, re_entry="re_entry", prompt_version=PROMPT_VERSION - 1),
-    ]
-    reply = await _track_record(server_url, tmp_path, seeds, args)
+async def test_opening_a_database_with_re_entry_lock_data_drops_it_and_keeps_old_signals(server_url, tmp_path):
+    # A file from before ADR-0009; built by hand since no module writes the lock schema any more.
+    db = tmp_path / "s.db"
+    seed_signals(db, ["target", "stop"])
+    with closing(sqlite3.connect(db)) as conn, conn:
+        conn.execute("ALTER TABLE signals ADD COLUMN re_entry TEXT")
+        conn.execute("UPDATE signals SET re_entry = 'buyback'")
+        conn.execute("CREATE TABLE reentry_locks (ticker TEXT, interval TEXT, cut_price REAL, cut_date TEXT, lifted INTEGER)")
+        conn.execute("INSERT INTO reentry_locks VALUES ('AAPL', '1d', 100.0, '2023-01-01T00:00:00', 0)")
 
-    assert reply["re_entry_hit_rate"] == {"buyback": pytest.approx(0.6), "re_entry": None}
+    reply = await _track_record(server_url, tmp_path, [])
+
+    assert "re_entry_hit_rate" not in reply
+    assert reply["bands"][0]["buy"]["target"] == reply["bands"][0]["buy"]["stop"] == 1
+    with closing(sqlite3.connect(db)) as conn:
+        assert conn.execute("SELECT name FROM sqlite_master WHERE name = 'reentry_locks'").fetchone() is None
+        assert "re_entry" not in {column[1] for column in conn.execute("PRAGMA table_info(signals)")}

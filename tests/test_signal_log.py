@@ -90,7 +90,6 @@ def test_hold_is_stored_with_both_default_plans_whatever_the_caller_asked(signal
         "outcome": None,
         "scored_at": None,
         "cut_loss": None,
-        "re_entry": None,
     }
 
 

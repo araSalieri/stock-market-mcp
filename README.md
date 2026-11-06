@@ -13,11 +13,11 @@ An MCP server that gives coding agents stock market data, indicators and advisor
 |------|--------------|
 | `get_quote` | Current price and currency |
 | `get_fundamentals` | Name, sector, industry, market cap |
-| `get_signal` | Long-only advice for a ticker: buy or hold, plus cut (exit now) if you hold it. Comes with a confidence, a rationale and, for a confident buy, a Trade Plan (entry, stop, target). After a confident cut, buys get no Trade Plan until the Re-entry Lock is armed: the price drops to the Buyback Price or a completed bar closes above the Re-entry Price. The first confident buy while armed lifts it. The lock shows its state (locked, armed or lifted), the Buyback Price and, when you no longer hold the ticker, the Buyback Quantity, with the Re-entry Hit Rate. On a held ticker it also shows your Unrealised P&L. Needs an OpenRouter key. |
-| `get_track_record` | How past Signals turned out, by confidence and Verdict, optionally for one ticker or Interval, with the Cut Loss Hit Rate and Re-entry Hit Rate (the Hit Rate of the buy that lifted each Re-entry Lock, per arming path) |
+| `get_signal` | Long-only advice for a ticker: buy or hold, plus cut (exit now) if you hold it. Comes with a confidence, a rationale and, for a confident buy, a Trade Plan (entry, stop, target). On a held ticker it also shows your Unrealised P&L. Needs an OpenRouter key. |
+| `get_track_record` | How past Signals turned out, by confidence and Verdict, optionally for one ticker or Interval, with the Cut Loss Hit Rate |
 | `set_watchlist` | Save a Watchlist of up to 15 tickers. An empty list deletes it. |
 | `get_watchlists` | Every saved Watchlist |
-| `scan` | Quick numbers (price, ATR, RSI, Gap, Relative Volume, VWAP distance) for a Watchlist or list of tickers, to pick which deserve a Signal, with each ticker's Re-entry Locks: whether each Interval is locked, armed (waiting for a confident buy) or lifted. Scan arms a lock but never lifts one. A ticker whose numbers or locks fail keeps the other part. |
+| `scan` | Quick numbers (price, ATR, RSI, Gap, Relative Volume, VWAP distance) for a Watchlist or list of tickers, to pick which deserve a Signal |
 | `set_position` | Save the quantity and average cost you hold in a ticker. Quantity 0 deletes it. At most 15 Positions. |
 | `get_portfolio` | Every Position with its latest price and Unrealised P&L |
 
