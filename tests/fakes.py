@@ -29,10 +29,10 @@ def audit_lines(caplog) -> list:
     return [r for r in caplog.records if " outcome=" in r.getMessage()]
 
 
-def seed_signals(db, outcomes, *, verdict="buy", confidence=0.7, prompt_version=PROMPT_VERSION, ticker="AAPL", interval="1d", cut_loss=None, long_plan=True, short_plan=True, re_entry=None):
+def seed_signals(db, outcomes, *, verdict="buy", confidence=0.7, prompt_version=PROMPT_VERSION, ticker="AAPL", interval="1d", cut_loss=None, long_plan=True, short_plan=True):
     """Store one scored Signal per Outcome (None for pending): scoring dozens of Signals over MCP would take dozens of calls.
 
-    long_plan and short_plan False store that default Trade Plan as nulls; re_entry tags them as the buy that lifted a lock armed by that path.
+    long_plan and short_plan False store that default Trade Plan as nulls.
 
     The only test code that knows the signals schema; SignalLog(db).track_record creates the table first.
     """
@@ -42,10 +42,10 @@ def seed_signals(db, outcomes, *, verdict="buy", confidence=0.7, prompt_version=
     with closing(sqlite3.connect(db)) as conn, conn:
         conn.executemany(
             "INSERT INTO signals (ticker, interval, prompt_version, data_date, verdict, confidence, price, outcome, "
-            "cut_loss, long_stop, long_target, short_stop, short_target, re_entry) "
-            "VALUES (?, ?, ?, '2023-01-01T00:00:00', ?, ?, 100.0, ?, ?, ?, ?, ?, ?, ?)",
+            "cut_loss, long_stop, long_target, short_stop, short_target) "
+            "VALUES (?, ?, ?, '2023-01-01T00:00:00', ?, ?, 100.0, ?, ?, ?, ?, ?, ?)",
             [
-                (ticker, interval, prompt_version, verdict, confidence, outcome, cut_loss, *long, *short, re_entry)
+                (ticker, interval, prompt_version, verdict, confidence, outcome, cut_loss, *long, *short)
                 for outcome in outcomes
             ],
         )

@@ -63,7 +63,7 @@ def _suffixed_frame(ind: pd.Series | None) -> pd.DataFrame | None:
     return ind.to_frame()
 
 
-# Bars in the EMA, shared by the ema indicator and the Re-entry Lock.
+# Bars in the ema indicator.
 EMA_LENGTH = 10
 
 

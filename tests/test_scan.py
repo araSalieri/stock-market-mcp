@@ -1,13 +1,11 @@
 """Tests for scan on ad-hoc tickers: daily numbers through the MCP surface with fake daily frames and a fixed clock."""
 
-import json
 import sqlite3
 from contextlib import closing
 from datetime import UTC, datetime
 
-import pandas as pd
 import pytest
-from fakes import FakeClassifier, FakeFetcher, call_tool, daily_bars, five_minute_bars, text_of
+from fakes import FakeClassifier, FakeFetcher, call_tool, daily_bars, five_minute_bars, flat_history, text_of
 from mcp.types import CallToolResult
 
 from stock_market_mcp.portfolio import PortfolioStore
@@ -133,7 +131,6 @@ async def test_scan_before_the_open_uses_the_last_completed_session(server_url):
             "prev_close": 129.0,
             "atr_pct": pytest.approx(200 / 129),
             "rsi": pytest.approx(100.0),
-            "re_entry_locks": [],
         }
     ]
 
@@ -158,7 +155,6 @@ async def test_scan_in_session_excludes_the_forming_bar_from_the_previous_day(se
             "prev_close": 128.0,
             "atr_pct": pytest.approx(1.5625),
             "rsi": pytest.approx(100.0),
-            "re_entry_locks": [],
         }
     ]
 
@@ -184,8 +180,8 @@ async def test_scan_gives_a_failing_ticker_its_own_error_entry(server_url):
     aapl, nope, tlkm, bbca = entries(result)
     assert aapl["ticker"] == "AAPL"
     assert aapl["rsi"] == pytest.approx(0.0)
-    assert nope == {"ticker": "NOPE", "error": "no history data for ticker: NOPE", "re_entry_locks": []}
-    assert tlkm == {"ticker": "TLKM.JK", "error": "5m fetch failed", "re_entry_locks": []}
+    assert nope == {"ticker": "NOPE", "error": "no history data for ticker: NOPE"}
+    assert tlkm == {"ticker": "TLKM.JK", "error": "5m fetch failed"}
     assert bbca["ticker"] == "BBCA.JK"
     assert bbca["prev_close"] == 129.0
 
@@ -286,152 +282,21 @@ async def test_scan_gap_and_vwap_distance_are_null_when_not_finite(server_url):
     assert "NaN" not in text_of(result)
 
 
-def lock_bars(closes: list[float]) -> pd.DataFrame:
-    """Bars from 2024-01-01, a day apart, with High/Low one unit from Close."""
-    idx = pd.date_range("2024-01-01", periods=len(closes), freq="D", name="Date")
-    close = pd.Series(closes, index=idx, dtype=float)
-    return pd.DataFrame({"Open": close, "High": close + 1.0, "Low": close - 1.0, "Close": close, "Volume": 1000})
-
-
-# A cut on these is at Price 100 on 2024-02-29 with ATR 2, so the Buyback Price is 100 - 2 * 2 * 2 = 92.
-FLAT = [100.0] * 60
-CUT = {"verdict": "cut", "confidence": 0.7, "rationale": "test"}
-HOLD = {"verdict": "hold", "confidence": 0.7, "rationale": "test"}
-BUY = {"verdict": "buy", "confidence": 0.7, "rationale": "test"}
-
-
-def lock_server(server_url, tmp_path, history: dict, replies: list[dict]):
-    """A server over BBCA.JK's Scan bars plus the given {Interval: bars}, which tests may swap between calls; the
-    classifier gives replies one per get_signal."""
-    frames = {"1d": daily_bars(rising(), last="2024-03-14"), "5m": five_minute_bars({}, []), **history}
+async def test_scan_after_a_confident_cut_fetches_only_its_own_bars_and_ignores_the_portfolio(server_url, tmp_path):
+    db = tmp_path / "smm.db"
+    frames = {"1d": daily_bars(rising(), last="2024-03-14"), "5m": five_minute_bars({}, []), "1h": flat_history()}
     fetcher = FakeFetcher(history={"BBCA.JK": frames})
-    url = server_url(
-        fetcher,
-        classifier=FakeClassifier(replies=replies),
-        db_path=tmp_path / "smm.db",
-        history_ttl=0,
-        signal_ttl=0,
-        now=lambda: IN_SESSION,
-    )
-    return url, fetcher, frames
-
-
-async def lock_of(url, interval) -> dict:
-    result = await call_tool(url, "get_signal", {"ticker": "BBCA.JK", "interval": interval})
-    assert not result.is_error, text_of(result)
-    return json.loads(text_of(result))["re_entry_lock"]
-
-
-async def test_scan_lists_each_intervals_re_entry_lock_as_get_signal_shows_it(server_url, tmp_path):
-    url, _, _ = lock_server(
-        server_url,
-        tmp_path,
-        {"1h": lock_bars(FLAT), "15m": lock_bars([120.0] * 59 + [100.0])},
-        [CUT, CUT, HOLD, HOLD],
-    )
-    PortfolioStore(tmp_path / "smm.db").set("BBCA.JK", 10, 110.0)
-    await lock_of(url, "1h")
-    await lock_of(url, "15m")
-    # Cleared after the cuts, so the locks give a Buyback Quantity: 10 * 100 / 92 = 10.87, rounded down.
-    PortfolioStore(tmp_path / "smm.db").delete("BBCA.JK")
-
-    bbca, other = entries(await call_tool(url, "scan", {"tickers": ["BBCA.JK", "TLKM.JK"]}))
-
-    assert bbca["re_entry_locks"] == [
-        {"interval": "15m", **await lock_of(url, "15m")},
-        {"interval": "1h", **await lock_of(url, "1h")},
-    ]
-    assert bbca["re_entry_locks"][1] == {
-        "interval": "1h",
-        "state": "locked",
-        "cut_price": 100.0,
-        "cut_date": "2024-02-29T00:00:00",
-        "buyback_price": 92.0,
-        "ema": 100.0,
-        "re_entry_price": 100.0,
-        "buyback_quantity": 10,
-    }
-    assert other == {"ticker": "TLKM.JK", "error": "no history data for ticker: TLKM.JK", "re_entry_locks": []}
-
-
-async def test_scan_records_an_arming_it_finds_never_lifts_and_lists_armed_locks_without_a_fetch(server_url, tmp_path):
-    url, fetcher, frames = lock_server(server_url, tmp_path, {"1h": lock_bars(FLAT)}, [CUT, HOLD, BUY])
-    PortfolioStore(tmp_path / "smm.db").set("BBCA.JK", 10, 110.0)
-    await lock_of(url, "1h")
-    # The 2024-03-01 bar's low (90) touches the Buyback Price (92).
-    frames["1h"] = lock_bars(FLAT + [91.0])
-
-    [first] = entries(await call_tool(url, "scan", {"tickers": ["BBCA.JK"]}))
-    frames["1h"] = LookupError("1h fetch failed")
-    fetcher.history_calls.clear()
-    [second] = entries(await call_tool(url, "scan", {"tickers": ["BBCA.JK"]}))
-    # Back to bars without the arming one, so only the recorded arming can show it armed.
-    frames["1h"] = lock_bars(FLAT)
-
-    armed = {
-        "state": "armed",
-        "cut_price": 100.0,
-        "cut_date": "2024-02-29T00:00:00",
-        "buyback_price": 92.0,
-        "armed_by": "buyback",
-        "armed_date": "2024-03-01T00:00:00",
-    }
-    assert first["re_entry_locks"] == second["re_entry_locks"] == [{"interval": "1h", **armed}]
-    assert all(interval != "1h" for _, _, interval, _ in fetcher.history_calls)
-    assert await lock_of(url, "1h") == armed
-    # Only get_signal's confident buy lifts it.
-    frames["1h"] = lock_bars(FLAT + [91.0])
-    lifted = await lock_of(url, "1h")
-    [third] = entries(await call_tool(url, "scan", {"tickers": ["BBCA.JK"]}))
-    assert lifted["state"] == "lifted"
-    assert third["re_entry_locks"] == [{"interval": "1h", **lifted}]
-
-
-async def test_scan_shows_a_lock_whose_fetch_fails_as_stale_and_keeps_the_rest(server_url, tmp_path):
-    url, _, frames = lock_server(server_url, tmp_path, {"1h": lock_bars(FLAT), "15m": lock_bars(FLAT)}, [CUT, CUT])
-    PortfolioStore(tmp_path / "smm.db").set("BBCA.JK", 10, 110.0)
-    await lock_of(url, "1h")
-    fifteen = await lock_of(url, "15m")
-    PortfolioStore(tmp_path / "smm.db").delete("BBCA.JK")
-    frames["1h"] = LookupError("1h fetch failed")
-
-    [entry] = entries(await call_tool(url, "scan", {"tickers": ["BBCA.JK"]}))
-
-    assert entry["prev_close"] == 129.0
-    assert entry["re_entry_locks"] == [
-        {"interval": "15m", **fifteen, "buyback_quantity": 10},
-        {
-            "interval": "1h",
-            "state": "locked",
-            "cut_price": 100.0,
-            "cut_date": "2024-02-29T00:00:00",
-            "buyback_price": 92.0,
-            "buyback_quantity": 10,
-            "stale": True,
-            "error": "1h fetch failed",
-        },
-    ]
-
-
-async def test_scan_keeps_a_tickers_locks_when_its_numbers_fail(server_url, tmp_path):
-    url, _, frames = lock_server(server_url, tmp_path, {"1h": lock_bars(FLAT)}, [CUT])
-    PortfolioStore(tmp_path / "smm.db").set("BBCA.JK", 10, 110.0)
-    lock = await lock_of(url, "1h")
-    frames["1d"] = LookupError("1d fetch failed")
-
-    [entry] = entries(await call_tool(url, "scan", {"tickers": ["BBCA.JK"]}))
-
-    assert entry == {"ticker": "BBCA.JK", "error": "1d fetch failed", "re_entry_locks": [{"interval": "1h", **lock}]}
-
-
-async def test_scan_keeps_a_tickers_numbers_when_its_locks_fail_on_a_short_position(server_url, tmp_path):
-    url, _, _ = lock_server(server_url, tmp_path, {}, [])
-    with closing(sqlite3.connect(tmp_path / "smm.db")) as conn, conn:
-        PortfolioStore(tmp_path / "smm.db").set("AAPL", 10, 180.0)
+    cut = {"verdict": "cut", "confidence": 0.7, "rationale": "test"}
+    url = server_url(fetcher, classifier=FakeClassifier(cut), db_path=db, now=lambda: IN_SESSION)
+    PortfolioStore(db).set("BBCA.JK", 10, 110.0)
+    assert not (await call_tool(url, "get_signal", {"ticker": "BBCA.JK", "interval": "1h"})).is_error
+    # A short Position makes loading the Portfolio fail, so a Scan that read it would show an error.
+    with closing(sqlite3.connect(db)) as conn, conn:
         conn.execute("INSERT INTO positions VALUES ('MSFT', 'short', 1, 100.0)")
+    fetcher.history_calls.clear()
 
     [entry] = entries(await call_tool(url, "scan", {"tickers": ["BBCA.JK"]}))
 
     assert entry["prev_close"] == 129.0
-    assert "re_entry_locks" not in entry
-    assert entry["re_entry_locks_error"] == "short Positions MSFT; clear each with set_position quantity 0"
+    assert not {"error", "re_entry_locks", "re_entry_locks_error"} & entry.keys()
+    assert {interval for _, _, interval, _ in fetcher.history_calls} == {"1d", "5m"}
