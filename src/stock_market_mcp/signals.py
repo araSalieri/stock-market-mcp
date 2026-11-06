@@ -242,7 +242,7 @@ def _min_confidence(conn: sqlite3.Connection) -> float | None:
 
 def _bands(conn: sqlite3.Connection, ticker: str | None, interval: str | None) -> list[dict]:
     """Outcome counts and Hit Rates of the current prompt version's Signals per Confidence band (1 / BANDS_PER_CONFIDENCE wide) and Verdict,
-    optionally for one ticker and/or Interval, bands with Signals only, ascending.
+    optionally for one ticker and/or Interval, bands with Signals only, ascending, each with only the Verdicts it has.
 
     Leaves out Signals that can never be scored: those missing a price their Outcome rule is judged by.
     """
@@ -263,7 +263,7 @@ def _bands(conn: sqlite3.Connection, ticker: str | None, interval: str | None) -
     return [
         {
             "band": band / BANDS_PER_CONFIDENCE,
-            **{verdict: _counts(verdict, tally[verdict]) for verdict in _TRACKED},
+            **{verdict: _counts(verdict, tally[verdict]) for verdict in _TRACKED if tally[verdict]},
             "buy_hit_rate": _rate(tally["buy"].get(buy.hit, 0), tally["buy"].get(buy.miss, 0), BAND_MIN_SCORED),
         }
         for band, tally in tallies.items()

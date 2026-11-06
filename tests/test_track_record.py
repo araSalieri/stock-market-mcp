@@ -29,7 +29,7 @@ def _seed(outcomes: dict, **kwargs) -> dict:
     return {"outcomes": [outcome for outcome, n in outcomes.items() for _ in range(n)], **kwargs}
 
 
-async def test_counts_signals_by_band_and_verdict_in_ascending_order(server_url, tmp_path):
+async def test_counts_signals_by_band_and_verdict_leaving_out_empty_verdicts(server_url, tmp_path):
     seeds = [
         _seed({"target": 2, "stop": 1, "expired": 1, None: 3}, confidence=0.8),
         _seed({"stop": 2}, verdict="cut", confidence=0.6, ticker="MSFT", interval="1h"),
@@ -45,7 +45,6 @@ async def test_counts_signals_by_band_and_verdict_in_ascending_order(server_url,
         "bands": [
             {
                 "band": 0.6,
-                "buy": empty_plan_counts,
                 "cut": {**empty_plan_counts, "stop": 2},
                 "hold": {"quiet": 3, "missed": 1, "pending": 1, "hit_rate": None},
                 "buy_hit_rate": None,
@@ -53,8 +52,6 @@ async def test_counts_signals_by_band_and_verdict_in_ascending_order(server_url,
             {
                 "band": 0.8,
                 "buy": {"target": 2, "stop": 1, "expired": 1, "pending": 3, "hit_rate": None},
-                "cut": empty_plan_counts,
-                "hold": {"quiet": 0, "missed": 0, "pending": 0, "hit_rate": None},
                 "buy_hit_rate": None,
             },
         ],
@@ -97,7 +94,7 @@ async def test_other_prompt_versions_and_signals_that_can_never_be_scored_are_le
     assert band["band"] == 0.8
     assert (band["buy"]["target"], band["buy"]["stop"]) == (1, 1)
     assert band["cut"]["target"] == 1
-    assert band["hold"]["quiet"] == 0
+    assert "hold" not in band
 
 
 @pytest.mark.parametrize(
