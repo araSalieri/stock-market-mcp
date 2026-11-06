@@ -6,7 +6,9 @@ import pandas as pd
 import pytest
 from fakes import FakeClassifier, FakeFetcher, flat_history, seed_signals
 
+from stock_market_mcp.portfolio import PortfolioStore
 from stock_market_mcp.prompt import PROMPT_VERSION
+from stock_market_mcp.signals import SignalLog
 
 
 def _signal(verdict, confidence=0.7):
@@ -26,7 +28,7 @@ FLAT = (101.0, 99.0)
 
 def _outcome(signal_maker, verdict, *bars, confidence=0.7, first=None, scored_on=None):
     """Outcome the classifier sees for one Signal made on first (default: 60 flat bars), then scored on scored_on (default: _later(*bars))."""
-    # Entry 100, ATR 2, default plans: long Stop 96 / Target 108, mirrored for a cut: Stop 104 / Target 92.
+    # Entry 100, ATR 2, default plans: long Stop 96 / Target 108, mirrored: Stop 104 / Target 92.
     first = flat_history() if first is None else first
     scored_on = _later(*bars) if scored_on is None else scored_on
     classifier = FakeClassifier(replies=[_signal(verdict, confidence), _signal("hold")])
@@ -40,8 +42,54 @@ def test_buy_reaching_its_target_first_is_a_target(signal_maker):
     assert _outcome(signal_maker, "buy", FLAT, (109.0, 99.0), (101.0, 90.0)) == "target"
 
 
-def test_cut_falling_to_its_mirrored_target_first_is_a_target(signal_maker):
-    assert _outcome(signal_maker, "cut", FLAT, (101.0, 91.0), (105.0, 99.0)) == "target"
+def _cut_outcome(signal_maker, tmp_path, *bars, buyback="low_20", cut_stop="high_20"):
+    """Outcome of a cut on a held AAPL, made on 60 flat bars, then scored on _later(*bars).
+
+    On flat bars the picks are the 20-bar low 99 (Buyback Price) and high 101 (Cut Stop).
+    """
+    PortfolioStore(tmp_path / "server.db").set("AAPL", 50, 90.0)
+    picks = {"buyback": {"choice": buyback, "confidence": 0.8}, "cut_stop": {"choice": cut_stop, "confidence": 0.6}}
+    classifier = FakeClassifier(replies=[{**_signal("cut", 0.3), "levels": picks}, _signal("hold")])
+    maker = signal_maker(FakeFetcher(history=[flat_history(), _later(*bars)]), classifier, ttl=0)
+    maker.make("AAPL", "1d")
+    maker.make("AAPL", "1d")
+    return json.loads(classifier.prompts[1])["previous_signal"]["outcome"]
+
+
+QUIET = (100.5, 99.5)
+
+
+def test_cut_falling_to_its_buyback_price_first_is_a_target(signal_maker, tmp_path):
+    assert _cut_outcome(signal_maker, tmp_path, QUIET, (100.5, 98.5), (101.5, 99.5)) == "target"
+
+
+def test_cut_rising_to_its_cut_stop_first_is_a_stop(signal_maker, tmp_path):
+    assert _cut_outcome(signal_maker, tmp_path, QUIET, (101.5, 99.5), (100.5, 98.5)) == "stop"
+
+
+def test_cut_reaching_both_levels_in_one_bar_is_a_stop(signal_maker, tmp_path):
+    assert _cut_outcome(signal_maker, tmp_path, QUIET, (101.5, 98.5)) == "stop"
+
+
+def test_cut_reaching_neither_level_within_20_later_bars_is_expired(signal_maker, tmp_path):
+    assert _cut_outcome(signal_maker, tmp_path, *[QUIET] * 20, (100.5, 98.5)) == "expired"
+
+
+@pytest.mark.parametrize("picks", [{"buyback": "none"}, {"cut_stop": "none"}])
+def test_cut_with_a_none_pick_is_never_scored(signal_maker, tmp_path, picks):
+    assert _cut_outcome(signal_maker, tmp_path, (101.5, 98.5), *[QUIET] * 20, **picks) == "pending"
+    # Only the later hold's 0.7 band: the 0.3 cut is left out.
+    assert [band["band"] for band in SignalLog(tmp_path / "server.db").track_record(None, None)["bands"]] == [0.7]
+
+
+def test_pending_cut_from_prompt_version_3_is_scored_at_its_stored_distances(signal_maker, tmp_path):
+    # seed_signals stores the mirrored default distances: Stop 104, Target 92.
+    seed_signals(tmp_path / "server.db", [None], verdict="cut", prompt_version=3)
+    history = _later((103.0, 91.0))
+    history.index = pd.date_range(end="2023-01-02", periods=len(history), freq="D", name="Date")
+    classifier = FakeClassifier(replies=[_signal("hold")])
+    signal_maker(FakeFetcher(history=history), classifier, ttl=0).make("AAPL", "1d")
+    assert json.loads(classifier.prompts[0])["previous_signal"]["outcome"] == "target"
 
 
 def test_pending_sell_from_an_older_prompt_version_is_scored_as_a_cut(signal_maker, tmp_path):
@@ -56,10 +104,6 @@ def test_pending_sell_from_an_older_prompt_version_is_scored_as_a_cut(signal_mak
 
 def test_buy_reaching_its_stop_first_is_a_stop(signal_maker):
     assert _outcome(signal_maker, "buy", FLAT, (101.0, 95.0), (109.0, 99.0)) == "stop"
-
-
-def test_cut_rising_to_its_mirrored_stop_first_is_a_stop(signal_maker):
-    assert _outcome(signal_maker, "cut", (105.0, 99.0), (101.0, 91.0)) == "stop"
 
 
 def test_stop_and_target_in_one_bar_is_a_stop(signal_maker):
