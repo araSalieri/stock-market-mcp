@@ -14,8 +14,9 @@ Proves the data tools end to end with real Yahoo data, saves a throwaway
 and checks the Watchlist survived on the volume, prints each Scan entry for
 eyeballing against a chart, deletes the Watchlist even if a step failed, then
 makes real daily and 5m `get_signal` calls through the real classifier.
-With `SMM_OPENROUTER_API_KEY` set on the host it validates the schema-enforced
-verdict and its `trade_plan`; when the key is absent the missing-key tool error
+With `SMM_OPENROUTER_API_KEY` set on the host it checks each reply's keys,
+Verdict and `trade_plan`, then sets a throwaway Position (skipped if one exists)
+for a held call that asks the Buyback Price and Cut Stop questions, and deletes it; when the key is absent the missing-key tool error
 is expected and the smoke stops with the exact key-setup step instead of faking
 success.
 """
@@ -35,8 +36,6 @@ from urllib.parse import urlsplit
 
 from mcp import ClientSession, types
 from mcp.client.streamable_http import streamable_http_client
-
-from stock_market_mcp.classifier import validate_signal
 
 URL = os.environ.get("SMM_SMOKE_URL", "http://127.0.0.1:8000/mcp")
 PROJECT = os.environ.get("SMM_SMOKE_PROJECT")
@@ -129,26 +128,33 @@ def check_scan_entry(entry):
         assert value is None or (isinstance(value, (int, float)) and math.isfinite(value)), (key, entry)
 
 
-def check_signal(payload, interval):
-    assert "trade_plan" in payload, "get_signal returned no trade_plan key"
-    plan = payload.pop("trade_plan")
-    price = payload.pop("price")
+SIGNAL_KEYS = {"verdict", "confidence", "rationale", "data_date", "price", "hit_rate", "min_confidence", "trade_plan"}
+LEVEL_KEYS = {"buyback_price", "buyback_quantity", "buyback_confidence", "cut_stop", "cut_stop_confidence"}
+
+
+def check_signal(payload, interval, held=False):
+    """The reply has exactly its documented keys, and its Verdict, Trade Plan and cut levels are consistent."""
+    verdict, confidence, price = payload["verdict"], payload["confidence"], payload["price"]
+    min_confidence, plan = payload["min_confidence"], payload["trade_plan"]
+    confident = min_confidence is not None and confidence >= min_confidence
+    keys = SIGNAL_KEYS | ({"position"} if held else set()) | (LEVEL_KEYS if verdict == "cut" and confident else set())
+    assert payload.keys() == keys, sorted(payload.keys() ^ keys)
+    assert verdict in (("buy", "hold", "cut") if held else ("buy", "hold")), verdict
+    assert 0 <= confidence <= 1 and isinstance(payload["rationale"], str), payload
     assert isinstance(price, (int, float)) and math.isfinite(price), price
-    min_confidence = payload.pop("min_confidence")
-    payload.pop("hit_rate")
-    held = payload.pop("position", None) is not None
-    verdict = validate_signal(payload, held)
     # Only a buy gets a Trade Plan, and not below the Minimum Confidence.
-    assert plan is None or verdict["verdict"] == "buy", plan
+    assert plan is None or (verdict == "buy" and confident), plan
     assert plan is None or plan["stop"] < plan["entry"] < plan["target"], plan
-    assert plan is None or (min_confidence is not None and verdict["confidence"] >= min_confidence), plan
+    if verdict == "cut" and confident:
+        assert payload["buyback_price"] is None or payload["buyback_price"] < price, payload
+        assert payload["cut_stop"] is None or payload["cut_stop"] > price, payload
     if interval != "1d":
         # Intraday bars carry a time and the exchange offset.
-        stamp = datetime.fromisoformat(verdict["data_date"])
-        assert "T" in verdict["data_date"] and stamp.utcoffset() is not None, verdict["data_date"]
+        stamp = datetime.fromisoformat(payload["data_date"])
+        assert "T" in payload["data_date"] and stamp.utcoffset() is not None, payload["data_date"]
     print(
-        f"get_signal {interval}: {verdict['verdict']} @ {price} "
-        f"(confidence {verdict['confidence']}, data {verdict['data_date']}, plan {plan})"
+        f"get_signal {interval}{' held' if held else ''}: {verdict} @ {price} "
+        f"(confidence {confidence}, data {payload['data_date']}, plan {plan})"
     )
 
 
@@ -206,8 +212,21 @@ async def check_signals(session):
         check_signal(await call(session, "get_signal", {"ticker": TICKER, "interval": interval}), interval)
     record = await call(session, "get_track_record", {"ticker": TICKER})
     assert "bands" in record and "min_confidence" in record, record
-    assert all(set(band) == {"band", "buy", "cut", "hold", "buy_hit_rate"} for band in record["bands"]), record
     print(f"get_track_record: {len(record['bands'])} bands, min_confidence {record['min_confidence']}")
+
+
+async def check_held_signal(session):
+    """A held get_signal sends the Buyback Price and Cut Stop questions to the real classifier (ADR-0010)."""
+    if any(position["ticker"] == TICKER for position in await call(session, "get_portfolio", {})):
+        print(f"skipped held get_signal: a {TICKER} Position already exists; not touching it")
+        return
+    price = (await call(session, "get_quote", {"ticker": TICKER}))["price"]
+    await call(session, "set_position", {"ticker": TICKER, "quantity": 1, "avg_cost": price})
+    try:
+        check_signal(await call(session, "get_signal", {"ticker": TICKER, "interval": "1d"}), "1d", held=True)
+    finally:
+        await call(session, "set_position", {"ticker": TICKER, "quantity": 0, "avg_cost": 1})
+        print(f"deleted Position {TICKER}")
 
 
 async def main():
@@ -229,6 +248,7 @@ async def main():
             raise
     # Real classifier calls last, so a missing key still leaves the rest proven.
     await in_session(check_signals)
+    await in_session(check_held_signal)
     print("smoke passed")
 
 

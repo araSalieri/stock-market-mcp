@@ -1,7 +1,8 @@
 """Classifier: the injectable seam that gives get_signal its Verdict and Confidence.
 
 The Protocol mirrors DataFetcher's pattern: tests inject a fake, and the real
-transport below is the only OpenRouter-aware code in the server.
+transport below is the only OpenRouter-aware code in the server. What the Decisions
+API can answer, and what is still unverified: docs/decisions-api.md.
 """
 
 import os
