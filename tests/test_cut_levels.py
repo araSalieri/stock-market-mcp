@@ -91,3 +91,22 @@ def test_a_side_with_no_level_is_not_asked_and_is_null(signal_maker, tmp_path):
         "cut_stop": None,
         "cut_stop_confidence": None,
     }
+
+
+SIGNAL_KEYS = {"verdict", "confidence", "rationale", "data_date", "price", "hit_rate", "min_confidence", "trade_plan"}
+
+
+@pytest.mark.parametrize(
+    ("held", "verdict", "keys"),
+    [
+        ("MSFT", "hold", SIGNAL_KEYS),
+        ("AAPL", "hold", SIGNAL_KEYS | {"position"}),
+        ("AAPL", "cut", SIGNAL_KEYS | {"position"} | LEVEL_KEYS),
+    ],
+)
+def test_each_reply_has_exactly_its_documented_keys(signal_maker, tmp_path, held, verdict, keys):
+    # Pinned so an internal key (such as the classifier's picks) can't leak into the reply unnoticed.
+    signal = _signal(verdict) if held == "AAPL" else {"verdict": verdict, "confidence": 0.7, "rationale": "test"}
+    [reply] = _make(signal_maker, tmp_path, FakeClassifier(signal), held=held)
+
+    assert reply.keys() == keys
