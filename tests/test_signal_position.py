@@ -37,6 +37,7 @@ def test_held_position_rides_on_the_signal_with_pnl_at_its_price(signal_maker, t
         "unrealised_pnl_pct": pytest.approx(100 / 9),
         "cut_loss": False,
         "cut_loss_hit_rate": None,
+        "cut_min_confidence": 0.6,
     }
 
 
@@ -66,6 +67,7 @@ def test_cached_signal_shows_the_current_position(signal_maker, tmp_path):
         "unrealised_pnl_pct": pytest.approx(40 / 360 * 100),
         "cut_loss": False,
         "cut_loss_hit_rate": None,
+        "cut_min_confidence": 0.6,
     }
     assert len(classifier.prompts) == 1
 
@@ -128,33 +130,33 @@ def test_position_survives_row_trimming(signal_maker, tmp_path, monkeypatch):
 
 
 def _cut_loss_reply(signal_maker, tmp_path, signal, avg_cost=110.0, seed=False) -> dict:
-    """SignalMaker reply for a held AAPL at flat close 100; seed=True makes the Minimum Confidence null."""
+    """SignalMaker reply for a held AAPL at flat close 100; seed=True makes the Cut Minimum Confidence null."""
     db = tmp_path / "smm.db"
     maker = _maker(signal_maker, tmp_path, FakeClassifier(signal))
-    if seed:  # 30 scored in the 0.9 band at under break-even, so no band qualifies
-        seed_signals(db, ["target"] * 10 + ["stop"] * 20, confidence=0.9)
+    if seed:  # 30 scored 5m cuts in the 0.9 band under their Cut Break-even (1/3), so no band beats it
+        seed_signals(db, ["target"] * 9 + ["stop"] * 21, verdict="cut", confidence=0.9, interval="5m")
     set_position(tmp_path, "AAPL", avg_cost=avg_cost)
     return maker.make("aapl")
 
 
 def test_cut_on_a_losing_position_is_a_cut_loss(signal_maker, tmp_path):
-    # No scored Signals, so the Minimum Confidence is the 0.6 default; 0.6 itself counts.
+    # No scored cuts, so the Cut Minimum Confidence is the 0.6 default; 0.6 itself counts.
     payload = _cut_loss_reply(signal_maker, tmp_path, _signal("cut", 0.6))
 
-    assert payload["min_confidence"] == 0.6
+    assert payload["position"]["cut_min_confidence"] == 0.6
     assert payload["position"]["cut_loss"] is True
 
 
-def test_below_the_minimum_confidence_is_not_a_cut_loss(signal_maker, tmp_path):
+def test_below_the_cut_minimum_confidence_is_not_a_cut_loss(signal_maker, tmp_path):
     payload = _cut_loss_reply(signal_maker, tmp_path, _signal("cut", 0.59))
 
     assert payload["position"]["cut_loss"] is False
 
 
-def test_null_minimum_confidence_is_never_a_cut_loss(signal_maker, tmp_path):
+def test_null_cut_minimum_confidence_is_never_a_cut_loss(signal_maker, tmp_path):
     payload = _cut_loss_reply(signal_maker, tmp_path, _signal("cut", 1.0), seed=True)
 
-    assert payload["min_confidence"] is None
+    assert payload["position"]["cut_min_confidence"] is None
     assert payload["position"]["cut_loss"] is False
 
 
@@ -199,7 +201,7 @@ def _stored_cut_loss(db) -> list:
 @pytest.mark.parametrize(
     ("held", "verdict", "confidence", "avg_cost", "stored"),
     [
-        ("AAPL", "cut", 0.3, 110.0, 1),  # below the Minimum Confidence still counts
+        ("AAPL", "cut", 0.3, 110.0, 1),  # below the Cut Minimum Confidence still counts
         ("AAPL", "cut", 0.7, 90.0, 0),  # profitable
         ("MSFT", "hold", 0.7, 110.0, None),  # AAPL not held
     ],

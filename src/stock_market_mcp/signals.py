@@ -37,6 +37,12 @@ BANDS_PER_CONFIDENCE = 10
 # Confidence band as an integer (6 for 0.6-0.69); the epsilon keeps 0.6 in band 6 despite float error.
 BAND = f"CAST(confidence * {BANDS_PER_CONFIDENCE} + 1e-9 AS INTEGER)"
 
+# Cut Break-even of a group of cuts, over its Targets and Stops (binds the hit then miss Outcome); a cut's Cut Stop and
+# Buyback Price are stored as its short_stop and short_target.
+_CUT_BREAK_EVEN = (
+    "AVG((short_stop - price) / (short_stop - short_target)) FILTER (WHERE outcome IN (?, ?))"
+)
+
 # Outcome is null while pending; plan prices are the default Trade Plans, null when one has non-positive prices.
 # cut_loss: 1 when the Verdict was cut on a losing Position at any Confidence, 0 when held otherwise, null when not held.
 SCHEMA = """CREATE TABLE IF NOT EXISTS signals (
@@ -114,8 +120,10 @@ class SignalLog:
         atr_multiple: float,
         reward_ratio: float,
     ) -> dict:
-        """The reply fields for a Signal made on history's last bar: hit_rate, min_confidence, trade_plan, cut_loss and
-        cut_loss_hit_rate when held, and on a confident cut its picked levels with the Buyback Quantity.
+        """The reply fields for a Signal made on history's last bar: hit_rate, min_confidence, trade_plan, cut_loss,
+        cut_loss_hit_rate and cut_min_confidence when held, and on a confident cut its picked levels with the Buyback Quantity.
+
+        A buy is confident at or above the Minimum Confidence, a cut at or above its Interval's Cut Minimum Confidence.
 
         A fresh Signal is recorded with both default Trade Plans at price (a cut with its picked levels instead of the
         mirrored one) and its cut_loss: a cut on a losing Position at
@@ -125,15 +133,21 @@ class SignalLog:
         cut_loss = None if held is None else verdict == "cut" and held.losing
         with self._open() as conn:
             min_confidence = _min_confidence(conn)
+            cut_min_confidence = _cut_min_confidence(conn, interval)
             hit_rate = _hit_rate(conn, ticker, interval, verdict)
-            confident = min_confidence is not None and signal["confidence"] >= min_confidence
+            gate = cut_min_confidence if verdict == "cut" else min_confidence
+            confident = gate is not None and signal["confidence"] >= gate
             gets_plan = confident and verdict == "buy"
             plan = _trade_plan(history, price, atr_multiple, reward_ratio) if gets_plan else None
             if fresh:
                 _record(conn, ticker, interval, signal, history, price, cut_loss)
             fields = {"hit_rate": hit_rate, "min_confidence": min_confidence, "trade_plan": plan}
             if cut_loss is not None:
-                fields |= {"cut_loss": confident and cut_loss, "cut_loss_hit_rate": _cut_loss_hit_rate(conn)}
+                fields |= {
+                    "cut_loss": confident and cut_loss,
+                    "cut_loss_hit_rate": _cut_loss_hit_rate(conn),
+                    "cut_min_confidence": cut_min_confidence,
+                }
         if confident and verdict == "cut" and held is not None:
             cut_levels = signal["cut_levels"]
             buyback = cut_levels["buyback_price"]
@@ -236,6 +250,30 @@ def _min_confidence(conn: sqlite3.Connection) -> float | None:
     scored = [(band, rate) for band, rate in rates if rate is not None]
     for band, rate in scored:
         if rate > BREAK_EVEN_HIT_RATE:
+            return band / BANDS_PER_CONFIDENCE
+    return None if scored else MIN_CONFIDENCE
+
+
+def _cut_min_confidence(conn: sqlite3.Connection, interval: str) -> float | None:
+    """Lowest Confidence band of the current prompt version's cuts on this Interval whose Hit Rate is above its Cut Break-even.
+
+    Same rule as _min_confidence otherwise: cuts on any Position count, MIN_CONFIDENCE while no band has
+    BAND_MIN_SCORED Targets plus Stops, None when some do but none beats its Cut Break-even.
+    """
+    cut = _RULES["cut"]
+    bands = conn.execute(
+        f"SELECT {BAND} AS band, COUNT(*) FILTER (WHERE outcome = ?), COUNT(*) FILTER (WHERE outcome = ?), "
+        f"{_CUT_BREAK_EVEN} FROM signals WHERE prompt_version = ? AND verdict = 'cut' AND interval = ? "
+        "GROUP BY band ORDER BY band",
+        (cut.hit, cut.miss, cut.hit, cut.miss, PROMPT_VERSION, interval),
+    ).fetchall()
+    scored = [
+        (band, rate, break_even)
+        for band, targets, stops, break_even in bands
+        if (rate := _rate(targets, stops, BAND_MIN_SCORED)) is not None
+    ]
+    for band, rate, break_even in scored:
+        if rate > break_even:
             return band / BANDS_PER_CONFIDENCE
     return None if scored else MIN_CONFIDENCE
 
