@@ -45,7 +45,7 @@ async def test_counts_signals_by_band_and_verdict_leaving_out_empty_verdicts(ser
         "bands": [
             {
                 "band": 0.6,
-                "cut": {**empty_plan_counts, "stop": 2},
+                "cut": {**empty_plan_counts, "stop": 2, "break_even": pytest.approx(1 / 3)},
                 "hold": {"quiet": 3, "missed": 1, "pending": 1, "hit_rate": None},
                 "buy_hit_rate": None,
             },
@@ -57,6 +57,7 @@ async def test_counts_signals_by_band_and_verdict_leaving_out_empty_verdicts(ser
         ],
         "min_confidence": 0.6,
         "cut_loss_hit_rate": None,
+        "cut_min_confidence": None,
     }
 
 
@@ -195,3 +196,36 @@ async def test_opening_a_database_with_re_entry_lock_data_drops_it_and_keeps_old
     with closing(sqlite3.connect(db)) as conn:
         assert conn.execute("SELECT name FROM sqlite_master WHERE name = 'reentry_locks'").fetchone() is None
         assert "re_entry" not in {column[1] for column in conn.execute("PRAGMA table_info(signals)")}
+
+
+async def test_cut_break_even_per_band_follows_filters_and_is_null_without_scored_cuts(server_url, tmp_path):
+    seeds = [
+        # Default cut levels: Cut Stop 104 and Buyback Price 92 at a Price of 100, break-even 4 / 12 = 1/3.
+        _seed({"target": 1, "stop": 1}, verdict="cut", confidence=0.6),
+        # Cut Stop 108 and Buyback Price 98: break-even 0.8; expired and pending cuts don't move it.
+        _seed({"stop": 2}, verdict="cut", confidence=0.6, short=(108.0, 98.0)),
+        _seed({"expired": 1, None: 1}, verdict="cut", confidence=0.6, short=(101.0, 50.0)),
+        _seed({"target": 1}, verdict="cut", confidence=0.6, ticker="MSFT", short=(108.0, 98.0)),
+        _seed({"expired": 1, None: 1}, verdict="cut", confidence=0.8),
+    ]
+    all_tickers = await _track_record(server_url, tmp_path, seeds)
+    aapl = await _track_record(server_url, tmp_path, [], {"ticker": "aapl"})
+
+    # (1/3 * 2 + 0.8 * 3) / 5 over every ticker; (1/3 * 2 + 0.8 * 2) / 4 over AAPL.
+    assert [band["cut"]["break_even"] for band in all_tickers["bands"]] == [pytest.approx(46 / 75), None]
+    assert [band["cut"]["break_even"] for band in aapl["bands"]] == [pytest.approx(17 / 30), None]
+
+
+@pytest.mark.parametrize(("args", "expected"), [({"interval": "1d"}, 0.7), ({"interval": "1h"}, 0.6), ({}, None)])
+async def test_cut_min_confidence_matches_get_signal_for_the_interval_and_is_null_without_one(
+    signal_maker, server_url, tmp_path, args, expected
+):
+    db = tmp_path / "s.db"
+    seed_signals(db, ["target"] * 20 + ["stop"] * 10, verdict="cut", confidence=0.7)
+    PortfolioStore(db).set("TSLA", 10, 90.0)
+    reply = await _track_record(server_url, tmp_path, [], args)
+
+    assert reply["cut_min_confidence"] == expected
+    if expected is not None:
+        signal = signal_maker(FakeFetcher(history=flat_history()), FakeClassifier(), db_path=db).make("tsla", args["interval"])
+        assert signal["position"]["cut_min_confidence"] == expected
