@@ -19,7 +19,7 @@ The classifier's own 0–1 estimate that the Verdict is right. Self-reported, no
 _Avoid_: Probability, certainty, score
 
 **Minimum Confidence**:
-The lowest Confidence at which a buy gets a Trade Plan or a cut counts. Set by the server from buy Hit Rates: 0.6 until enough Signals are scored, and none when enough are scored but no Confidence band beats break-even, so no buy gets a Trade Plan.
+The lowest Confidence at which a buy gets a Trade Plan. Set by the server from buy Hit Rates: 0.6 until enough Signals are scored, and none when enough are scored but no Confidence band beats break-even, so no buy gets a Trade Plan.
 _Avoid_: Threshold, cut-off
 
 **Price**:
@@ -105,15 +105,23 @@ A Position's profit or loss if closed at a given price: the price minus the aver
 _Avoid_: Gain, return, open P&L
 
 **Cut Loss**:
-A cut Verdict at or above the Minimum Confidence while the Position's Unrealised P&L at the Price is negative. Advisory only; the server never closes the Position.
+A cut Verdict at or above the Cut Minimum Confidence while the Position's Unrealised P&L at the Price is negative. Advisory only; the server never closes the Position.
 _Avoid_: Stop out, exit signal, bail
+
+**Cut Break-even**:
+The Hit Rate a set of scored cuts must beat to have been worth it: the average over those cuts of the Cut Stop distance divided by the Cut Stop distance plus the Buyback Price distance, each measured from the cut's Price. A cut with a near Cut Stop and a far Buyback Price has a low bar to clear and a small chance of clearing it.
+_Avoid_: Cut threshold, fair rate
+
+**Cut Minimum Confidence**:
+The lowest Confidence at which a cut counts, per Interval: it makes a Cut Loss and gets a Buyback Price and Cut Stop. Set by the server from that Interval's scored cuts on any Position the same way buy sets the Minimum Confidence, against the Cut Break-even: 0.6 until enough are scored, and none when enough are scored but no Confidence band beats its Cut Break-even, so no cut on that Interval counts.
+_Avoid_: Cut threshold, cut gate
 
 **Cut Loss Hit Rate**:
 The Hit Rate over every scored cut on a losing Position, across all tickers and Intervals and at any Confidence. Measures whether cutting was right. Reported only; it sets nothing.
 _Avoid_: Exit accuracy, cut rate
 
 **Buyback Price**:
-The level below a cut's Price at which getting back in is cheaper, picked by the classifier from chart levels below the Price (the 20-bar and 50-bar lows, the lower Bollinger Band, the 10-bar EMA, the SMA, VWAP), or none when no level fits. Given on a cut at or above the Minimum Confidence, in that Signal. Reaching it first makes the cut's Outcome a Target; otherwise it changes nothing.
+The level below a cut's Price at which getting back in is cheaper, picked by the classifier from chart levels below the Price (the 20-bar and 50-bar lows, the lower Bollinger Band, the 10-bar EMA, the SMA, VWAP), or none when no level fits. Given on a cut at or above the Cut Minimum Confidence, in that Signal. Reaching it first makes the cut's Outcome a Target; otherwise it changes nothing.
 _Avoid_: Re-entry target, short target, buy-the-dip price
 
 **Cut Stop**:

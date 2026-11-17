@@ -92,6 +92,7 @@ class SignalMaker:
                 **asdict(held),
                 "cut_loss": reply.pop("cut_loss"),
                 "cut_loss_hit_rate": reply.pop("cut_loss_hit_rate"),
+                "cut_min_confidence": reply.pop("cut_min_confidence"),
             }
         return reply
 

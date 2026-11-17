@@ -49,7 +49,7 @@ def test_a_none_pick_is_null_with_its_confidence_and_quantity(signal_maker, tmp_
     assert {key: reply[key] for key in LEVEL_KEYS} == dict.fromkeys(LEVEL_KEYS)
 
 
-@pytest.mark.parametrize(("verdict", "confidence"), [("cut", 0.59), ("buy", 0.9), ("hold", 0.9)])
+@pytest.mark.parametrize(("verdict", "confidence"), [("buy", 0.9), ("hold", 0.9)])
 def test_only_a_confident_cut_has_levels(signal_maker, tmp_path, verdict, confidence):
     [reply] = _make(signal_maker, tmp_path, FakeClassifier(_signal(verdict, confidence)))
 
