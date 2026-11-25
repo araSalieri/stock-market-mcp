@@ -263,6 +263,23 @@ async def test_dip_break_even_per_band_follows_filters_and_is_null_without_score
     assert [band["dip"]["break_even"] for band in one_day["bands"]] == [pytest.approx(1 / 2), None]
 
 
+async def test_ticker_filter_applies_to_dip_rows_and_their_dip_break_even(server_url, tmp_path):
+    seeds = [
+        # Default dip levels: Stop 96 and Target 108 at a Price of 100, break-even 1/3.
+        _seed({"target": 1, "stop": 1}, verdict="dip", confidence=0.6),
+        # Stop 90 and Target 105: break-even 2/3.
+        _seed({"stop": 2, None: 1}, verdict="dip", confidence=0.6, ticker="MSFT", long=(90.0, 105.0)),
+        _seed({"expired": 1}, verdict="dip", confidence=0.8, ticker="MSFT"),
+    ]
+    await _track_record(server_url, tmp_path, seeds)
+    msft = await _track_record(server_url, tmp_path, [], {"ticker": "msft"})
+
+    assert [band["dip"] for band in msft["bands"]] == [
+        {"target": 0, "stop": 2, "expired": 0, "pending": 1, "hit_rate": None, "break_even": pytest.approx(2 / 3)},
+        {"target": 0, "stop": 0, "expired": 1, "pending": 0, "hit_rate": None, "break_even": None},
+    ]
+
+
 @pytest.mark.parametrize("args", [{}, {"ticker": "msft", "interval": "1h"}])
 async def test_dip_min_confidence_matches_get_signal_whatever_the_filter(signal_maker, server_url, tmp_path, args):
     db = tmp_path / "s.db"
