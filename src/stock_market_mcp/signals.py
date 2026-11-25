@@ -238,7 +238,7 @@ def _min_confidence(conn: sqlite3.Connection) -> float | None:
 def _cut_min_confidence(conn: sqlite3.Connection, interval: str) -> float | None:
     """Lowest Confidence band of the current prompt version's cuts on this Interval, on any Position, whose Hit Rate is
     above its Cut Break-even (see _lowest_band)."""
-    break_evens = _cut_break_evens(conn, None, interval)
+    break_evens = _break_evens(conn, "cut", None, interval)
     # A band with scored cuts always has a Cut Break-even, and only those reach break_even.
     return _lowest_band(_band_counts(conn, "cut", interval), lambda band: cast("float", break_evens[band]))
 
@@ -267,17 +267,20 @@ def _lowest_band(bands: list[tuple[int, int, int]], break_even: Callable[[int], 
     return None if scored else MIN_CONFIDENCE
 
 
-def _cut_break_evens(conn: sqlite3.Connection, ticker: str | None, interval: str | None) -> dict[int, float | None]:
-    """Cut Break-even per Confidence band of the current prompt version's cuts, optionally for one ticker and/or
-    Interval, over their Targets and Stops; None in a band without any."""
-    cut = _RULES["cut"]
-    # A cut's Cut Stop and Buyback Price are stored as its short_stop and short_target.
+def _break_evens(
+    conn: sqlite3.Connection, verdict: str, ticker: str | None, interval: str | None
+) -> dict[int, float | None]:
+    """Break-even per Confidence band of the current prompt version's Signals with this verdict (one whose Rule's plan
+    is its picked Stop and Target, such as cut's Cut Break-even), optionally for one ticker and/or Interval, over their
+    hits and misses; None in a band without any."""
+    rule = _RULES[verdict]
+    stop, target = rule.plan
     return dict(
         conn.execute(
-            f"SELECT {BAND} AS band, AVG((short_stop - price) / (short_stop - short_target)) "
-            "FILTER (WHERE outcome IN (?, ?)) FROM signals WHERE prompt_version = ? AND verdict = 'cut' "
+            f"SELECT {BAND} AS band, AVG(({stop} - price) / ({stop} - {target})) "
+            "FILTER (WHERE outcome IN (?, ?)) FROM signals WHERE prompt_version = ? AND verdict = ? "
             "AND (? IS NULL OR ticker = ?) AND (? IS NULL OR interval = ?) GROUP BY band",
-            (cut.hit, cut.miss, PROMPT_VERSION, ticker, ticker, interval, interval),
+            (rule.hit, rule.miss, PROMPT_VERSION, verdict, ticker, ticker, interval, interval),
         ).fetchall()
     )
 
@@ -303,7 +306,7 @@ def _bands(conn: sqlite3.Connection, ticker: str | None, interval: str | None) -
     for band, verdict, outcome, count in rows:
         tallies.setdefault(band, {v: {} for v in _TRACKED})[verdict][outcome] = count
     buy = _RULES["buy"]
-    break_evens = _cut_break_evens(conn, ticker, interval)
+    break_evens = _break_evens(conn, "cut", ticker, interval)
     return [
         {
             "band": band / BANDS_PER_CONFIDENCE,
