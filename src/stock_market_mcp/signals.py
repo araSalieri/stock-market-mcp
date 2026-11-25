@@ -114,28 +114,37 @@ class SignalLog:
         atr_multiple: float,
         reward_ratio: float,
     ) -> dict:
-        """The reply fields for a Signal made on history's last bar: hit_rate, min_confidence, trade_plan, cut_loss,
-        cut_loss_hit_rate and cut_min_confidence when held, and on a confident cut its picked levels with the Buyback Quantity.
+        """The reply fields for a Signal made on history's last bar: hit_rate, min_confidence, trade_plan,
+        dip_min_confidence when not held, cut_loss, cut_loss_hit_rate and cut_min_confidence when held, and on a
+        confident cut its picked levels with the Buyback Quantity.
 
-        A buy is confident at or above the Minimum Confidence, a cut at or above its Interval's Cut Minimum Confidence.
+        A buy is confident at or above the Minimum Confidence, a dip at or above the Dip Minimum Confidence, a cut at
+        or above its Interval's Cut Minimum Confidence. A confident buy's Trade Plan is from ATR, a confident dip's
+        from its picked levels (none when either is missing).
 
-        A fresh Signal is recorded with both default Trade Plans at price (a cut with its picked levels instead of the
-        mirrored one) and its cut_loss: a cut on a losing Position at
-        any Confidence, null when not held.
+        A fresh Signal is recorded with both default Trade Plans at price (a dip with its picked levels instead of the
+        long one, a cut instead of the mirrored one) and its cut_loss: a cut on a losing Position at any Confidence,
+        null when not held.
         """
         verdict = signal["verdict"]
         cut_loss = None if held is None else verdict == "cut" and held.losing
         with self._open() as conn:
             min_confidence = _min_confidence(conn)
-            cut_min_confidence = None if held is None else _cut_min_confidence(conn, interval)
+            cut_min_confidence = None if held is None else _picked_min_confidence(conn, "cut", interval)
+            dip_min_confidence = None if held is not None else _picked_min_confidence(conn, "dip", None)
             hit_rate = _hit_rate(conn, ticker, interval, verdict)
-            required = cut_min_confidence if verdict == "cut" else min_confidence
+            required = {"cut": cut_min_confidence, "dip": dip_min_confidence}.get(verdict, min_confidence)
             confident = required is not None and signal["confidence"] >= required
-            gets_plan = confident and verdict == "buy"
-            plan = _trade_plan(history, price, atr_multiple, reward_ratio) if gets_plan else None
+            plan = None
+            if confident and verdict == "buy":
+                plan = _trade_plan(history, price, atr_multiple, reward_ratio)
+            elif confident and verdict == "dip":
+                plan = _dip_plan(price, signal["dip_levels"])
             if fresh:
                 _record(conn, ticker, interval, signal, history, price, cut_loss)
             fields = {"hit_rate": hit_rate, "min_confidence": min_confidence, "trade_plan": plan}
+            if held is None:
+                fields["dip_min_confidence"] = dip_min_confidence
             if cut_loss is not None:
                 fields |= {
                     "cut_loss": confident and cut_loss,
@@ -151,13 +160,14 @@ class SignalLog:
 
     def track_record(self, ticker: str | None, interval: str | None) -> dict:
         """The Track Record's bands, with the server-wide Minimum Confidence and Cut Loss Hit Rate get_signal reports, and
-        the Interval's Cut Minimum Confidence (None without one)."""
+        the Interval's Cut Minimum Confidence (None without one) and the Dip Minimum Confidence (all Intervals)."""
         with self._open() as conn:
             return {
                 "bands": _bands(conn, ticker, interval),
                 "min_confidence": _min_confidence(conn),
                 "cut_loss_hit_rate": _cut_loss_hit_rate(conn),
-                "cut_min_confidence": _cut_min_confidence(conn, interval) if interval else None,
+                "cut_min_confidence": _picked_min_confidence(conn, "cut", interval) if interval else None,
+                "dip_min_confidence": _picked_min_confidence(conn, "dip", None),
             }
 
 
@@ -171,9 +181,13 @@ def _record(
     cut_loss: bool | None,
 ) -> None:
     """Store one pending Signal at its data_date, with the default Trade Plan at price and its mirror, except that a
-    cut's mirrored Stop and Target are its picked Cut Stop and Buyback Price (null for none)."""
+    dip's Stop and Target are its picked ones, and a cut's mirrored Stop and Target its picked Cut Stop and Buyback
+    Price (null for none)."""
     long_stop, long_target = _default_plan(history, price, long=True)
     short_stop, short_target = _default_plan(history, price, long=False)
+    if signal["verdict"] == "dip":
+        dip_levels = signal["dip_levels"]
+        long_stop, long_target = dip_levels["stop"], dip_levels["target"]
     if signal["verdict"] == "cut":
         cut_levels = signal["cut_levels"]
         short_stop, short_target = cut_levels["cut_stop"], cut_levels["buyback_price"]
@@ -235,12 +249,13 @@ def _min_confidence(conn: sqlite3.Connection) -> float | None:
     return _lowest_band(_band_counts(conn, "buy", None), lambda _: BREAK_EVEN_HIT_RATE)
 
 
-def _cut_min_confidence(conn: sqlite3.Connection, interval: str) -> float | None:
-    """Lowest Confidence band of the current prompt version's cuts on this Interval, on any Position, whose Hit Rate is
-    above its Cut Break-even (see _lowest_band)."""
-    break_evens = _cut_break_evens(conn, None, interval)
-    # A band with scored cuts always has a Cut Break-even, and only those reach break_even.
-    return _lowest_band(_band_counts(conn, "cut", interval), lambda band: cast("float", break_evens[band]))
+def _picked_min_confidence(conn: sqlite3.Connection, verdict: str, interval: str | None) -> float | None:
+    """Lowest Confidence band of the current prompt version's Signals with this picked-levels verdict, optionally on
+    one Interval, whose Hit Rate is above its break-even (see _lowest_band, _break_evens): the Cut Minimum Confidence
+    per Interval, the Dip Minimum Confidence across all."""
+    break_evens = _break_evens(conn, verdict, None, interval)
+    # A band with scored Signals always has a break-even, and only those reach break_even.
+    return _lowest_band(_band_counts(conn, verdict, interval), lambda band: cast("float", break_evens[band]))
 
 
 def _band_counts(conn: sqlite3.Connection, verdict: str, interval: str | None) -> list[tuple[int, int, int]]:
@@ -267,17 +282,20 @@ def _lowest_band(bands: list[tuple[int, int, int]], break_even: Callable[[int], 
     return None if scored else MIN_CONFIDENCE
 
 
-def _cut_break_evens(conn: sqlite3.Connection, ticker: str | None, interval: str | None) -> dict[int, float | None]:
-    """Cut Break-even per Confidence band of the current prompt version's cuts, optionally for one ticker and/or
-    Interval, over their Targets and Stops; None in a band without any."""
-    cut = _RULES["cut"]
-    # A cut's Cut Stop and Buyback Price are stored as its short_stop and short_target.
+def _break_evens(
+    conn: sqlite3.Connection, verdict: str, ticker: str | None, interval: str | None
+) -> dict[int, float | None]:
+    """Break-even per Confidence band of the current prompt version's Signals with this verdict (one whose Rule's plan
+    is its picked Stop and Target: cut's Cut Break-even, dip's Dip Break-even), optionally for one ticker and/or Interval, over their
+    hits and misses; None in a band without any."""
+    rule = _RULES[verdict]
+    stop, target = rule.plan
     return dict(
         conn.execute(
-            f"SELECT {BAND} AS band, AVG((short_stop - price) / (short_stop - short_target)) "
-            "FILTER (WHERE outcome IN (?, ?)) FROM signals WHERE prompt_version = ? AND verdict = 'cut' "
+            f"SELECT {BAND} AS band, AVG(({stop} - price) / ({stop} - {target})) "
+            "FILTER (WHERE outcome IN (?, ?)) FROM signals WHERE prompt_version = ? AND verdict = ? "
             "AND (? IS NULL OR ticker = ?) AND (? IS NULL OR interval = ?) GROUP BY band",
-            (cut.hit, cut.miss, PROMPT_VERSION, ticker, ticker, interval, interval),
+            (rule.hit, rule.miss, PROMPT_VERSION, verdict, ticker, ticker, interval, interval),
         ).fetchall()
     )
 
@@ -285,7 +303,7 @@ def _cut_break_evens(conn: sqlite3.Connection, ticker: str | None, interval: str
 def _bands(conn: sqlite3.Connection, ticker: str | None, interval: str | None) -> list[dict]:
     """Outcome counts and Hit Rates of the current prompt version's Signals per Confidence band (1 / BANDS_PER_CONFIDENCE wide) and Verdict,
     optionally for one ticker and/or Interval, bands with Signals only, ascending, each with only the Verdicts it has;
-    a band's cut also has its Cut Break-even over the same filter, None without scored cuts.
+    a band's cut and dip also have their Cut or Dip Break-even over the same filter, None without scored ones.
 
     Leaves out Signals that can never be scored: those missing a price their Outcome rule is judged by.
     """
@@ -303,12 +321,13 @@ def _bands(conn: sqlite3.Connection, ticker: str | None, interval: str | None) -
     for band, verdict, outcome, count in rows:
         tallies.setdefault(band, {v: {} for v in _TRACKED})[verdict][outcome] = count
     buy = _RULES["buy"]
-    break_evens = _cut_break_evens(conn, ticker, interval)
+    break_evens = {verdict: _break_evens(conn, verdict, ticker, interval) for verdict in _PICKED}
     return [
         {
             "band": band / BANDS_PER_CONFIDENCE,
             **{
-                verdict: _counts(verdict, tally[verdict]) | ({"break_even": break_evens[band]} if verdict == "cut" else {})
+                verdict: _counts(verdict, tally[verdict])
+                | ({"break_even": break_evens[verdict][band]} if verdict in break_evens else {})
                 for verdict in _TRACKED
                 if tally[verdict]
             },
@@ -369,6 +388,14 @@ def _trade_plan(
     }
 
 
+def _dip_plan(entry: float, dip_levels: dict) -> dict | None:
+    """A dip's Trade Plan at entry (the Price) from its picked Stop and Target, with their Reward Ratio; None without both."""
+    stop, target = dip_levels["stop"], dip_levels["target"]
+    if stop is None or target is None:
+        return None
+    return {"entry": entry, "stop": stop, "target": target, "reward_ratio": (target - entry) / (entry - stop)}
+
+
 def _default_plan(history: pd.DataFrame, entry: float, *, long: bool) -> tuple[float | None, float | None]:
     """Stop and Target of the default Trade Plan stored with a Signal, or mirrored; nulls when that plan can't be made."""
     try:
@@ -411,15 +438,20 @@ class _Rule:
     other: tuple[str, ...] = ()
 
 
-# long_* is the default Trade Plan, short_* the same distances mirrored, or on a cut its picked Cut Stop and Buyback Price.
+# long_* is the default Trade Plan, or on a dip its picked Stop and Target; short_* the same distances mirrored, or on a
+# cut its picked Cut Stop and Buyback Price.
 _PLAN_COLUMNS = ("long_stop", "long_target", "short_stop", "short_target")
+_LONG = _Rule(("long_stop", "long_target"), partial(_outcome, long=True), "target", "stop", ("expired",))
 _CUT = _Rule(("short_stop", "short_target"), partial(_outcome, long=False), "target", "stop", ("expired",))
 _RULES = {
-    "buy": _Rule(("long_stop", "long_target"), partial(_outcome, long=True), "target", "stop", ("expired",)),
+    "buy": _LONG,
+    "dip": _LONG,
     "cut": _CUT,
     "hold": _Rule(("long_target", "short_target"), _hold_outcome, "quiet", "missed"),
     # Older prompt versions' sell exited the long, as cut does now.
     "sell": _CUT,
 }
 # Verdicts the current prompt version gives, each reported in a Track Record band.
-_TRACKED = ("buy", "cut", "hold")
+_TRACKED = ("buy", "dip", "cut", "hold")
+# Verdicts whose Stop and Target are picked levels, each with its own Break-even.
+_PICKED = ("cut", "dip")

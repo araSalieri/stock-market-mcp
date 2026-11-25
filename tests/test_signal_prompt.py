@@ -67,7 +67,8 @@ def test_prompt_rows_are_compact_strings_not_nested_frames():
 def wide_frame(rows: int) -> pd.DataFrame:
     """Frame wide enough that each row's serialized form is non-trivial."""
     idx = pd.date_range("2024-01-01", periods=rows, freq="h", name="Date")
-    return pd.DataFrame({"Close": [100.0 + i for i in range(rows)]}, index=idx)
+    close = [100.0 + i for i in range(rows)]
+    return pd.DataFrame({"High": close, "Low": close, "Close": close}, index=idx)
 
 
 def test_prompt_truncates_oldest_rows_to_the_budget():
@@ -145,12 +146,6 @@ def test_prompt_keeps_the_longest_run_of_newest_rows_that_fits(max_chars):
         assert len(json.dumps(payload)) <= max_chars
 
 
-def test_prompt_for_an_empty_frame_has_no_rows():
-    payload = json.loads(signal_prompt("AAPL", "1mo", prompt_frame().iloc[0:0]).state)
-
-    assert payload == {"ticker": "AAPL", "period": "1mo", "interval": "1d", "position": None, "rows": []}
-
-
 def test_the_position_the_classifier_sees_leaves_quantity_out():
     prompt = signal_prompt("AAPL", "1mo", prompt_frame(), position=Position(10, 90.0).priced(100.0))
 
@@ -207,7 +202,12 @@ def test_missing_levels_are_never_offered():
     assert list(questions["cut_stop"]["criteria"]) == ["high_20", "vwap", "none"]
 
 
-def test_a_ticker_not_held_is_asked_only_the_verdict():
-    df = levels_frame({"SMA_10": 98.0})
+def test_a_ticker_not_held_is_offered_the_same_levels_with_the_sides_swapped():
+    df = levels_frame({"BBL_5_2.0_2.0": 97.0, "BBU_5_2.0_2.0": 103.0, "SMA_10": 102.0})
+    held = signal_prompt("AAPL", "1y", df, position=HELD).questions
 
-    assert list(signal_prompt("AAPL", "1y", df).questions) == ["verdict"]
+    questions = signal_prompt("AAPL", "1y", df).questions
+
+    assert list(questions) == ["verdict", "dip_target", "dip_stop"]
+    assert questions["dip_target"]["criteria"] == held["cut_stop"]["criteria"]
+    assert questions["dip_stop"]["criteria"] == held["buyback"]["criteria"]

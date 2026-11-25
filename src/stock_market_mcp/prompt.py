@@ -16,7 +16,7 @@ from stock_market_mcp.bars import EMA_LENGTH
 from stock_market_mcp.portfolio import PricedPosition
 
 # Stored with each Signal; bump whenever anything below changes what the classifier sees (the golden prompt test checks).
-PROMPT_VERSION = 4
+PROMPT_VERSION = 5
 
 # typesafe/jev-1.13 rejects states over ~32k input tokens with a 400
 # max_tokens_exceeded (verified live); this payload tokenizes at ~1.2 chars per
@@ -33,6 +33,10 @@ class PreviousSignal(NamedTuple):
 
 _BUY = "Bullish momentum or trend evidence in the supplied data."
 _HOLD = "Mixed or insufficient evidence in the supplied data."
+_DIP = (
+    "Price stretched below its mean (near or under the lower Bollinger Band, RSI oversold) while the longer trend "
+    "still points up: a pullback likely to snap back."
+)
 
 # The question the Verdict hinges on: _NOT_HELD_QUESTIONS without a Position, _HELD_QUESTIONS with one.
 _NOT_HELD_QUESTIONS = {
@@ -42,7 +46,7 @@ _NOT_HELD_QUESTIONS = {
             "Given the supplied price history and indicators, is now the right "
             "time to buy this stock, or to hold off? The signal is advisory."
         ),
-        "criteria": {"buy": _BUY, "hold": _HOLD},
+        "criteria": {"buy": _BUY, "dip": _DIP, "hold": _HOLD},
     },
 }
 _HELD_QUESTIONS = {
@@ -62,7 +66,8 @@ _HELD_QUESTIONS = {
 }
 
 
-# The questions a held ticker is also asked (ADR-0010): each picks a chart level on its side of the Price, or none.
+# The level questions each ticker is also asked, the cut's when held (ADR-0010), the dip's when not (ADR-0012): each
+# picks a chart level on its side of the Price, or none.
 _LEVEL_INSTRUCTIONS = {
     "buyback": (
         "If the holder cuts now, which level below the price is the buyback price: where buying back is cheaper "
@@ -72,17 +77,24 @@ _LEVEL_INSTRUCTIONS = {
         "If the holder cuts now, which level above the price is the cut stop: where the cut is proven wrong? "
         "Pick none if no level fits."
     ),
+    "dip_target": (
+        "If this is a dip, which level above the price is the target: where the snap-back is likely to stop? "
+        "Pick none if no level fits."
+    ),
+    "dip_stop": (
+        "If this is a dip, which level below the price is the stop: where the pullback is proven wrong? "
+        "Pick none if no level fits."
+    ),
 }
-_NONE = {"buyback": "No level below the Price fits.", "cut_stop": "No level above the Price fits."}
+_ABOVE, _BELOW = "No level above the Price fits.", "No level below the Price fits."
+_NONE = {"buyback": _BELOW, "cut_stop": _ABOVE, "dip_target": _ABOVE, "dip_stop": _BELOW}
 
 
-def questions(candidates: dict[str, dict[str, float]] | None) -> dict:
-    """The Decisions questions: the Verdict alone without a Position (candidates None), else also one per side of
-    candidates that has any, offering them by name with the price in the description, plus none. A side with no
-    candidate isn't asked, since a choice of none alone may be rejected."""
-    if candidates is None:
-        return _NOT_HELD_QUESTIONS
-    return _HELD_QUESTIONS | {
+def questions(candidates: dict[str, dict[str, float]], *, held: bool) -> dict:
+    """The Decisions questions: the Verdict, held or not, then one per level question of candidates that has any,
+    offering them by name with the price in the description, plus none. A side with no candidate isn't asked, since a
+    choice of none alone may be rejected."""
+    return (_HELD_QUESTIONS if held else _NOT_HELD_QUESTIONS) | {
         question: {
             "type": "choice",
             "instructions": _LEVEL_INSTRUCTIONS[question],
@@ -151,13 +163,13 @@ def candidate_levels(df: pd.DataFrame) -> dict[str, dict[str, float]]:
 class SignalPrompt:
     """cache_key is the state without the previous Signal, so storing a Signal doesn't defeat the Signal cache.
 
-    questions are what the classifier is asked about the state; candidates the candidate levels by question and
-    name, a side's empty when it has none, None when not held."""
+    questions are what the classifier is asked about the state; candidates the candidate levels by level question
+    and name, the cut's when held and the dip's when not, a side's empty when it has none."""
 
     cache_key: str
     state: str
     questions: dict
-    candidates: dict[str, dict[str, float]] | None
+    candidates: dict[str, dict[str, float]]
 
 
 def signal_prompt(
@@ -195,8 +207,9 @@ def signal_prompt(
     if previous is not None:
         previous_view = {"verdict": previous.verdict, "confidence": previous.confidence, "outcome": previous.outcome or "pending"}
         state = json.dumps({**head, "previous_signal": previous_view, "rows": rows})
-    candidates = None if position is None else candidate_levels(df)
-    return SignalPrompt(cache_key, state, questions(candidates), candidates)
+    levels = candidate_levels(df)
+    candidates = levels if position is not None else {"dip_target": levels["cut_stop"], "dip_stop": levels["buyback"]}
+    return SignalPrompt(cache_key, state, questions(candidates, held=position is not None), candidates)
 
 
 def _rows(df: pd.DataFrame, head: dict, max_chars: int | None) -> list:
