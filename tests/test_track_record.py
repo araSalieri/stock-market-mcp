@@ -34,6 +34,7 @@ async def test_counts_signals_by_band_and_verdict_leaving_out_empty_verdicts(ser
         _seed({"target": 2, "stop": 1, "expired": 1, None: 3}, confidence=0.8),
         _seed({"stop": 2}, verdict="cut", confidence=0.6, ticker="MSFT", interval="1h"),
         _seed({"quiet": 3, "missed": 1, None: 1}, verdict="hold", confidence=0.69),
+        _seed({"target": 1, None: 1}, verdict="dip", confidence=0.85),
     ]
     reply = await _track_record(server_url, tmp_path, seeds)
 
@@ -52,12 +53,14 @@ async def test_counts_signals_by_band_and_verdict_leaving_out_empty_verdicts(ser
             {
                 "band": 0.8,
                 "buy": {"target": 2, "stop": 1, "expired": 1, "pending": 3, "hit_rate": None},
+                "dip": {**empty_plan_counts, "target": 1, "pending": 1, "break_even": pytest.approx(1 / 3)},
                 "buy_hit_rate": None,
             },
         ],
         "min_confidence": 0.6,
         "cut_loss_hit_rate": None,
         "cut_min_confidence": None,
+        "dip_min_confidence": 0.6,
     }
 
 
@@ -86,15 +89,19 @@ async def test_other_prompt_versions_and_signals_that_can_never_be_scored_are_le
         _seed({"quiet": 5}, verdict="hold", confidence=0.8, short_plan=False),
         _seed({"quiet": 5}, verdict="hold", confidence=0.8, long_plan=False),
         _seed({"target": 5}, confidence=0.3, prompt_version=PROMPT_VERSION - 1),
+        _seed({"target": 5}, verdict="dip", confidence=0.8, long=(None, 108.0)),
+        _seed({"target": 5}, verdict="dip", confidence=0.8, long=(96.0, None)),
         # Still scored: a buy only needs the long plan, a cut the mirrored one.
         _seed({"target": 1}, verdict="cut", confidence=0.8, long_plan=False),
         _seed({"stop": 1}, confidence=0.8, short_plan=False),
+        _seed({"stop": 1}, verdict="dip", confidence=0.8, short_plan=False),
     ]
     (band,) = (await _track_record(server_url, tmp_path, seeds))["bands"]
 
     assert band["band"] == 0.8
     assert (band["buy"]["target"], band["buy"]["stop"]) == (1, 1)
     assert band["cut"]["target"] == 1
+    assert (band["dip"]["target"], band["dip"]["stop"]) == (0, 1)
     assert "hold" not in band
 
 
@@ -126,10 +133,12 @@ async def test_a_bad_interval_is_rejected(server_url):
     assert result.is_error
 
 
-async def test_buy_hit_rate_leaves_out_cuts_and_is_null_at_29_scored_and_set_at_30(server_url, tmp_path):
+async def test_buy_hit_rate_leaves_out_cuts_and_dips_and_is_null_at_29_scored_and_set_at_30(server_url, tmp_path):
     seeds = [
         _seed({"target": 10, "stop": 19, "expired": 3, None: 3}, confidence=0.7),
         _seed({"target": 5, "stop": 9}, verdict="cut", confidence=0.7),
+        _seed({"target": 1}, verdict="dip", confidence=0.7),
+        _seed({"stop": 30}, verdict="dip", confidence=0.8),
         _seed({"target": 15, "stop": 15}, confidence=0.8),
         _seed({"target": 30}, verdict="cut", confidence=0.8),
         _seed({"quiet": 30}, verdict="hold", confidence=0.8),
@@ -207,6 +216,8 @@ async def test_cut_break_even_per_band_follows_filters_and_is_null_without_score
         _seed({"expired": 1, None: 1}, verdict="cut", confidence=0.6, short=(101.0, 50.0)),
         _seed({"target": 1}, verdict="cut", confidence=0.6, ticker="MSFT", short=(108.0, 98.0)),
         _seed({"expired": 1, None: 1}, verdict="cut", confidence=0.8),
+        # A scored dip in the band does not move the Cut Break-even.
+        _seed({"stop": 1}, verdict="dip", confidence=0.6, short=(101.0, 50.0)),
     ]
     all_tickers = await _track_record(server_url, tmp_path, seeds)
     aapl = await _track_record(server_url, tmp_path, [], {"ticker": "aapl"})
@@ -229,3 +240,36 @@ async def test_cut_min_confidence_matches_get_signal_for_the_interval_and_is_nul
     if expected is not None:
         signal = signal_maker(FakeFetcher(history=flat_history()), FakeClassifier(), db_path=db).make("tsla", args["interval"])
         assert signal["position"]["cut_min_confidence"] == expected
+
+
+async def test_dip_break_even_per_band_follows_filters_and_is_null_without_scored_dips(server_url, tmp_path):
+    seeds = [
+        # Default dip levels: Stop 96 and Target 108 at a Price of 100, break-even 4 / 12 = 1/3.
+        _seed({"target": 1, "stop": 1}, verdict="dip", confidence=0.6),
+        # Stop 90 and Target 105: break-even 10 / 15 = 2/3; expired and pending dips don't move it.
+        _seed({"stop": 2}, verdict="dip", confidence=0.6, long=(90.0, 105.0)),
+        _seed({"expired": 1, None: 1}, verdict="dip", confidence=0.6, long=(99.0, 150.0)),
+        _seed({"target": 1}, verdict="dip", confidence=0.6, interval="1h", long=(90.0, 105.0)),
+        _seed({"expired": 1, None: 1}, verdict="dip", confidence=0.8),
+    ]
+    every_interval = await _track_record(server_url, tmp_path, seeds)
+    one_day = await _track_record(server_url, tmp_path, [], {"interval": "1d"})
+
+    # (1/3 * 2 + 2/3 * 3) / 5 over every Interval; (1/3 * 2 + 2/3 * 2) / 4 over 1d.
+    assert [band["dip"] for band in every_interval["bands"]] == [
+        {"target": 2, "stop": 3, "expired": 1, "pending": 1, "hit_rate": None, "break_even": pytest.approx(8 / 15)},
+        {"target": 0, "stop": 0, "expired": 1, "pending": 1, "hit_rate": None, "break_even": None},
+    ]
+    assert [band["dip"]["break_even"] for band in one_day["bands"]] == [pytest.approx(1 / 2), None]
+
+
+@pytest.mark.parametrize("args", [{}, {"ticker": "msft", "interval": "1h"}])
+async def test_dip_min_confidence_matches_get_signal_whatever_the_filter(signal_maker, server_url, tmp_path, args):
+    db = tmp_path / "s.db"
+    # 9 of 30 under the 1/3 Dip Break-even, then 12 of 30 above it: the Dip Minimum Confidence is band 0.5.
+    seed_signals(db, ["target"] * 9 + ["stop"] * 21, verdict="dip", confidence=0.4)
+    seed_signals(db, ["target"] * 12 + ["stop"] * 18, verdict="dip", confidence=0.5)
+    reply = await _track_record(server_url, tmp_path, [], args)
+    signal = signal_maker(FakeFetcher(history=flat_history()), FakeClassifier(), db_path=db).make("tsla", "1d")
+
+    assert reply["dip_min_confidence"] == signal["dip_min_confidence"] == 0.5
