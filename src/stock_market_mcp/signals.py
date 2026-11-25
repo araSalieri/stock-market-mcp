@@ -160,13 +160,14 @@ class SignalLog:
 
     def track_record(self, ticker: str | None, interval: str | None) -> dict:
         """The Track Record's bands, with the server-wide Minimum Confidence and Cut Loss Hit Rate get_signal reports, and
-        the Interval's Cut Minimum Confidence (None without one)."""
+        the Interval's Cut Minimum Confidence (None without one) and the Dip Minimum Confidence (all Intervals)."""
         with self._open() as conn:
             return {
                 "bands": _bands(conn, ticker, interval),
                 "min_confidence": _min_confidence(conn),
                 "cut_loss_hit_rate": _cut_loss_hit_rate(conn),
                 "cut_min_confidence": _picked_min_confidence(conn, "cut", interval) if interval else None,
+                "dip_min_confidence": _picked_min_confidence(conn, "dip", None),
             }
 
 
@@ -302,7 +303,7 @@ def _break_evens(
 def _bands(conn: sqlite3.Connection, ticker: str | None, interval: str | None) -> list[dict]:
     """Outcome counts and Hit Rates of the current prompt version's Signals per Confidence band (1 / BANDS_PER_CONFIDENCE wide) and Verdict,
     optionally for one ticker and/or Interval, bands with Signals only, ascending, each with only the Verdicts it has;
-    a band's cut also has its Cut Break-even over the same filter, None without scored cuts.
+    a band's cut and dip also have their Cut or Dip Break-even over the same filter, None without scored ones.
 
     Leaves out Signals that can never be scored: those missing a price their Outcome rule is judged by.
     """
@@ -320,12 +321,13 @@ def _bands(conn: sqlite3.Connection, ticker: str | None, interval: str | None) -
     for band, verdict, outcome, count in rows:
         tallies.setdefault(band, {v: {} for v in _TRACKED})[verdict][outcome] = count
     buy = _RULES["buy"]
-    break_evens = _break_evens(conn, "cut", ticker, interval)
+    break_evens = {verdict: _break_evens(conn, verdict, ticker, interval) for verdict in ("cut", "dip")}
     return [
         {
             "band": band / BANDS_PER_CONFIDENCE,
             **{
-                verdict: _counts(verdict, tally[verdict]) | ({"break_even": break_evens[band]} if verdict == "cut" else {})
+                verdict: _counts(verdict, tally[verdict])
+                | ({"break_even": break_evens[verdict][band]} if verdict in break_evens else {})
                 for verdict in _TRACKED
                 if tally[verdict]
             },
@@ -449,4 +451,4 @@ _RULES = {
     "sell": _CUT,
 }
 # Verdicts the current prompt version gives, each reported in a Track Record band.
-_TRACKED = ("buy", "cut", "hold")
+_TRACKED = ("buy", "dip", "cut", "hold")
