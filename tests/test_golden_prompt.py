@@ -14,6 +14,7 @@ from stock_market_mcp.portfolio import PortfolioStore
 FINGERPRINTS = {
     3: "c9c7ffa3ffa594021d200f27cd11062ebb91eefc51cd4210ceebaea4a2e562b5",
     4: "8a4923b535b016f8c31fcb906364e6d10f7d2bc0a85081b1398e753fec5d80ba",
+    5: "2e0a8ed027027f0223e8fdca41e22a0fae71abedeae95c48563dcde371917156",
 }
 
 

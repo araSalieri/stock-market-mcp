@@ -72,6 +72,7 @@ async def test_single_formatting_slip_recovers_after_one_retry(server_url):
     payload.pop("price")
     assert payload.pop("hit_rate") is None
     assert payload.pop("min_confidence") == 0.6
+    assert payload.pop("dip_min_confidence") == 0.6
     assert payload == {**good, "data_date": "2024-01-03T11:00:00"}
     assert len(classifier.prompts) == 2  # the retry happened, not a third call
 
@@ -145,6 +146,12 @@ def _decisions_body(answer):
     return {"answers": {"verdict": answer}, "usage": {"cost": 0.001}, "model": "typesafe/jev-1.13"}
 
 
+def _hold_with_no_levels(url, **kwargs):
+    """A hold answering none to every level question asked."""
+    answers = {question: _choice_answer(choice="none") for question in kwargs["json"]["questions"]}
+    return FakeResponse({"answers": {**answers, "verdict": _choice_answer(choice="hold")}})
+
+
 def _choice_answer(
     choice="hold",
     probabilities=None,
@@ -182,7 +189,7 @@ def test_decisions_answer_maps_to_strict_signal(monkeypatch):
         monkeypatch, [_decisions_body(_choice_answer())]
     )
 
-    verdict = classifier.classify(PROMPT, questions(None))
+    verdict = classifier.classify(PROMPT, questions({}, held=False))
 
     assert verdict == {
         "verdict": "hold",
@@ -197,7 +204,7 @@ def test_decisions_answer_maps_to_strict_signal(monkeypatch):
     assert request["state"] == PROMPT
     question = request["questions"]["verdict"]
     assert question["type"] == "choice"
-    assert list(question["criteria"]) == ["buy", "hold"]
+    assert list(question["criteria"]) == ["buy", "dip", "hold"]
     assert kwargs["headers"]["Authorization"] == "Bearer test-key"
 
 
@@ -221,7 +228,7 @@ def test_a_prompt_with_a_position_is_asked_the_verdict_and_both_levels(monkeypat
     cut_stop = {"type": "choice", "choice": "none", "probabilities": {"high_20": 0.4, "none": 0.6}}
     classifier, posts = _real_transport_with_bodies(monkeypatch, [_held_body(buyback, cut_stop)])
 
-    signal = classifier.classify(prompt, questions(HELD_LEVELS))
+    signal = classifier.classify(prompt, questions(HELD_LEVELS, held=True))
 
     assert signal["verdict"] == "cut"
     assert signal["picks"] == {
@@ -247,7 +254,7 @@ def test_a_bad_level_answer_is_retried_once_then_loud(monkeypatch, buyback, name
     classifier, posts = _real_transport_with_bodies(monkeypatch, [body, body])
 
     with pytest.raises(SignalContractError) as exc_info:
-        classifier.classify(PROMPT, questions(HELD_LEVELS))
+        classifier.classify(PROMPT, questions(HELD_LEVELS, held=True))
 
     assert "twice" in str(exc_info.value)
     assert named in str(exc_info.value)
@@ -262,7 +269,7 @@ def test_missing_confidence_falls_back_to_chosen_probability(monkeypatch):
         [_decisions_body(_choice_answer(confidence=None))],
     )
 
-    verdict = classifier.classify(PROMPT, questions(None))
+    verdict = classifier.classify(PROMPT, questions({}, held=False))
 
     assert verdict["verdict"] == "hold"
     assert verdict["confidence"] == 0.7
@@ -279,7 +286,7 @@ def test_missing_verdict_answer_retried_once_then_valid(monkeypatch):
         ],
     )
 
-    assert classifier.classify(PROMPT, questions(None))["verdict"] == "hold"
+    assert classifier.classify(PROMPT, questions({}, held=False))["verdict"] == "hold"
     assert len(posts) == 2  # exactly one retry
 
 
@@ -295,7 +302,7 @@ def test_unexpected_answer_type_retried_once_then_loud(monkeypatch):
     )
 
     with pytest.raises(SignalContractError) as exc_info:
-        classifier.classify(PROMPT, questions(None))
+        classifier.classify(PROMPT, questions({}, held=False))
 
     assert "twice" in str(exc_info.value)
     assert "type" in str(exc_info.value)
@@ -319,7 +326,7 @@ def test_choice_outside_buy_hold_retried_once_then_loud(monkeypatch, answer):
     )
 
     with pytest.raises(SignalContractError) as exc_info:
-        classifier.classify(PROMPT, questions(None))
+        classifier.classify(PROMPT, questions({}, held=False))
 
     assert "twice" in str(exc_info.value)
     assert "maybe" in str(exc_info.value)
@@ -338,7 +345,7 @@ def test_missing_confidence_and_probability_is_a_contract_error(monkeypatch):
     )
 
     with pytest.raises(SignalContractError) as exc_info:
-        classifier.classify(PROMPT, questions(None))
+        classifier.classify(PROMPT, questions({}, held=False))
 
     assert "twice" in str(exc_info.value)
     assert len(posts) == 2
@@ -358,7 +365,7 @@ def test_provider_http_error_is_loud_and_never_retried(monkeypatch):
     monkeypatch.setattr("stock_market_mcp.classifier.requests.post", failing_post)
 
     with pytest.raises(requests.HTTPError):
-        classifier.classify(PROMPT, questions(None))
+        classifier.classify(PROMPT, questions({}, held=False))
 
     assert len(posts) == 1
 
@@ -370,7 +377,7 @@ async def test_intraday_data_date_is_the_latest_bars_timestamp(server_url, monke
 
     def fake_post(url, **kwargs):
         posts.append(kwargs)
-        return FakeResponse(_decisions_body(_choice_answer(choice="hold")))
+        return _hold_with_no_levels(url, **kwargs)
 
     monkeypatch.setenv("SMM_OPENROUTER_API_KEY", "test-key")
     monkeypatch.setattr("stock_market_mcp.classifier.requests.post", fake_post)
@@ -391,7 +398,7 @@ async def test_daily_data_date_matches_scans_for_the_same_last_bar(server_url, m
     monkeypatch.setenv("SMM_OPENROUTER_API_KEY", "test-key")
     monkeypatch.setattr(
         "stock_market_mcp.classifier.requests.post",
-        lambda url, **kwargs: FakeResponse(_decisions_body(_choice_answer(choice="hold"))),
+        _hold_with_no_levels,
     )
     daily = daily_bars([100.0 + i for i in range(60)], last="2024-03-15")
     intraday = five_minute_bars({"2024-03-14 16:10": (158.0, 1000)}, [], tz="Asia/Jakarta")

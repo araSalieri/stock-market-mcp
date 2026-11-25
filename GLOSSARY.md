@@ -7,11 +7,11 @@ A server that gives coding agents market data, indicators, and advisory trading 
 ### Signal
 
 **Signal**:
-An advisory answer to "is now the time to buy or hold this stock, or to cut it if held?", made of a Verdict, a Confidence, a rationale, the data date, the Price, the Hit Rate for its ticker, Interval and Verdict (none until enough are scored), and a Trade Plan when the Verdict is buy.
+An advisory answer to "is now the time to buy or hold this stock, or to cut it if held?", made of a Verdict, a Confidence, a rationale, the data date, the Price, the Hit Rate for its ticker, Interval and Verdict (none until enough are scored), and a Trade Plan when the Verdict is buy or dip.
 _Avoid_: Recommendation, call, alert
 
 **Verdict**:
-Buy or hold on a ticker not held; buy (add), hold, or cut on a held Position. Cut means exit now, whatever the Unrealised P&L. There is no sell or short.
+Buy, dip, or hold on a ticker not held; buy (add), hold, or cut on a held Position. Buy is momentum or trend evidence. Dip means price has stretched below its mean while the longer trend still points up, likely to snap back; it is never given on a held Position. Cut means exit now, whatever the Unrealised P&L. There is no sell or short.
 _Avoid_: Decision, action
 
 **Confidence**:
@@ -22,16 +22,24 @@ _Avoid_: Probability, certainty, score
 The lowest Confidence at which a buy gets a Trade Plan. Set by the server from buy Hit Rates: 0.6 until enough Signals are scored, and none when enough are scored but no Confidence band beats break-even, so no buy gets a Trade Plan.
 _Avoid_: Threshold, cut-off
 
+**Dip Break-even**:
+The Hit Rate a set of scored dips must beat to have been worth it: the average over those dips of the Stop distance divided by the Stop distance plus the Target distance, each measured from the dip's Price. The Cut Break-even with the sides swapped.
+_Avoid_: Dip threshold, fair rate
+
+**Dip Minimum Confidence**:
+The lowest Confidence at which a dip gets a Trade Plan. Set by the server from scored dips across all tickers and Intervals the same way buy sets the Minimum Confidence, against the Dip Break-even: 0.6 until enough are scored, and none when enough are scored but no Confidence band beats its Dip Break-even, so no dip gets a Trade Plan.
+_Avoid_: Dip threshold, dip gate
+
 **Price**:
 The last close in the data the Signal was made from; during the session that is the close of the bar still forming. Every Signal has one; on buy it equals the Entry.
 _Avoid_: Current price, last price, quote
 
 **Outcome**:
-What happened to a Signal within 20 bars of its Interval, scored even when it was below the Minimum Confidence. A buy is judged against the default Trade Plan: Target (reached first), Stop (reached first, or on the same bar as the Target), or Expired (neither). A cut is judged against its Buyback Price and Cut Stop: Target (Buyback Price reached first), Stop (Cut Stop reached first, or on the same bar), or Expired (neither); a cut missing either is never scored. A hold's Outcome is Quiet (price moved the Target distance neither up nor down) or Missed (it did).
+What happened to a Signal within 20 bars of its Interval, scored even when it was below the Minimum Confidence. A buy is judged against the default Trade Plan, a dip against its picked Stop and Target: Target (reached first), Stop (reached first, or on the same bar as the Target), or Expired (neither); a dip missing either is never scored. A cut is judged against its Buyback Price and Cut Stop: Target (Buyback Price reached first), Stop (Cut Stop reached first, or on the same bar), or Expired (neither); a cut missing either is never scored. A hold's Outcome is Quiet (price moved the Target distance neither up nor down) or Missed (it did).
 _Avoid_: Result, win/loss
 
 **Hit Rate**:
-For buy and cut, Targets divided by Targets plus Stops over a set of scored Signals, Expired left out; for hold, Quiet divided by all scored holds. The measured counterpart to Confidence.
+For buy, dip and cut, Targets divided by Targets plus Stops over a set of scored Signals, Expired left out; for hold, Quiet divided by all scored holds. The measured counterpart to Confidence.
 _Avoid_: Win rate, accuracy
 
 **Track Record**:
@@ -49,7 +57,7 @@ _Avoid_: Model version, schema version
 ### Trade Plan
 
 **Trade Plan**:
-The three prices for a long trade: Entry, Stop, and Target. Part of a buy Signal at or above the Minimum Confidence; every other Signal has none. Advisory only.
+The three prices for a long trade: Entry, Stop, and Target. Part of a buy Signal at or above the Minimum Confidence, with Stop and Target a multiple of ATR from Entry, or of a dip Signal at or above the Dip Minimum Confidence, with Stop and Target picked by the classifier from chart levels below and above the Price (a dip missing either has none); every other Signal has none. Advisory only.
 _Avoid_: Setup, strategy, levels
 
 **Entry**:

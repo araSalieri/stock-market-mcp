@@ -65,8 +65,8 @@ def test_a_cached_signal_reuses_its_picks(signal_maker, tmp_path):
     assert second["cut_stop"] == first["cut_stop"] == 101.0
 
 
-@pytest.mark.parametrize(("held", "asked"), [("AAPL", ["verdict", "buyback", "cut_stop"]), ("MSFT", ["verdict"])])
-def test_only_a_held_ticker_is_asked_for_levels(signal_maker, tmp_path, held, asked):
+@pytest.mark.parametrize(("held", "asked"), [("AAPL", ["verdict", "buyback", "cut_stop"]), ("MSFT", ["verdict", "dip_target", "dip_stop"])])
+def test_only_a_held_ticker_is_asked_for_cut_levels(signal_maker, tmp_path, held, asked):
     classifier = FakeClassifier({"verdict": "hold", "confidence": 0.7, "rationale": "test"})
     _make(signal_maker, tmp_path, classifier, held=held)
 
@@ -99,7 +99,7 @@ SIGNAL_KEYS = {"verdict", "confidence", "rationale", "data_date", "price", "hit_
 @pytest.mark.parametrize(
     ("held", "verdict", "keys"),
     [
-        ("MSFT", "hold", SIGNAL_KEYS),
+        ("MSFT", "hold", SIGNAL_KEYS | {"dip_min_confidence"}),
         ("AAPL", "hold", SIGNAL_KEYS | {"position"}),
         ("AAPL", "cut", SIGNAL_KEYS | {"position"} | LEVEL_KEYS),
     ],
