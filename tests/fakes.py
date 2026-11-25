@@ -29,16 +29,16 @@ def audit_lines(caplog) -> list:
     return [r for r in caplog.records if " outcome=" in r.getMessage()]
 
 
-def seed_signals(db, outcomes, *, verdict="buy", confidence=0.7, prompt_version=PROMPT_VERSION, ticker="AAPL", interval="1d", cut_loss=None, long_plan=True, short_plan=True, short=(104.0, 92.0)):
+def seed_signals(db, outcomes, *, verdict="buy", confidence=0.7, prompt_version=PROMPT_VERSION, ticker="AAPL", interval="1d", cut_loss=None, long_plan=True, short_plan=True, long=(96.0, 108.0), short=(104.0, 92.0)):
     """Store one scored Signal per Outcome (None for pending): scoring dozens of Signals over MCP would take dozens of calls.
 
-    long_plan and short_plan False store that default Trade Plan as nulls; short is its (stop, target), a cut's
-    (Cut Stop, Buyback Price), at a Price of 100.
+    long_plan and short_plan False store that default Trade Plan as nulls; long and short are its (stop, target), a
+    dip's picked ones or a cut's (Cut Stop, Buyback Price), at a Price of 100.
 
     The only test code that knows the signals schema; SignalLog(db).track_record creates the table first.
     """
     SignalLog(db).track_record(None, None)
-    long = (96.0, 108.0) if long_plan else (None, None)
+    long = long if long_plan else (None, None)
     short = short if short_plan else (None, None)
     with closing(sqlite3.connect(db)) as conn, conn:
         conn.executemany(

@@ -67,9 +67,12 @@ class SignalMaker:
         if fresh:
             classified = self._classifier.classify(prompt.state, prompt.questions)
             signal = {**classified, "data_date": cast("pd.Timestamp", df.index[-1]).isoformat()}
-            if prompt.candidates is not None:
-                # No picks when neither side has a candidate.
-                signal["cut_levels"] = _levels(signal.pop("picks", {}), prompt.candidates, _CUT_LEVELS)
+            # No picks when neither side has a candidate.
+            picks = signal.pop("picks", {})
+            if held is not None:
+                signal["cut_levels"] = _levels(picks, prompt.candidates, _CUT_LEVELS)
+            else:
+                signal["dip_levels"] = _levels(picks, prompt.candidates, _DIP_LEVELS)
         fields = self._signals.after_classifier(
             ticker,
             interval,
@@ -85,8 +88,9 @@ class SignalMaker:
         if fresh:
             self._cache.put(prompt.cache_key, signal)
         reply = {**signal, "price": price, **fields}
-        # The cut levels reach the reply only through fields, on a confident cut.
+        # The cut and dip levels reach the reply only through fields, on a confident cut or dip.
         reply.pop("cut_levels", None)
+        reply.pop("dip_levels", None)
         if held is not None:
             reply["position"] = {
                 **asdict(held),
@@ -99,6 +103,7 @@ class SignalMaker:
 
 # Each cut level question and the key its picked price goes under.
 _CUT_LEVELS = (("buyback", "buyback_price"), ("cut_stop", "cut_stop"))
+_DIP_LEVELS = (("dip_stop", "stop"), ("dip_target", "target"))
 
 
 def _levels(picks: dict, candidates: dict[str, dict[str, float]], questions: tuple[tuple[str, str], ...]) -> dict:
