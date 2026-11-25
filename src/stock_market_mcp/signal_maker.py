@@ -69,7 +69,7 @@ class SignalMaker:
             signal = {**classified, "data_date": cast("pd.Timestamp", df.index[-1]).isoformat()}
             if prompt.candidates is not None:
                 # No picks when neither side has a candidate.
-                signal["cut_levels"] = _cut_levels(signal.pop("picks", {}), prompt.candidates)
+                signal["cut_levels"] = _levels(signal.pop("picks", {}), prompt.candidates, _CUT_LEVELS)
         fields = self._signals.after_classifier(
             ticker,
             interval,
@@ -97,14 +97,18 @@ class SignalMaker:
         return reply
 
 
-def _cut_levels(picks: dict, candidates: dict[str, dict[str, float]]) -> dict:
-    """The picked Buyback Price and Cut Stop with each pick's confidence, both None for a none pick or a side with no
-    candidate (not asked)."""
-    cut_levels = {}
-    for question, price_key in (("buyback", "buyback_price"), ("cut_stop", "cut_stop")):
+# Each cut level question and the key its picked price goes under.
+_CUT_LEVELS = (("buyback", "buyback_price"), ("cut_stop", "cut_stop"))
+
+
+def _levels(picks: dict, candidates: dict[str, dict[str, float]], questions: tuple[tuple[str, str], ...]) -> dict:
+    """Each level question's picked price under its key, with the pick's confidence under {question}_confidence, both
+    None for a none pick or a side with no candidate (not asked)."""
+    levels = {}
+    for question, price_key in questions:
         offered = candidates[question]
         pick = picks[question] if offered else {"choice": "none"}
         price = offered.get(pick["choice"])
-        cut_levels[price_key] = price
-        cut_levels[f"{question}_confidence"] = None if price is None else pick["confidence"]
-    return cut_levels
+        levels[price_key] = price
+        levels[f"{question}_confidence"] = None if price is None else pick["confidence"]
+    return levels
