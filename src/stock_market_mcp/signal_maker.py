@@ -101,7 +101,7 @@ class SignalMaker:
         return reply
 
 
-# Each cut level question and the key its picked price goes under.
+# Each level question and the key its picked price goes under.
 _CUT_LEVELS = (("buyback", "buyback_price"), ("cut_stop", "cut_stop"))
 _DIP_LEVELS = (("dip_stop", "stop"), ("dip_target", "target"))
 

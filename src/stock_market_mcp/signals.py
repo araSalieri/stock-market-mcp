@@ -139,7 +139,7 @@ class SignalLog:
             if confident and verdict == "buy":
                 plan = _trade_plan(history, price, atr_multiple, reward_ratio)
             elif confident and verdict == "dip":
-                plan = _dip_plan(price, signal["dip_levels"]["stop"], signal["dip_levels"]["target"])
+                plan = _dip_plan(price, signal["dip_levels"])
             if fresh:
                 _record(conn, ticker, interval, signal, history, price, cut_loss)
             fields = {"hit_rate": hit_rate, "min_confidence": min_confidence, "trade_plan": plan}
@@ -321,7 +321,7 @@ def _bands(conn: sqlite3.Connection, ticker: str | None, interval: str | None) -
     for band, verdict, outcome, count in rows:
         tallies.setdefault(band, {v: {} for v in _TRACKED})[verdict][outcome] = count
     buy = _RULES["buy"]
-    break_evens = {verdict: _break_evens(conn, verdict, ticker, interval) for verdict in ("cut", "dip")}
+    break_evens = {verdict: _break_evens(conn, verdict, ticker, interval) for verdict in _PICKED}
     return [
         {
             "band": band / BANDS_PER_CONFIDENCE,
@@ -388,8 +388,9 @@ def _trade_plan(
     }
 
 
-def _dip_plan(entry: float, stop: float | None, target: float | None) -> dict | None:
+def _dip_plan(entry: float, dip_levels: dict) -> dict | None:
     """A dip's Trade Plan at entry (the Price) from its picked Stop and Target, with their Reward Ratio; None without both."""
+    stop, target = dip_levels["stop"], dip_levels["target"]
     if stop is None or target is None:
         return None
     return {"entry": entry, "stop": stop, "target": target, "reward_ratio": (target - entry) / (entry - stop)}
@@ -452,3 +453,5 @@ _RULES = {
 }
 # Verdicts the current prompt version gives, each reported in a Track Record band.
 _TRACKED = ("buy", "dip", "cut", "hold")
+# Verdicts whose Stop and Target are picked levels, each with its own Break-even.
+_PICKED = ("cut", "dip")
