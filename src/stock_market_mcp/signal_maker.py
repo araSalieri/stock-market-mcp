@@ -9,7 +9,7 @@ from typing import cast
 
 import pandas as pd
 
-from stock_market_mcp.bars import Interval, backfill_history, default_lookback, fetch_period, history
+from stock_market_mcp.bars import Interval, backfill_history, fetch_period, history, seen_at
 from stock_market_mcp.cache import TTLCache
 from stock_market_mcp.classifier import SignalClassifier
 from stock_market_mcp.data import DataFetcher
@@ -19,7 +19,7 @@ from stock_market_mcp.prompt import SignalPrompt, signal_prompt
 from stock_market_mcp.signals import OUTCOME_BARS, PLAN_ATR_MULTIPLE, PLAN_REWARD_RATIO, SignalLog
 
 PLAN_ARG_MAX = 10
-# Bars one backfill call replays, so a call stays a bounded number of classifier calls.
+# Bars one backfill call backfills, so a call stays a bounded number of classifier calls.
 BACKFILL_BARS = 50
 
 
@@ -108,20 +108,23 @@ class SignalMaker:
         ticker = ticker.upper()
         df = backfill_history(self._fetcher, ticker, interval, start, today)
         period = fetch_period(interval, None)
-        lookback = default_lookback(interval)
         done = self._signals.data_dates(ticker, interval)
+        # A non-finite close is a bar make would refuse, so it is never eligible.
         eligible = [
             bar
             for bar in cast("pd.DatetimeIndex", df.index[: max(len(df) - OUTCOME_BARS, 0)])
-            if bar.date() >= start and bar.isoformat() not in done
+            if bar.date() >= start and bar.isoformat() not in done and math.isfinite(df.at[bar, "Close"])
         ]
         bars = eligible[:BACKFILL_BARS]
-        for bar in bars:
-            seen = df.loc[bar - lookback : bar]
-            # Not held and no previous Signal, as a ticker's first live Signal.
-            prompt = signal_prompt(ticker, period, seen, interval=interval)
-            self._signals.record_backfilled(ticker, interval, seen, self._classify(prompt, seen, held=False))
-        self._signals.score(ticker, interval, df, self._now().isoformat())
+        try:
+            for bar in bars:
+                seen = seen_at(df, bar, interval)
+                # Not held and no previous Signal, as a ticker's first live Signal.
+                prompt = signal_prompt(ticker, period, seen, interval=interval)
+                self._signals.record_backfilled(ticker, interval, seen, self._classify(prompt, seen, held=False))
+        finally:
+            # Scores the bars logged before a failing one too.
+            self._signals.score(ticker, interval, df, self._now().isoformat())
         return {"logged": len(bars), "remaining": len(eligible) - len(bars)}
 
     def _classify(self, prompt: SignalPrompt, df: pd.DataFrame, *, held: bool) -> dict:
