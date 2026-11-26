@@ -60,7 +60,7 @@ async def test_counts_signals_by_band_and_verdict_leaving_out_empty_verdicts(ser
         "min_confidence": 0.6,
         "cut_loss_hit_rate": None,
         "cut_min_confidence": None,
-        "dip_min_confidence": 0.6,
+        "dip_min_confidence": 0.4,
     }
 
 

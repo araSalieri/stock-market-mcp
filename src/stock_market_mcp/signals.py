@@ -32,6 +32,8 @@ BAND_MIN_SCORED = 30
 CUT_LOSS_MIN_SCORED = 30
 # Minimum Confidence until a band has BAND_MIN_SCORED.
 MIN_CONFIDENCE = 0.6
+# Dip Minimum Confidence until a band has BAND_MIN_SCORED; lower because the classifier's dip Confidence sits well below its dip probability.
+DIP_MIN_CONFIDENCE = 0.4
 # Confidence bands are 1 / BANDS_PER_CONFIDENCE wide: 0.1.
 BANDS_PER_CONFIDENCE = 10
 # Confidence band as an integer (6 for 0.6-0.69); the epsilon keeps 0.6 in band 6 despite float error.
@@ -255,7 +257,8 @@ def _picked_min_confidence(conn: sqlite3.Connection, verdict: str, interval: str
     per Interval, the Dip Minimum Confidence across all."""
     break_evens = _break_evens(conn, verdict, None, interval)
     # A band with scored Signals always has a break-even, and only those reach break_even.
-    return _lowest_band(_band_counts(conn, verdict, interval), lambda band: cast("float", break_evens[band]))
+    default = DIP_MIN_CONFIDENCE if verdict == "dip" else MIN_CONFIDENCE
+    return _lowest_band(_band_counts(conn, verdict, interval), lambda band: cast("float", break_evens[band]), default)
 
 
 def _band_counts(conn: sqlite3.Connection, verdict: str, interval: str | None) -> list[tuple[int, int, int]]:
@@ -269,17 +272,19 @@ def _band_counts(conn: sqlite3.Connection, verdict: str, interval: str | None) -
     ).fetchall()
 
 
-def _lowest_band(bands: list[tuple[int, int, int]], break_even: Callable[[int], float]) -> float | None:
+def _lowest_band(
+    bands: list[tuple[int, int, int]], break_even: Callable[[int], float], default: float = MIN_CONFIDENCE
+) -> float | None:
     """Lowest band (1 / BANDS_PER_CONFIDENCE wide) whose Hit Rate is above its break_even.
 
-    Only bands with BAND_MIN_SCORED hits plus misses count: MIN_CONFIDENCE while none has that many,
+    Only bands with BAND_MIN_SCORED hits plus misses count: default while none has that many,
     None when some do but none is above its break_even.
     """
     scored = [(band, rate) for band, hits, misses in bands if (rate := _rate(hits, misses, BAND_MIN_SCORED)) is not None]
     for band, rate in scored:
         if rate > break_even(band):
             return band / BANDS_PER_CONFIDENCE
-    return None if scored else MIN_CONFIDENCE
+    return None if scored else default
 
 
 def _break_evens(

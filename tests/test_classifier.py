@@ -72,7 +72,7 @@ async def test_single_formatting_slip_recovers_after_one_retry(server_url):
     payload.pop("price")
     assert payload.pop("hit_rate") is None
     assert payload.pop("min_confidence") == 0.6
-    assert payload.pop("dip_min_confidence") == 0.6
+    assert payload.pop("dip_min_confidence") == 0.4
     assert payload == {**good, "data_date": "2024-01-03T11:00:00"}
     assert len(classifier.prompts) == 2  # the retry happened, not a third call
 
