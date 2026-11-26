@@ -38,6 +38,7 @@ EVERY_TOOL_ARGS = {
     "set_position": {"ticker": "AAPL", "quantity": 1, "avg_cost": 1.0},
     "get_portfolio": {},
     "get_track_record": {},
+    "backfill_signals": {"ticker": "AAPL", "interval": "1d", "since": "not a date"},
 }
 
 

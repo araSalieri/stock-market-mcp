@@ -157,6 +157,7 @@ async def test_server_lists_its_tools_and_get_signal_says_advisory_and_price(ser
         tools = {t.name: t for t in (await session.list_tools()).tools}
 
     assert sorted(tools) == [
+        "backfill_signals",
         "get_fundamentals",
         "get_portfolio",
         "get_quote",

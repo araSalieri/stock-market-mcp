@@ -1,7 +1,8 @@
 """Price history for one Interval: its period rules and the indicators joined onto the bars."""
 
 import math
-from datetime import timedelta
+import re
+from datetime import date, timedelta
 from typing import Literal, NamedTuple, cast
 
 import pandas as pd
@@ -18,16 +19,16 @@ _YAHOO_PERIODS = ("1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "5y", "10y", "ytd
 
 class _Periods(NamedTuple):
     default: str
-    # Yahoo's history limit and the periods that fit inside it; daily bars have none and pass any period on.
-    limit: str | None
+    # Yahoo's history limit in days and the periods that fit inside it; daily bars have none and pass any period on.
+    limit_days: int | None
     allowed: tuple[str, ...]
 
 
 _PERIODS: dict[Interval, _Periods] = {
-    "1m": _Periods("5d", "7 days", ("1d", "5d")),
-    "5m": _Periods("1mo", "60 days", ("1d", "5d", "1mo")),
-    "15m": _Periods("1mo", "60 days", ("1d", "5d", "1mo")),
-    "1h": _Periods("6mo", "730 days", ("1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "ytd")),
+    "1m": _Periods("5d", 7, ("1d", "5d")),
+    "5m": _Periods("1mo", 60, ("1d", "5d", "1mo")),
+    "15m": _Periods("1mo", 60, ("1d", "5d", "1mo")),
+    "1h": _Periods("6mo", 730, ("1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "ytd")),
     "1d": _Periods("1y", None, ()),
 }
 
@@ -47,10 +48,10 @@ def fetch_period(interval: Interval, period: str | None) -> str:
     periods = _PERIODS[interval]
     if period is None:
         return periods.default
-    if periods.limit is None or period in periods.allowed:
+    if periods.limit_days is None or period in periods.allowed:
         return period
     if period in _YAHOO_PERIODS:
-        reason = f"is longer than Yahoo keeps for {interval} bars ({periods.limit})"
+        reason = f"is longer than Yahoo keeps for {interval} bars ({periods.limit_days} days)"
     else:
         reason = f"is not a valid period for {interval} bars"
     raise InputError(f"period {period!r} {reason}; use one of {', '.join(periods.allowed)}")
@@ -113,7 +114,27 @@ def history(fetcher: DataFetcher, ticker: str, interval: Interval, period: str |
 
     The ticker is upper-cased before the fetch, so any casing shares one cache entry.
     """
-    df = fetcher.fetch_history(ticker.upper(), fetch_period(interval, period), interval)
+    return _joined(fetcher.fetch_history(ticker.upper(), fetch_period(interval, period), interval))
+
+
+def backfill_history(fetcher: DataFetcher, ticker: str, interval: Interval, since: date, today: date) -> pd.DataFrame:
+    """history for backfilling from since: reaching the Interval's default period before since, capped at what Yahoo
+    keeps (all it keeps on intraday bars)."""
+    days = _PERIODS[interval].limit_days
+    # 1d's default period is 1y, so one year before since, rounded up to whole years.
+    period = f"{(today - since).days // 365 + 2}y" if days is None else f"{days}d"
+    return _joined(fetcher.fetch_history(ticker.upper(), period, interval))
+
+
+def default_lookback(interval: Interval) -> pd.DateOffset:
+    """The Interval's default period as an offset, to slice history to what a live Signal sees."""
+    amount, unit = cast("re.Match", re.fullmatch(r"(\d+)(d|mo|y)", _PERIODS[interval].default)).groups()
+    n = int(amount)
+    return {"d": pd.DateOffset(days=n), "mo": pd.DateOffset(months=n), "y": pd.DateOffset(years=n)}[unit]
+
+
+def _joined(df: pd.DataFrame) -> pd.DataFrame:
+    """df with every indicator joined; each looks only backward, so a row's values don't change with later bars."""
     for name, handler in sorted(_INDICATOR_DISPATCH.items()):
         ind = handler(df)
         if ind is None:
