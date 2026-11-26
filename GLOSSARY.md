@@ -46,6 +46,10 @@ _Avoid_: Win rate, accuracy
 The Outcome counts and Hit Rates of the current prompt version's Signals, by Confidence band and Verdict, optionally for one ticker, one Interval, or both. Shows how Confidence compares with Hit Rate and why the Minimum Confidence sits where it does.
 _Avoid_: Stats, performance, backtest, scorecard
 
+**Backfilled Signal**:
+A Signal the server makes on a past bar on or after a date the caller gives, for a ticker not held, with no previous Signal and the same history a live Signal would see, ending at that bar. Its next 20 bars are already known, so it gets its Outcome as soon as it is made. It counts toward Hit Rates and every Minimum Confidence like a live Signal and is marked so it can be told apart.
+_Avoid_: Backtest, replay, simulated Signal
+
 **Interval**:
 The length of one bar in the price history a Signal is made from: 1m, 5m, 15m, 1h, or 1d.
 _Avoid_: Timeframe, resolution, granularity
