@@ -34,11 +34,11 @@ def _reply(signal_maker, tmp_path, *seeds, signal=None, avg_cost=110.0) -> dict:
     return maker.make("aapl", "1d")
 
 
-def test_no_band_with_30_scored_cuts_gives_0_6(signal_maker, tmp_path):
+def test_no_band_with_30_scored_cuts_gives_0_4(signal_maker, tmp_path):
     seeds = [{"confidence": 0.9, "stops": 29, "expired": 10}, {"confidence": 0.5, "targets": 29}]
     reply = _reply(signal_maker, tmp_path, *seeds)
 
-    assert reply["position"]["cut_min_confidence"] == 0.6
+    assert reply["position"]["cut_min_confidence"] == 0.4
 
 
 LEVEL_KEYS = {"buyback_price", "buyback_quantity", "buyback_confidence", "cut_stop", "cut_stop_confidence"}
@@ -106,10 +106,10 @@ def test_cut_at_it_on_a_losing_position_is_a_cut_loss_with_levels(signal_maker, 
 
 
 def test_buy_minimum_confidence_and_trade_plan_ignore_cut_outcomes(signal_maker, tmp_path):
-    # The cuts give a null Cut Minimum Confidence; the buy keeps the 0.6 default and its Trade Plan.
+    # The cuts give a null Cut Minimum Confidence; the buy keeps the 0.4 default and its Trade Plan.
     seeds = [{"confidence": 0.6, "stops": 30}]
     reply = _reply(signal_maker, tmp_path, *seeds, signal=_signal("buy", 0.6))
 
     assert reply["position"]["cut_min_confidence"] is None
-    assert reply["min_confidence"] == 0.6
+    assert reply["min_confidence"] == 0.4
     assert reply["trade_plan"] is not None

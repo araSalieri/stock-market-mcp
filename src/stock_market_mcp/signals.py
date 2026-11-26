@@ -31,7 +31,7 @@ BAND_MIN_SCORED = 30
 # Targets plus Stops among Cut Loss Signals needed before the Cut Loss Hit Rate is reported.
 CUT_LOSS_MIN_SCORED = 30
 # Minimum Confidence until a band has BAND_MIN_SCORED.
-MIN_CONFIDENCE = 0.6
+MIN_CONFIDENCE = 0.4
 # Confidence bands are 1 / BANDS_PER_CONFIDENCE wide: 0.1.
 BANDS_PER_CONFIDENCE = 10
 # Confidence band as an integer (6 for 0.6-0.69); the epsilon keeps 0.6 in band 6 despite float error.

@@ -54,7 +54,7 @@ def test_cached_signal_gets_the_current_minimum_confidence(signal_maker, tmp_pat
     seed_signals(db, ["target"] * 20 + ["stop"] * 10, confidence=0.8)  # the 0.8 band beats break-even
     second = maker.make("AAPL")
 
-    assert first["min_confidence"] == 0.6
+    assert first["min_confidence"] == 0.4
     assert second["min_confidence"] == 0.8
     assert second["trade_plan"] is None  # 0.7 is now below it
     assert len(classifier.prompts) == 1
@@ -68,8 +68,8 @@ def test_buy_carries_a_long_trade_plan(signal_maker):
         **_signal("buy"), "data_date": "2024-02-29T00:00:00",
         "price": 100.0,
         "hit_rate": None,
-        "min_confidence": 0.6,
-        "dip_min_confidence": 0.6,
+        "min_confidence": 0.4,
+        "dip_min_confidence": 0.4,
         "trade_plan": {
             "entry": 100.0,
             "stop": pytest.approx(96.0),
@@ -85,13 +85,13 @@ def test_hold_has_no_trade_plan_but_carries_the_price(signal_maker):
     fetcher = FakeFetcher(history=flat_history(last_close=123.5))
     reply = signal_maker(fetcher, FakeClassifier(_signal("hold"))).make("AAPL")
 
-    assert reply == {**_signal("hold"), "data_date": "2024-02-29T00:00:00", "price": 123.5, "hit_rate": None, "min_confidence": 0.6, "trade_plan": None, "dip_min_confidence": 0.6}
+    assert reply == {**_signal("hold"), "data_date": "2024-02-29T00:00:00", "price": 123.5, "hit_rate": None, "min_confidence": 0.4, "trade_plan": None, "dip_min_confidence": 0.4}
 
 
 def test_buy_below_the_default_minimum_confidence_has_no_trade_plan(signal_maker):
-    reply = signal_maker(FakeFetcher(history=flat_history()), FakeClassifier(_signal("buy", 0.59))).make("AAPL")
+    reply = signal_maker(FakeFetcher(history=flat_history()), FakeClassifier(_signal("buy", 0.39))).make("AAPL")
 
-    assert reply == {**_signal("buy", 0.59), "data_date": "2024-02-29T00:00:00", "price": 100.0, "hit_rate": None, "min_confidence": 0.6, "trade_plan": None, "dip_min_confidence": 0.6}
+    assert reply == {**_signal("buy", 0.39), "data_date": "2024-02-29T00:00:00", "price": 100.0, "hit_rate": None, "min_confidence": 0.4, "trade_plan": None, "dip_min_confidence": 0.4}
 
 
 # Entry 100, ATR 2, atr_multiple 1.5, reward_ratio 3: Stop = 100 - 1.5*2 = 97, Target = 100 + 3*(100-97) = 109.

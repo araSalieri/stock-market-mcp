@@ -37,7 +37,7 @@ def test_held_position_rides_on_the_signal_with_pnl_at_its_price(signal_maker, t
         "unrealised_pnl_pct": pytest.approx(100 / 9),
         "cut_loss": False,
         "cut_loss_hit_rate": None,
-        "cut_min_confidence": 0.6,
+        "cut_min_confidence": 0.4,
     }
 
 
@@ -67,7 +67,7 @@ def test_cached_signal_shows_the_current_position(signal_maker, tmp_path):
         "unrealised_pnl_pct": pytest.approx(40 / 360 * 100),
         "cut_loss": False,
         "cut_loss_hit_rate": None,
-        "cut_min_confidence": 0.6,
+        "cut_min_confidence": 0.4,
     }
     assert len(classifier.prompts) == 1
 
@@ -140,15 +140,15 @@ def _cut_loss_reply(signal_maker, tmp_path, signal, avg_cost=110.0, seed=False) 
 
 
 def test_cut_on_a_losing_position_is_a_cut_loss(signal_maker, tmp_path):
-    # No scored cuts, so the Cut Minimum Confidence is the 0.6 default; 0.6 itself counts.
-    payload = _cut_loss_reply(signal_maker, tmp_path, _signal("cut", 0.6))
+    # No scored cuts, so the Cut Minimum Confidence is the 0.4 default; 0.4 itself counts.
+    payload = _cut_loss_reply(signal_maker, tmp_path, _signal("cut", 0.4))
 
-    assert payload["position"]["cut_min_confidence"] == 0.6
+    assert payload["position"]["cut_min_confidence"] == 0.4
     assert payload["position"]["cut_loss"] is True
 
 
 def test_below_the_cut_minimum_confidence_is_not_a_cut_loss(signal_maker, tmp_path):
-    payload = _cut_loss_reply(signal_maker, tmp_path, _signal("cut", 0.59))
+    payload = _cut_loss_reply(signal_maker, tmp_path, _signal("cut", 0.39))
 
     assert payload["position"]["cut_loss"] is False
 

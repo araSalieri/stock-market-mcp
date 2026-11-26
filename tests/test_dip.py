@@ -63,12 +63,12 @@ def test_confident_dip_gets_a_trade_plan_from_the_picked_levels(signal_maker, tm
 
     # Stop 1 below the Price of 100 and Target 1 above: a Reward Ratio of 1.
     assert reply["trade_plan"] == {"entry": 100.0, "stop": 99.0, "target": 101.0, "reward_ratio": 1.0}
-    assert reply["dip_min_confidence"] == 0.6
+    assert reply["dip_min_confidence"] == 0.4
     assert not {"picks", "dip_levels"} & reply.keys()
 
 
 def test_dip_below_the_dip_minimum_confidence_has_no_trade_plan(signal_maker, tmp_path):
-    reply = _make(signal_maker, tmp_path, FakeClassifier(_signal(confidence=0.59)))
+    reply = _make(signal_maker, tmp_path, FakeClassifier(_signal(confidence=0.39)))
 
     assert reply["verdict"] == "dip"
     assert reply["trade_plan"] is None
@@ -146,10 +146,10 @@ def _seeded(signal_maker, tmp_path, *seeds, signal=None):
     return maker.make("aapl", "1d")
 
 
-def test_dip_minimum_confidence_is_0_6_until_a_band_has_30_scored_dips(signal_maker, tmp_path):
+def test_dip_minimum_confidence_is_0_4_until_a_band_has_30_scored_dips(signal_maker, tmp_path):
     reply = _seeded(signal_maker, tmp_path, {"confidence": 0.9, "stops": 29, "expired": 10}, {"confidence": 0.5, "targets": 29})
 
-    assert reply["dip_min_confidence"] == 0.6
+    assert reply["dip_min_confidence"] == 0.4
 
 
 def test_dip_minimum_confidence_is_the_lowest_band_beating_its_dip_break_even_across_intervals(signal_maker, tmp_path):
@@ -188,9 +188,9 @@ def test_dip_reply_has_the_dip_hit_rate_for_its_ticker_and_interval(signal_maker
 
 
 def test_buy_minimum_confidence_and_trade_plan_ignore_dips(signal_maker, tmp_path):
-    # The dips give a null Dip Minimum Confidence; the buy keeps the 0.6 default and its ATR Trade Plan.
+    # The dips give a null Dip Minimum Confidence; the buy keeps the 0.4 default and its ATR Trade Plan.
     reply = _seeded(signal_maker, tmp_path, {"confidence": 0.6, "stops": 30}, signal=_signal("buy", 0.6))
 
     assert reply["dip_min_confidence"] is None
-    assert reply["min_confidence"] == 0.6
+    assert reply["min_confidence"] == 0.4
     assert reply["trade_plan"]["atr_multiple"] == 2.0

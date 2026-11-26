@@ -15,11 +15,11 @@ Buy, dip, or hold on a ticker not held; buy (add), hold, or cut on a held Positi
 _Avoid_: Decision, action
 
 **Confidence**:
-The classifier's own 0–1 estimate that the Verdict is right. Self-reported, not a measured hit rate.
+The classifier's 0–1 confidence in the Verdict, returned beside the probability of each Verdict and usually below the top one. Not a measured hit rate.
 _Avoid_: Probability, certainty, score
 
 **Minimum Confidence**:
-The lowest Confidence at which a buy gets a Trade Plan. Set by the server from buy Hit Rates: 0.6 until enough Signals are scored, and none when enough are scored but no Confidence band beats break-even, so no buy gets a Trade Plan.
+The lowest Confidence at which a buy gets a Trade Plan. Set by the server from buy Hit Rates: 0.4 until enough Signals are scored, and none when enough are scored but no Confidence band beats break-even, so no buy gets a Trade Plan.
 _Avoid_: Threshold, cut-off
 
 **Dip Break-even**:
@@ -27,7 +27,7 @@ The Hit Rate a set of scored dips must beat to have been worth it: the average o
 _Avoid_: Dip threshold, fair rate
 
 **Dip Minimum Confidence**:
-The lowest Confidence at which a dip gets a Trade Plan. Set by the server from scored dips across all tickers and Intervals the same way buy sets the Minimum Confidence, against the Dip Break-even: 0.6 until enough are scored, and none when enough are scored but no Confidence band beats its Dip Break-even, so no dip gets a Trade Plan.
+The lowest Confidence at which a dip gets a Trade Plan. Set by the server from scored dips across all tickers and Intervals the same way buy sets the Minimum Confidence, against the Dip Break-even: 0.4 until enough are scored, and none when enough are scored but no Confidence band beats its Dip Break-even, so no dip gets a Trade Plan.
 _Avoid_: Dip threshold, dip gate
 
 **Price**:
@@ -121,7 +121,7 @@ The Hit Rate a set of scored cuts must beat to have been worth it: the average o
 _Avoid_: Cut threshold, fair rate
 
 **Cut Minimum Confidence**:
-The lowest Confidence at which a cut counts, per Interval: it makes a Cut Loss and gets a Buyback Price and Cut Stop. Set by the server from that Interval's scored cuts on any Position the same way buy sets the Minimum Confidence, against the Cut Break-even: 0.6 until enough are scored, and none when enough are scored but no Confidence band beats its Cut Break-even, so no cut on that Interval counts.
+The lowest Confidence at which a cut counts, per Interval: it makes a Cut Loss and gets a Buyback Price and Cut Stop. Set by the server from that Interval's scored cuts on any Position the same way buy sets the Minimum Confidence, against the Cut Break-even: 0.4 until enough are scored, and none when enough are scored but no Confidence band beats its Cut Break-even, so no cut on that Interval counts.
 _Avoid_: Cut threshold, cut gate
 
 **Cut Loss Hit Rate**:
