@@ -33,7 +33,7 @@ def test_replays_bars_from_since_with_20_later_bars_as_first_signals_not_held(si
     reply = signal_maker(fetcher, classifier, db_path=db, now=lambda: NOW).backfill("aapl", "1d", SINCE)
 
     # Bars 60 to 79: bar 79 is the last with 20 bars after it.
-    assert reply == {"logged": 20}
+    assert reply == {"logged": 20, "remaining": 0}
     states = [json.loads(prompt) for prompt in classifier.prompts]
     assert [state["rows"][-1]["Date"] for state in states] == [t.isoformat() for t in history.index[60:80]]
     assert all(state["position"] is None and "previous_signal" not in state for state in states)
@@ -86,7 +86,7 @@ def test_backfilled_signals_are_scored_in_the_call_and_count_toward_the_minimum_
     # A history without the backfilled bars, so only backfill could have scored them.
     live = _maker(signal_maker, tmp_path, flat_history(), FakeClassifier(signal)).make("AAPL", "1d")
 
-    assert reply == {"logged": 20}
+    assert reply == {"logged": 20, "remaining": 0}
     assert live["hit_rate"] == 1.0
     # The 0.5 band now has 30 Targets, above break-even; the default is 0.4.
     assert live[min_confidence] == 0.5
@@ -126,3 +126,32 @@ def test_unparsable_or_future_since_raises_before_any_classifier_call(signal_mak
         _maker(signal_maker, tmp_path, flat_history(rows=100), classifier).backfill("AAPL", "1d", since)
 
     assert classifier.prompts == []
+
+
+def _last_dates(classifier):
+    return [json.loads(prompt)["rows"][-1]["Date"] for prompt in classifier.prompts]
+
+
+def test_each_call_logs_the_50_oldest_eligible_bars_and_the_next_call_continues(signal_maker, tmp_path):
+    # Bars 60 to 179 are eligible: 120 bars.
+    history = flat_history(rows=200)
+    replies, dates = [], []
+    for _ in range(4):
+        classifier = FakeClassifier(_signal("hold"))
+        replies.append(_maker(signal_maker, tmp_path, history, classifier).backfill("AAPL", "1d", SINCE))
+        dates.append(_last_dates(classifier))
+
+    assert replies == [{"logged": 50, "remaining": 70}, {"logged": 50, "remaining": 20}, {"logged": 20, "remaining": 0}, {"logged": 0, "remaining": 0}]
+    assert dates[:3] == [[t.isoformat() for t in history.index[start:end]] for start, end in ((60, 110), (110, 160), (160, 180))]
+    assert dates[3] == []
+
+
+def test_bar_with_a_live_signal_is_skipped_without_a_classifier_call(signal_maker, tmp_path):
+    history = flat_history(rows=100)
+    signal_maker(FakeFetcher(history=history.iloc[:66]), FakeClassifier(_signal("hold")), db_path=tmp_path / "smm.db").make("AAPL", "1d")
+    classifier = FakeClassifier(_signal("hold"))
+
+    reply = _maker(signal_maker, tmp_path, history, classifier).backfill("AAPL", "1d", SINCE)
+
+    assert reply == {"logged": 19, "remaining": 0}
+    assert _last_dates(classifier) == [t.isoformat() for t in history.index[60:80] if t != history.index[65]]

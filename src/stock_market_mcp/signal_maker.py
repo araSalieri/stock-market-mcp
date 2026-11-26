@@ -19,6 +19,8 @@ from stock_market_mcp.prompt import SignalPrompt, signal_prompt
 from stock_market_mcp.signals import OUTCOME_BARS, PLAN_ATR_MULTIPLE, PLAN_REWARD_RATIO, SignalLog
 
 PLAN_ARG_MAX = 10
+# Bars one backfill call replays, so a call stays a bounded number of classifier calls.
+BACKFILL_BARS = 50
 
 
 class SignalMaker:
@@ -94,7 +96,8 @@ class SignalMaker:
         return reply
 
     def backfill(self, ticker: str, interval: Interval, since: str) -> dict:
-        """Make and score a Backfilled Signal on each bar from since that has OUTCOME_BARS later bars (ADR-0013); returns how many were logged."""
+        """Make and score a Backfilled Signal on the BACKFILL_BARS oldest bars from since that have OUTCOME_BARS later bars and
+        no Signal under the current Prompt Version (ADR-0013); returns how many were logged and how many such bars remain."""
         try:
             start = date.fromisoformat(since)
         except ValueError:
@@ -106,14 +109,20 @@ class SignalMaker:
         df = backfill_history(self._fetcher, ticker, interval, start, today)
         period = fetch_period(interval, None)
         lookback = default_lookback(interval)
-        bars = [bar for bar in cast("pd.DatetimeIndex", df.index[: max(len(df) - OUTCOME_BARS, 0)]) if bar.date() >= start]
+        done = self._signals.data_dates(ticker, interval)
+        eligible = [
+            bar
+            for bar in cast("pd.DatetimeIndex", df.index[: max(len(df) - OUTCOME_BARS, 0)])
+            if bar.date() >= start and bar.isoformat() not in done
+        ]
+        bars = eligible[:BACKFILL_BARS]
         for bar in bars:
             seen = df.loc[bar - lookback : bar]
             # Not held and no previous Signal, as a ticker's first live Signal.
             prompt = signal_prompt(ticker, period, seen, interval=interval)
             self._signals.record_backfilled(ticker, interval, seen, self._classify(prompt, seen, held=False))
         self._signals.score(ticker, interval, df, self._now().isoformat())
-        return {"logged": len(bars)}
+        return {"logged": len(bars), "remaining": len(eligible) - len(bars)}
 
     def _classify(self, prompt: SignalPrompt, df: pd.DataFrame, *, held: bool) -> dict:
         """A fresh Signal on df's last bar, with its picked cut levels when held or dip levels when not."""
