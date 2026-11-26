@@ -1,7 +1,6 @@
 """Price history for one Interval: its period rules and the indicators joined onto the bars."""
 
 import math
-import re
 from datetime import date, timedelta
 from typing import Literal, NamedTuple, cast
 
@@ -22,14 +21,16 @@ class _Periods(NamedTuple):
     # Yahoo's history limit in days and the periods that fit inside it; daily bars have none and pass any period on.
     limit_days: int | None
     allowed: tuple[str, ...]
+    # default as a lookback from a bar: a count of sessions, as Yahoo counts a "d" period, or a calendar offset.
+    lookback: int | pd.DateOffset
 
 
 _PERIODS: dict[Interval, _Periods] = {
-    "1m": _Periods("5d", 7, ("1d", "5d")),
-    "5m": _Periods("1mo", 60, ("1d", "5d", "1mo")),
-    "15m": _Periods("1mo", 60, ("1d", "5d", "1mo")),
-    "1h": _Periods("6mo", 730, ("1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "ytd")),
-    "1d": _Periods("1y", None, ()),
+    "1m": _Periods("5d", 7, ("1d", "5d"), 5),
+    "5m": _Periods("1mo", 60, ("1d", "5d", "1mo"), pd.DateOffset(months=1)),
+    "15m": _Periods("1mo", 60, ("1d", "5d", "1mo"), pd.DateOffset(months=1)),
+    "1h": _Periods("6mo", 730, ("1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "ytd"), pd.DateOffset(months=6)),
+    "1d": _Periods("1y", None, (), pd.DateOffset(years=1)),
 }
 
 
@@ -120,17 +121,25 @@ def history(fetcher: DataFetcher, ticker: str, interval: Interval, period: str |
 def backfill_history(fetcher: DataFetcher, ticker: str, interval: Interval, since: date, today: date) -> pd.DataFrame:
     """history for backfilling from since: reaching the Interval's default period before since, capped at what Yahoo
     keeps (all it keeps on intraday bars)."""
-    days = _PERIODS[interval].limit_days
-    # 1d's default period is 1y, so one year before since, rounded up to whole years.
-    period = f"{(today - since).days // 365 + 2}y" if days is None else f"{days}d"
-    return _joined(fetcher.fetch_history(ticker.upper(), period, interval))
+    periods = _PERIODS[interval]
+    if periods.limit_days is None:
+        # Daily bars have no limit: whole years back to the default period before since.
+        start = cast("pd.Timestamp", pd.Timestamp(since)) - cast("pd.DateOffset", periods.lookback)
+        period = f"{(pd.Timestamp(today) - start).days // 365 + 1}y"
+    else:
+        period = f"{periods.limit_days}d"
+    return _joined(fetcher.fetch_history(ticker, period, interval))
 
 
-def default_lookback(interval: Interval) -> pd.DateOffset:
-    """The Interval's default period as an offset, to slice history to what a live Signal sees."""
-    amount, unit = cast("re.Match", re.fullmatch(r"(\d+)(d|mo|y)", _PERIODS[interval].default)).groups()
-    n = int(amount)
-    return {"d": pd.DateOffset(days=n), "mo": pd.DateOffset(months=n), "y": pd.DateOffset(years=n)}[unit]
+def seen_at(df: pd.DataFrame, bar: pd.Timestamp, interval: Interval) -> pd.DataFrame:
+    """The rows of df a live Signal on bar would see: the Interval's default period ending at bar."""
+    lookback = _PERIODS[interval].lookback
+    upto = df.loc[:bar]
+    if isinstance(lookback, int):
+        days = [t.date() for t in cast("pd.DatetimeIndex", upto.index)]
+        first = sorted(set(days))[-lookback]
+        return upto[[day >= first for day in days]]
+    return upto.loc[bar - lookback :]
 
 
 def _joined(df: pd.DataFrame) -> pd.DataFrame:

@@ -1,8 +1,9 @@
-"""Backfilled Signals: SignalMaker.backfill replays past bars as first Signals for a ticker not held and scores them, through fakes."""
+"""Backfilled Signals: SignalMaker.backfill makes first Signals for a ticker not held and scores them, through fakes."""
 
 import json
 from datetime import UTC, datetime
 
+import pandas as pd
 import pytest
 from fakes import FakeClassifier, FakeFetcher, flat_history, seed_signals
 
@@ -22,7 +23,7 @@ def _maker(signal_maker, tmp_path, history, classifier):
     return signal_maker(FakeFetcher(history=history), classifier, db_path=tmp_path / "smm.db", now=lambda: NOW)
 
 
-def test_replays_bars_from_since_with_20_later_bars_as_first_signals_not_held(signal_maker, tmp_path):
+def test_backfills_bars_from_since_with_20_later_bars_as_first_signals_not_held(signal_maker, tmp_path):
     db = tmp_path / "smm.db"
     PortfolioStore(db).set("AAPL", 50, 90.0)
     seed_signals(db, [None])
@@ -38,11 +39,11 @@ def test_replays_bars_from_since_with_20_later_bars_as_first_signals_not_held(si
     assert [state["rows"][-1]["Date"] for state in states] == [t.isoformat() for t in history.index[60:80]]
     assert all(state["position"] is None and "previous_signal" not in state for state in states)
     assert all(list(questions["verdict"]["criteria"]) == ["buy", "dip", "hold"] for questions in classifier.questions)
-    # Fetched from a year before since, so the first replayed bar has the 1d default period behind it.
+    # Fetched from a year before since, so the first backfilled bar has the 1d default period behind it.
     assert fetcher.history_calls == [("AAPL", "2y", "1d", False)]
 
 
-def test_replayed_bar_sees_what_a_live_signal_on_that_bar_would(signal_maker, tmp_path):
+def test_backfilled_bar_sees_what_a_live_signal_on_that_bar_would(signal_maker, tmp_path):
     # Varying bars, and wild ones after bar 79, so any indicator that looks ahead changes the state.
     history = flat_history(rows=100)
     history["Close"] = [100.0 + (i * 7) % 11 for i in range(100)]
@@ -60,7 +61,7 @@ def test_replayed_bar_sees_what_a_live_signal_on_that_bar_would(signal_maker, tm
 def _rising_later():
     """Flat bars of 100 to bar 60 (SINCE), quieter ones to bar 79, then 20 reaching 110, none under 99.5 after bar 60.
 
-    Each bar replayed (60 to 79) reaches its buy's default Target (108 at most) or its dip's picked Target (the 20-bar
+    Each bar backfilled (60 to 79) reaches its buy's default Target (108 at most) or its dip's picked Target (the 20-bar
     high, 101, from bar 60) before either Stop (the dip's is bar 60's low, 99)."""
     history = flat_history(rows=100)
     history.loc[history.index[61:80], ["High", "Low"]] = [100.5, 99.5]
@@ -105,17 +106,44 @@ class _FailingOn:
         return self.fake.classify(prompt, questions)
 
 
-def test_failing_classifier_keeps_earlier_bars_and_logs_nothing_for_the_failing_one(signal_maker, tmp_path):
-    history = flat_history(rows=100)
+def test_failing_classifier_keeps_and_scores_earlier_bars_and_logs_nothing_for_the_failing_one(signal_maker, tmp_path):
+    # 8 Targets, so the 2 bars before the failing one make the 10 a Hit Rate needs.
+    seed_signals(tmp_path / "smm.db", ["target"] * 8)
     failing = _FailingOn(3, [_signal("buy", 0.51), _signal("buy", 0.52)])
 
     with pytest.raises(RuntimeError, match="openrouter 500"):
-        _maker(signal_maker, tmp_path, history, failing).backfill("AAPL", "1d", SINCE)
-    later = FakeClassifier(_signal("hold"))
-    signal_maker(FakeFetcher(history=history), later, db_path=tmp_path / "smm.db", ttl=0).make("AAPL", "1d")
+        _maker(signal_maker, tmp_path, _rising_later(), failing).backfill("AAPL", "1d", SINCE)
+    later = FakeClassifier(_signal("buy"))
+    # A history without the backfilled bars, so only backfill could have scored them.
+    live = signal_maker(FakeFetcher(history=flat_history()), later, db_path=tmp_path / "smm.db", ttl=0).make("AAPL", "1d")
 
     # The last row logged is the second bar's.
     assert json.loads(later.prompts[0])["previous_signal"]["confidence"] == 0.52
+    assert live["hit_rate"] == 1.0
+
+
+def test_bar_with_a_non_finite_close_is_skipped_without_a_classifier_call(signal_maker, tmp_path):
+    history = flat_history(rows=100)
+    history.loc[history.index[65], "Close"] = float("nan")
+    classifier = FakeClassifier(_signal("hold"))
+
+    reply = _maker(signal_maker, tmp_path, history, classifier).backfill("AAPL", "1d", SINCE)
+
+    assert reply == {"logged": 19, "remaining": 0}
+    assert _last_dates(classifier) == [t.isoformat() for t in history.index[60:80] if t != history.index[65]]
+
+
+def test_1m_bar_sees_the_5_sessions_a_live_signal_fetches_not_5_calendar_days(signal_maker, tmp_path):
+    # 10 bars a session, Monday 2024-03-04 to Thursday 2024-03-14, a weekend between.
+    days = pd.bdate_range("2024-03-04", "2024-03-14")
+    idx = pd.DatetimeIndex([t for day in days for t in pd.date_range(day + pd.Timedelta("9h30min"), periods=10, freq="min")], name="Datetime")
+    history = flat_history(rows=len(idx)).set_axis(idx)
+    classifier = FakeClassifier(_signal("hold"))
+
+    _maker(signal_maker, tmp_path, history, classifier).backfill("AAPL", "1m", "2024-03-12")
+
+    # The first bar of 2024-03-12 sees Wednesday 2024-03-06 on: five sessions, not back to Thursday as five days would.
+    assert json.loads(classifier.prompts[0])["rows"][0]["Date"] == "2024-03-06T09:30:00"
 
 
 @pytest.mark.parametrize("since", ["2024-13-01", "last year", "", "2024-12-02"])
