@@ -4,21 +4,23 @@ import math
 import os
 from collections.abc import Callable
 from dataclasses import asdict
-from datetime import datetime
+from datetime import date, datetime
 from typing import cast
 
 import pandas as pd
 
-from stock_market_mcp.bars import Interval, fetch_period, history
+from stock_market_mcp.bars import Interval, backfill_history, fetch_period, history, seen_at
 from stock_market_mcp.cache import TTLCache
 from stock_market_mcp.classifier import SignalClassifier
 from stock_market_mcp.data import DataFetcher
 from stock_market_mcp.errors import InputError
 from stock_market_mcp.portfolio import PortfolioStore
-from stock_market_mcp.prompt import signal_prompt
-from stock_market_mcp.signals import PLAN_ATR_MULTIPLE, PLAN_REWARD_RATIO, SignalLog
+from stock_market_mcp.prompt import SignalPrompt, signal_prompt
+from stock_market_mcp.signals import OUTCOME_BARS, PLAN_ATR_MULTIPLE, PLAN_REWARD_RATIO, SignalLog
 
 PLAN_ARG_MAX = 10
+# Bars one backfill call backfills, so a call stays a bounded number of classifier calls.
+BACKFILL_BARS = 50
 
 
 class SignalMaker:
@@ -65,14 +67,7 @@ class SignalMaker:
         signal = self._cache.get(prompt.cache_key, self._ttl)
         fresh = signal is None
         if fresh:
-            classified = self._classifier.classify(prompt.state, prompt.questions)
-            signal = {**classified, "data_date": cast("pd.Timestamp", df.index[-1]).isoformat()}
-            # No picks when neither side has a candidate.
-            picks = signal.pop("picks", {})
-            if held is not None:
-                signal["cut_levels"] = _levels(picks, prompt.candidates, _CUT_LEVELS)
-            else:
-                signal["dip_levels"] = _levels(picks, prompt.candidates, _DIP_LEVELS)
+            signal = self._classify(prompt, df, held=held is not None)
         fields = self._signals.after_classifier(
             ticker,
             interval,
@@ -99,6 +94,50 @@ class SignalMaker:
                 "cut_min_confidence": reply.pop("cut_min_confidence"),
             }
         return reply
+
+    def backfill(self, ticker: str, interval: Interval, since: str) -> dict:
+        """Make and score a Backfilled Signal on the BACKFILL_BARS oldest bars from since that have OUTCOME_BARS later bars and
+        no Signal under the current Prompt Version (ADR-0013); returns how many were logged and how many such bars remain."""
+        try:
+            start = date.fromisoformat(since)
+        except ValueError:
+            raise InputError(f"since must be an ISO date, got {since!r}") from None
+        today = self._now().date()
+        if start > today:
+            raise InputError(f"since must not be after today ({today}), got {since}")
+        ticker = ticker.upper()
+        df = backfill_history(self._fetcher, ticker, interval, start, today)
+        period = fetch_period(interval, None)
+        done = self._signals.data_dates(ticker, interval)
+        # A non-finite close is a bar make would refuse, so it is never eligible.
+        eligible = [
+            bar
+            for bar in cast("pd.DatetimeIndex", df.index[: max(len(df) - OUTCOME_BARS, 0)])
+            if bar.date() >= start and bar.isoformat() not in done and math.isfinite(df.at[bar, "Close"])
+        ]
+        bars = eligible[:BACKFILL_BARS]
+        try:
+            for bar in bars:
+                seen = seen_at(df, bar, interval)
+                # Not held and no previous Signal, as a ticker's first live Signal.
+                prompt = signal_prompt(ticker, period, seen, interval=interval)
+                self._signals.record_backfilled(ticker, interval, seen, self._classify(prompt, seen, held=False))
+        finally:
+            # Scores the bars logged before a failing one too.
+            self._signals.score(ticker, interval, df, self._now().isoformat())
+        return {"logged": len(bars), "remaining": len(eligible) - len(bars)}
+
+    def _classify(self, prompt: SignalPrompt, df: pd.DataFrame, *, held: bool) -> dict:
+        """A fresh Signal on df's last bar, with its picked cut levels when held or dip levels when not."""
+        classified = self._classifier.classify(prompt.state, prompt.questions)
+        signal = {**classified, "data_date": cast("pd.Timestamp", df.index[-1]).isoformat()}
+        # No picks when neither side has a candidate.
+        picks = signal.pop("picks", {})
+        if held:
+            signal["cut_levels"] = _levels(picks, prompt.candidates, _CUT_LEVELS)
+        else:
+            signal["dip_levels"] = _levels(picks, prompt.candidates, _DIP_LEVELS)
+        return signal
 
 
 # Each level question and the key its picked price goes under.
