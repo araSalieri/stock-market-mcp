@@ -164,6 +164,15 @@ class SignalLog:
         with self._open() as conn:
             _record(conn, ticker, interval, signal, history, float(history["Close"].iloc[-1]), None, backfilled=True)
 
+    def data_dates(self, ticker: str, interval: str) -> set[str]:
+        """The data_date of every Signal, live or backfilled, for the ticker and Interval under the current Prompt Version."""
+        with self._open() as conn:
+            rows = conn.execute(
+                "SELECT data_date FROM signals WHERE ticker = ? AND interval = ? AND prompt_version = ?",
+                (ticker, interval, PROMPT_VERSION),
+            )
+            return {row[0] for row in rows}
+
     def score(self, ticker: str, interval: str, history: pd.DataFrame, scored_at: str) -> None:
         """Score pending Signals for the ticker and Interval against history."""
         with self._open() as conn:
