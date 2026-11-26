@@ -57,7 +57,7 @@ async def test_counts_signals_by_band_and_verdict_leaving_out_empty_verdicts(ser
                 "buy_hit_rate": None,
             },
         ],
-        "min_confidence": 0.6,
+        "min_confidence": 0.4,
         "cut_loss_hit_rate": None,
         "cut_min_confidence": None,
         "dip_min_confidence": 0.4,
@@ -227,7 +227,7 @@ async def test_cut_break_even_per_band_follows_filters_and_is_null_without_score
     assert [band["cut"]["break_even"] for band in aapl["bands"]] == [pytest.approx(17 / 30), None]
 
 
-@pytest.mark.parametrize(("args", "expected"), [({"interval": "1d"}, 0.7), ({"interval": "1h"}, 0.6), ({}, None)])
+@pytest.mark.parametrize(("args", "expected"), [({"interval": "1d"}, 0.7), ({"interval": "1h"}, 0.4), ({}, None)])
 async def test_cut_min_confidence_matches_get_signal_for_the_interval_and_is_null_without_one(
     signal_maker, server_url, tmp_path, args, expected
 ):

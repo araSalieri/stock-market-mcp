@@ -30,7 +30,7 @@ async def test_get_signal_returns_strict_json_signal(server_url):
     plan = payload.pop("trade_plan")
     assert payload.pop("price") == plan["entry"]
     assert payload.pop("hit_rate") is None
-    assert payload.pop("min_confidence") == 0.6
+    assert payload.pop("min_confidence") == 0.4
     assert payload.pop("dip_min_confidence") == 0.4
     assert payload == {
         "verdict": "buy",

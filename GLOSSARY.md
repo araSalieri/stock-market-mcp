@@ -19,7 +19,7 @@ The classifier's 0–1 confidence in the Verdict, returned beside the probabilit
 _Avoid_: Probability, certainty, score
 
 **Minimum Confidence**:
-The lowest Confidence at which a buy gets a Trade Plan. Set by the server from buy Hit Rates: 0.6 until enough Signals are scored, and none when enough are scored but no Confidence band beats break-even, so no buy gets a Trade Plan.
+The lowest Confidence at which a buy gets a Trade Plan. Set by the server from buy Hit Rates: 0.4 until enough Signals are scored, and none when enough are scored but no Confidence band beats break-even, so no buy gets a Trade Plan.
 _Avoid_: Threshold, cut-off
 
 **Dip Break-even**:
@@ -121,7 +121,7 @@ The Hit Rate a set of scored cuts must beat to have been worth it: the average o
 _Avoid_: Cut threshold, fair rate
 
 **Cut Minimum Confidence**:
-The lowest Confidence at which a cut counts, per Interval: it makes a Cut Loss and gets a Buyback Price and Cut Stop. Set by the server from that Interval's scored cuts on any Position the same way buy sets the Minimum Confidence, against the Cut Break-even: 0.6 until enough are scored, and none when enough are scored but no Confidence band beats its Cut Break-even, so no cut on that Interval counts.
+The lowest Confidence at which a cut counts, per Interval: it makes a Cut Loss and gets a Buyback Price and Cut Stop. Set by the server from that Interval's scored cuts on any Position the same way buy sets the Minimum Confidence, against the Cut Break-even: 0.4 until enough are scored, and none when enough are scored but no Confidence band beats its Cut Break-even, so no cut on that Interval counts.
 _Avoid_: Cut threshold, cut gate
 
 **Cut Loss Hit Rate**:

@@ -188,9 +188,9 @@ def test_dip_reply_has_the_dip_hit_rate_for_its_ticker_and_interval(signal_maker
 
 
 def test_buy_minimum_confidence_and_trade_plan_ignore_dips(signal_maker, tmp_path):
-    # The dips give a null Dip Minimum Confidence; the buy keeps the 0.6 default and its ATR Trade Plan.
+    # The dips give a null Dip Minimum Confidence; the buy keeps the 0.4 default and its ATR Trade Plan.
     reply = _seeded(signal_maker, tmp_path, {"confidence": 0.6, "stops": 30}, signal=_signal("buy", 0.6))
 
     assert reply["dip_min_confidence"] is None
-    assert reply["min_confidence"] == 0.6
+    assert reply["min_confidence"] == 0.4
     assert reply["trade_plan"]["atr_multiple"] == 2.0

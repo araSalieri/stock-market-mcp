@@ -7,10 +7,10 @@ def _signal(verdict="buy", confidence=0.7):
     return {"verdict": verdict, "confidence": confidence, "rationale": "test"}
 
 
-def test_no_scored_signals_applies_0_6(signal_maker):
+def test_no_scored_signals_applies_0_4(signal_maker):
     payload = signal_maker(FakeFetcher(history=flat_history()), FakeClassifier(_signal("buy", 0.6))).make("AAPL")
 
-    assert payload["min_confidence"] == 0.6
+    assert payload["min_confidence"] == 0.4
     assert payload["trade_plan"] is not None
 
 

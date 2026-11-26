@@ -144,7 +144,7 @@ def test_signal_without_a_default_plan_stays_pending(signal_maker):
     # Close 1 with ATR 2 puts the long default Stop below zero, so it is stored null.
     # Below the Minimum Confidence, so no Trade Plan is asked for and the Signal is still stored.
     first = flat_history(close=1.0)
-    outcome = _outcome(signal_maker, "buy", confidence=0.5, first=first, scored_on=flat_history(close=1.0, rows=90))
+    outcome = _outcome(signal_maker, "buy", confidence=0.3, first=first, scored_on=flat_history(close=1.0, rows=90))
     assert outcome == "pending"
 
 
