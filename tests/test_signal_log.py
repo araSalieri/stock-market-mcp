@@ -3,6 +3,7 @@
 import json
 import sqlite3
 from contextlib import closing
+from datetime import UTC, datetime
 
 import pytest
 from fakes import FakeClassifier, FakeFetcher, flat_history
@@ -90,7 +91,21 @@ def test_hold_is_stored_with_both_default_plans_whatever_the_caller_asked(signal
         "outcome": None,
         "scored_at": None,
         "cut_loss": None,
+        "backfilled": None,
     }
+
+
+def test_backfilled_buy_and_dip_are_stored_marked_with_the_default_plan_and_the_picked_levels(signal_maker, tmp_path):
+    picks = {"dip_target": {"choice": "high_20", "confidence": 0.8}, "dip_stop": {"choice": "low_20", "confidence": 0.6}}
+    classifier = FakeClassifier(replies=[_signal("buy"), {**_signal("dip"), "picks": picks}])
+    maker = signal_maker(FakeFetcher(history=flat_history(rows=82)), classifier, db_path=tmp_path / "s.db", now=lambda: datetime(2024, 12, 1, tzinfo=UTC))
+
+    maker.backfill("AAPL", "1d", "2024-03-01")
+
+    buy, dip = ({k: row[k] for k in ("data_date", "verdict", "price", "long_stop", "long_target", "backfilled")} for row in _stored(tmp_path / "s.db"))
+    # Flat close 100 with ATR 2: the default long plan is 96/108; the dip's picked 20-bar low and high are 99/101.
+    assert buy == {"data_date": "2024-03-01T00:00:00", "verdict": "buy", "price": 100.0, "long_stop": pytest.approx(96.0), "long_target": pytest.approx(108.0), "backfilled": 1}
+    assert dip == {"data_date": "2024-03-02T00:00:00", "verdict": "dip", "price": 100.0, "long_stop": 99.0, "long_target": 101.0, "backfilled": 1}
 
 
 def test_previous_signal_survives_row_trimming(signal_maker, monkeypatch):

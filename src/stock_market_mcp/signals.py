@@ -58,7 +58,8 @@ SCHEMA = """CREATE TABLE IF NOT EXISTS signals (
 )"""
 
 # Columns added to signals after its first release, as (column, type); missing ones are added on open.
-_ADDED_COLUMNS = (("cut_loss", "INTEGER"),)
+# backfilled: 1 on a Backfilled Signal (ADR-0013), null on a live one.
+_ADDED_COLUMNS = (("cut_loss", "INTEGER"), ("backfilled", "INTEGER"))
 
 
 class SignalLog:
@@ -158,6 +159,16 @@ class SignalLog:
             fields |= {**cut_levels, "buyback_quantity": quantity}
         return fields
 
+    def record_backfilled(self, ticker: str, interval: str, history: pd.DataFrame, signal: dict) -> None:
+        """Store a Backfilled Signal made on history's last bar, as after_classifier stores a fresh one not held, at that bar's close."""
+        with self._open() as conn:
+            _record(conn, ticker, interval, signal, history, float(history["Close"].iloc[-1]), None, backfilled=True)
+
+    def score(self, ticker: str, interval: str, history: pd.DataFrame, scored_at: str) -> None:
+        """Score pending Signals for the ticker and Interval against history."""
+        with self._open() as conn:
+            _score(conn, ticker, interval, history, scored_at)
+
     def track_record(self, ticker: str | None, interval: str | None) -> dict:
         """The Track Record's bands, with the server-wide Minimum Confidence and Cut Loss Hit Rate get_signal reports, and
         the Interval's Cut Minimum Confidence (None without one) and the Dip Minimum Confidence (all Intervals)."""
@@ -179,6 +190,8 @@ def _record(
     history: pd.DataFrame,
     price: float,
     cut_loss: bool | None,
+    *,
+    backfilled: bool | None = None,
 ) -> None:
     """Store one pending Signal at its data_date, with the default Trade Plan at price and its mirror, except that a
     dip's Stop and Target are its picked ones, and a cut's mirrored Stop and Target its picked Cut Stop and Buyback
@@ -193,7 +206,7 @@ def _record(
         short_stop, short_target = cut_levels["cut_stop"], cut_levels["buyback_price"]
     conn.execute(
         "INSERT INTO signals (ticker, interval, prompt_version, data_date, verdict, confidence, price, "
-        "long_stop, long_target, short_stop, short_target, cut_loss) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "long_stop, long_target, short_stop, short_target, cut_loss, backfilled) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             ticker,
             interval,
@@ -207,6 +220,7 @@ def _record(
             short_stop,
             short_target,
             cut_loss,
+            backfilled,
         ),
     )
 
