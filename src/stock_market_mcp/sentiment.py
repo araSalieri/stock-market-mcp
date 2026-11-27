@@ -39,7 +39,8 @@ _ANSWER_SCHEMA = {
     "required": ["reading", "summary"],
     "additionalProperties": False,
 }
-_POST_URL = re.compile(r"https://(www\.)?(x|twitter)\.com/\w+/status/\d+")
+# A status link, with any host alias, query or trailing path (?s=20, /photo/1); posts keep only user and id.
+_POST_URL = re.compile(r"https://(?:www\.|mobile\.)?(?:x|twitter)\.com/(\w+)/status/(\d+)(?:[/?#].*)?")
 
 
 def sentiment_prompt(ticker: str, name: str | None) -> str:
@@ -117,7 +118,7 @@ class EnforcingSentimentReader:
 
 
 class XaiSentimentReader:
-    """Responses API transport against xAI, with one x_search tool over the date window."""
+    """Responses API transport against xAI, with one x_search tool over the Lookback."""
 
     def read(self, prompt: str, from_date: str, to_date: str) -> dict:
         # Read at call time and never stored; missing, it fails before any request.
@@ -159,13 +160,17 @@ class XaiSentimentReader:
             raise SentimentContractError(f"answer is not JSON: {texts[0].get('text')!r}") from None
         if not isinstance(answer, dict) or answer.keys() != {"reading", "summary"}:
             raise SentimentContractError(f"answer must have exactly reading and summary, got: {answer!r}")
-        fetched = body.get("usage", {}).get("server_side_tool_usage_details", {}).get("x_posts_fetched")
-        if fetched is None:
-            raise SentimentContractError("xAI reply has no usage x_posts_fetched")
+        try:
+            fetched = body["usage"]["server_side_tool_usage_details"]["x_posts_fetched"]
+        except (KeyError, TypeError):
+            raise SentimentContractError(f"xAI reply has no usage x_posts_fetched: {body.get('usage')!r}") from None
+        citations = body.get("citations", [])
+        if not isinstance(citations, list):
+            raise SentimentContractError(f"citations must be a list, got: {citations!r}")
         # Posts come from xAI's citations, never Grok's text, so a cited post can't be made up.
-        urls = [a.get("url") for a in texts[0].get("annotations", []) if a.get("type") == "url_citation"]
-        urls += body.get("citations", [])
-        posts = [url for url in dict.fromkeys(urls) if isinstance(url, str) and _POST_URL.fullmatch(url)]
+        urls = [a.get("url") for a in texts[0].get("annotations", []) if a.get("type") == "url_citation"] + citations
+        matches = [_POST_URL.fullmatch(url) for url in urls if isinstance(url, str)]
+        posts = list(dict.fromkeys(f"https://x.com/{m[1]}/status/{m[2]}" for m in matches if m))
         return {**answer, "posts": posts[:POSTS_MAX], "posts_fetched": fetched}
 
 
@@ -220,8 +225,8 @@ class SentimentLog:
         with transaction(self.path, SCHEMA) as conn:
             pending = conn.execute(
                 f"SELECT id, data_date, reading, {', '.join(PLAN_COLUMNS)} FROM sentiments "
-                "WHERE ticker = ? AND interval = ? AND outcome IS NULL AND reading IN ('bullish', 'bearish')",
-                (ticker, interval),
+                f"WHERE ticker = ? AND interval = ? AND outcome IS NULL AND reading IN ({', '.join('?' * len(_SIDES))})",
+                (ticker, interval, *_SIDES),
             ).fetchall()
             for id_, data_date, reading, *prices in pending:
                 bar = pd.Timestamp(data_date)
@@ -288,24 +293,25 @@ class SentimentMaker:
         df = history(self._fetcher, ticker, interval, None)
         price = finite(float(df["Close"].iloc[-1]))
         self._log.score(ticker, interval, df, self._now().isoformat())
-        try:
-            name = self._fetcher.fetch_fundamentals(ticker).get("long_name")
-        except LookupError:
-            # Yahoo has no name for some tickers it has bars for; the cashtag alone still finds posts.
-            name = None
         today = self._now().astimezone(UTC).date()
         from_date = (today - timedelta(days=days - 1)).isoformat()
-        # X Search's to_date is exclusive, so tomorrow takes in all of today.
-        to_date = (today + timedelta(days=1)).isoformat()
-        prompt = sentiment_prompt(ticker, name)
-        key = (ticker, days, interval)
+        # from_date is in the key, so a read cached before UTC midnight isn't served for the next day's Lookback.
+        key = (ticker, days, interval, from_date)
         sentiment = self._cache.get(key, self._ttl)
         if sentiment is None:
-            sentiment = self._reader.read(prompt, from_date, to_date)
-            self._cache.put(key, sentiment)
+            try:
+                name = self._fetcher.fetch_fundamentals(ticker).get("long_name")
+            except LookupError:
+                # Yahoo has no name for some tickers it has bars for; the cashtag alone still finds posts.
+                name = None
+            # X Search's to_date is exclusive, so tomorrow takes in all of today.
+            to_date = (today + timedelta(days=1)).isoformat()
+            sentiment = self._reader.read(sentiment_prompt(ticker, name), from_date, to_date)
             # A Sentiment with no Price can't be scored.
             if price is not None:
                 self._log.record(ticker, interval, days, df, price, sentiment["reading"])
+            # Cached only once recorded, so a failed store is retried instead of served from the cache.
+            self._cache.put(key, sentiment)
         return {
             "ticker": ticker,
             "interval": interval,

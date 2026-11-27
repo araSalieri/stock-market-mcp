@@ -117,6 +117,45 @@ async def test_another_lookback_or_an_expired_read_reads_again(server_url):
     assert len(reader.reads) == 5
 
 
+async def test_a_read_cached_before_utc_midnight_is_not_served_after_it(server_url):
+    reader = FakeSentimentReader()
+    clock = iter([datetime(2026, 11, 27, 23, 59, tzinfo=UTC)] * 2 + [datetime(2026, 11, 28, 0, 1, tzinfo=UTC)] * 2)
+    url = server_url(_fetcher(), sentiment_reader=reader, now=lambda: next(clock))
+
+    await call_tool(url, "get_sentiment", {"ticker": "BBCA.JK"})
+    await call_tool(url, "get_sentiment", {"ticker": "BBCA.JK"})
+
+    assert [read[1] for read in reader.reads] == ["2026-11-27", "2026-11-28"]
+
+
+async def test_a_cached_read_fetches_no_fundamentals(server_url):
+    fetcher = _fetcher()
+    url = server_url(fetcher, sentiment_reader=FakeSentimentReader(), fundamentals_ttl=0, now=lambda: NOW)
+
+    await call_tool(url, "get_sentiment", {"ticker": "BBCA.JK"})
+    await call_tool(url, "get_sentiment", {"ticker": "BBCA.JK"})
+
+    assert fetcher.fundamentals_calls == ["BBCA.JK"]
+
+
+async def test_a_read_that_fails_to_log_is_not_cached_so_a_retry_reads_and_logs_it(server_url, tmp_path):
+    reader = FakeSentimentReader()
+    url = server_url(_fetcher(), sentiment_reader=reader, now=lambda: NOW)
+    await call_tool(url, "get_track_record", {})  # creates the file
+    db = tmp_path / "server.db"
+    db.chmod(0o444)  # reads still work, the insert fails
+
+    failed = await call_tool(url, "get_sentiment", {"ticker": "BBCA.JK"})
+    db.chmod(0o644)
+    result = await call_tool(url, "get_sentiment", {"ticker": "BBCA.JK"})
+
+    assert failed.is_error
+    assert not result.is_error, text_of(result)
+    assert len(reader.reads) == 2
+    record = json.loads(text_of(await call_tool(url, "get_track_record", {})))
+    assert record["sentiment"]["bullish"]["pending"] == 1
+
+
 GOOD = FakeSentimentReader().reply
 
 
