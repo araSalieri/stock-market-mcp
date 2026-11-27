@@ -13,9 +13,10 @@ services:
       SMM_DB_PATH: /home/appuser/data/stock-market-mcp.db
       # Passthrough only: values resolve from the host environment (or .env,
       # which compose reads automatically). Empty defaults keep the classifier's
-      # loud missing-key error when the host has nothing to pass; no secret is
+      # and get_sentiment's loud missing-key errors when the host has nothing to pass; no secret is
       # ever stored in the image, repo, or this file.
       SMM_OPENROUTER_API_KEY: ${SMM_OPENROUTER_API_KEY:-}
+      SMM_XAI_API_KEY: ${SMM_XAI_API_KEY:-}
       SMM_CLASSIFIER_MODEL: ${SMM_CLASSIFIER_MODEL:-}
       SMM_LOG_LEVEL: ${SMM_LOG_LEVEL:-}
     ports:
