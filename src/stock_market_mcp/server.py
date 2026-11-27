@@ -19,6 +19,7 @@ from stock_market_mcp.cache import (
     FUNDAMENTALS_TTL_SECONDS,
     HISTORY_TTL_SECONDS,
     QUOTE_TTL_SECONDS,
+    SENTIMENT_TTL_SECONDS,
     SIGNAL_TTL_SECONDS,
     CachingFetcher,
 )
@@ -33,6 +34,13 @@ from stock_market_mcp.errors import InputError
 from stock_market_mcp.portfolio import PortfolioStore
 from stock_market_mcp.prompt import PROMPT_VERSION
 from stock_market_mcp.scan import scan_ticker
+from stock_market_mcp.sentiment import (
+    EnforcingSentimentReader,
+    SentimentLog,
+    SentimentMaker,
+    SentimentReader,
+    XaiSentimentReader,
+)
 from stock_market_mcp.signal_maker import SignalMaker
 from stock_market_mcp.signals import SignalLog
 from stock_market_mcp.verdicts import PLAN_ATR_MULTIPLE, PLAN_REWARD_RATIO
@@ -96,6 +104,8 @@ def build_server(
     history_ttl: float = HISTORY_TTL_SECONDS,
     fundamentals_ttl: float = FUNDAMENTALS_TTL_SECONDS,
     signal_ttl: float = SIGNAL_TTL_SECONDS,
+    sentiment_reader: SentimentReader | None = None,
+    sentiment_ttl: float = SENTIMENT_TTL_SECONDS,
     db_path: str | os.PathLike | None = None,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> MCPServer:
@@ -103,7 +113,7 @@ def build_server(
 
     The TTL parameters exist so tests can shrink the cache windows; production
     callers use the module-level defaults (60s quotes and history, 300s the rest).
-    `now` is the clock the Scan uses to tell which session is current.
+    `now` is the clock the Scan uses to tell which session is current, and the day a Sentiment's Lookback ends on.
     """
     fetcher = CachingFetcher(
         fetcher,
@@ -116,7 +126,10 @@ def build_server(
     watchlists = WatchlistStore(db_path)
     portfolio = PortfolioStore(db_path)
     signal_log = SignalLog(db_path)
+    sentiment_log = SentimentLog(db_path)
     signal_maker = SignalMaker(fetcher, signal_classifier, db_path, signal_ttl, now)
+    reader = EnforcingSentimentReader(sentiment_reader if sentiment_reader is not None else XaiSentimentReader())
+    sentiment_maker = SentimentMaker(fetcher, reader, db_path, sentiment_ttl, now)
     mcp = MCPServer("stock-market-mcp")
 
     def audited_tool[F: Callable](fn: F) -> F:
@@ -151,14 +164,20 @@ def build_server(
 
     @audited_tool
     def get_track_record(ticker: str | None = None, interval: Interval | None = None) -> dict:
-        """Track Record of the current prompt version's Signals, from the server's Signal log; no market data or classifier call. Optional ticker and interval narrow it and are echoed back (null when not given) with prompt_version. bands lists each 0.1 Confidence band that has Signals, ascending, as band (its lower bound) plus each Verdict the band has: buy, dip and cut {target, stop, expired, pending, hit_rate} and hold {quiet, missed, pending, hit_rate}; and buy_hit_rate, the rate min_confidence is set from. hit_rate is Targets / (Targets + Stops), or Quiet / (Quiet + Missed) for hold, null until enough are scored (more for buy_hit_rate). A cut is scored at its picked Buyback Price (Target) and Cut Stop (Stop), a dip at its picked Target and Stop. Each cut and dip also has break_even, its Cut or Dip Break-even over the scored ones the counts cover (null with none). Signals that can never be scored (no default Trade Plan, or a cut or dip missing a picked level) are left out. min_confidence and cut_loss_hit_rate are the server-wide values get_signal reports. cut_min_confidence is the given interval's value get_signal reports, null when no interval is given. dip_min_confidence is the value get_signal reports, across all Intervals. An empty bands list means no Signals were logged for that filter, not that the ticker is unknown."""
+        """Track Record of the current prompt version's Signals, from the server's Signal log; no market data or classifier call. Optional ticker and interval narrow it and are echoed back (null when not given) with prompt_version. bands lists each 0.1 Confidence band that has Signals, ascending, as band (its lower bound) plus each Verdict the band has: buy, dip and cut {target, stop, expired, pending, hit_rate} and hold {quiet, missed, pending, hit_rate}; and buy_hit_rate, the rate min_confidence is set from. hit_rate is Targets / (Targets + Stops), or Quiet / (Quiet + Missed) for hold, null until enough are scored (more for buy_hit_rate). A cut is scored at its picked Buyback Price (Target) and Cut Stop (Stop), a dip at its picked Target and Stop. Each cut and dip also has break_even, its Cut or Dip Break-even over the scored ones the counts cover (null with none). Signals that can never be scored (no default Trade Plan, or a cut or dip missing a picked level) are left out. min_confidence and cut_loss_hit_rate are the server-wide values get_signal reports. cut_min_confidence is the given interval's value get_signal reports, null when no interval is given. dip_min_confidence is the value get_signal reports, across all Intervals. An empty bands list means no Signals were logged for that filter, not that the ticker is unknown. sentiment is the Track Record of the current Sentiment version's Sentiments under the same filters: bullish and bearish {target, stop, expired, pending, hit_rate}, with hit_rate as above (expired and pending left out), and mixed and quiet, how many are stored (they are never scored)."""
         ticker = ticker.upper() if ticker is not None else None
         return {
             "prompt_version": PROMPT_VERSION,
             "ticker": ticker,
             "interval": interval,
             **signal_log.track_record(ticker, interval),
+            "sentiment": sentiment_log.track_record(ticker, interval),
         }
+
+    @audited_tool
+    def get_sentiment(ticker: str, interval: Interval = "1d", days: int = 1) -> dict:
+        """Sentiment of one ticker: what people on X say about the company over the Lookback, read by Grok through xAI's X Search for the cashtag without the exchange suffix ($BBCA for BBCA.JK) and the company name. days is the Lookback, whole UTC days of posts ending today (default 1); a Lookback past the server's limit is rejected before any search. reading is bullish, bearish, mixed (both sides heard, neither leads) or quiet (too few posts about the company to say); summary says what people are saying; posts lists a few cited X posts (possibly none); posts_fetched is how many posts X Search fetched, not de-duplicated. price and data_date are the last close and its bar on the Interval (default 1d). A repeat call for the same ticker, days and Interval within the Sentiment cache window reuses the read with a fresh price. Each fresh read is logged and later given an Outcome: bullish judged like a buy against the default Trade Plan, bearish against its mirror below the price, mixed and quiet never; pending ones are scored only when get_sentiment is called again for the ticker and Interval. hit_rate is Targets / (Targets + Stops) of the current Sentiment version's Sentiments with this ticker, Interval and Reading, all Lookbacks together, null until enough are scored and always null for mixed and quiet. A Reading is not a Signal and sets nothing for Signals: no Verdict, Confidence, Minimum Confidence or Trade Plan. Needs SMM_XAI_API_KEY; each read is billed per post fetched plus Grok tokens."""
+        return sentiment_maker.make(ticker, interval, days)
 
     @audited_tool
     def scan(watchlist: str | None = None, tickers: list[str] | None = None) -> list[dict]:

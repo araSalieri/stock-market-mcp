@@ -1,4 +1,4 @@
-"""Tests for get_track_record over MCP: Outcome counts and Hit Rates by Confidence band and Verdict."""
+"""Tests for get_track_record over MCP: Outcome counts and Hit Rates by Confidence band and Verdict, and by Reading."""
 
 import json
 import sqlite3
@@ -8,7 +8,7 @@ import pytest
 
 from stock_market_mcp.prompt import PROMPT_VERSION
 
-from fakes import FakeClassifier, FakeFetcher, call_tool, flat_history, seed_signals, text_of
+from fakes import FakeClassifier, FakeFetcher, call_tool, flat_history, seed_sentiments, seed_signals, text_of
 
 from stock_market_mcp.portfolio import PortfolioStore
 
@@ -61,6 +61,12 @@ async def test_counts_signals_by_band_and_verdict_leaving_out_empty_verdicts(ser
         "cut_loss_hit_rate": None,
         "cut_min_confidence": None,
         "dip_min_confidence": 0.4,
+        "sentiment": {
+            "bullish": {"target": 0, "stop": 0, "expired": 0, "pending": 0, "hit_rate": None},
+            "bearish": {"target": 0, "stop": 0, "expired": 0, "pending": 0, "hit_rate": None},
+            "mixed": 0,
+            "quiet": 0,
+        },
     }
 
 
@@ -290,3 +296,80 @@ async def test_dip_min_confidence_matches_get_signal_whatever_the_filter(signal_
     signal = signal_maker(FakeFetcher(history=flat_history()), FakeClassifier(), db_path=db).make("tsla", "1d")
 
     assert reply["dip_min_confidence"] == signal["dip_min_confidence"] == 0.5
+
+
+async def _sentiment_section(server_url, tmp_path, seeds, args=None) -> dict:
+    """get_track_record's sentiment section after seeding seed_sentiments kwargs."""
+    for seed in seeds:
+        seed_sentiments(tmp_path / "s.db", **seed)
+    return (await _track_record(server_url, tmp_path, [], args))["sentiment"]
+
+
+async def test_sentiment_counts_outcomes_per_scored_reading_and_stores_mixed_and_quiet(server_url, tmp_path):
+    seeds = [
+        _seed({"target": 2, "stop": 1, "expired": 3, None: 4}),
+        _seed({"stop": 2, "expired": 1}, reading="bearish"),
+        _seed({None: 3}, reading="mixed"),
+        _seed({None: 1}, reading="quiet"),
+    ]
+
+    assert await _sentiment_section(server_url, tmp_path, seeds) == {
+        "bullish": {"target": 2, "stop": 1, "expired": 3, "pending": 4, "hit_rate": None},
+        "bearish": {"target": 0, "stop": 2, "expired": 1, "pending": 0, "hit_rate": None},
+        "mixed": 3,
+        "quiet": 1,
+    }
+
+
+@pytest.mark.parametrize("reading", ["bullish", "bearish"])
+async def test_sentiment_hit_rate_is_null_at_9_scored_and_set_at_10_with_expired_and_pending_left_out(
+    server_url, tmp_path, reading
+):
+    seeds = [
+        _seed({"target": 3, "stop": 6, "expired": 5, None: 5}, reading=reading, ticker="MSFT"),
+        _seed({"target": 4, "stop": 6, "expired": 5, None: 5}, reading=reading),
+    ]
+    await _sentiment_section(server_url, tmp_path, seeds)
+
+    msft = await _sentiment_section(server_url, tmp_path, [], {"ticker": "msft"})
+    aapl = await _sentiment_section(server_url, tmp_path, [], {"ticker": "aapl"})
+    assert msft[reading]["hit_rate"] is None
+    assert aapl[reading]["hit_rate"] == pytest.approx(0.4)
+
+
+@pytest.mark.parametrize(
+    ("args", "targets", "mixed"),
+    [
+        ({}, 1 + 2 + 4 + 8, 1 + 2 + 4 + 8),
+        ({"ticker": "aapl"}, 1 + 2, 1 + 2),
+        ({"interval": "1h"}, 2 + 4, 2 + 4),
+        ({"ticker": "aapl", "interval": "1h"}, 2, 2),
+        ({"ticker": "nope"}, 0, 0),
+    ],
+)
+async def test_ticker_and_interval_narrow_the_sentiment_section(server_url, tmp_path, args, targets, mixed):
+    seeds = [
+        seed
+        for n, ticker, interval in [(1, "AAPL", "1d"), (2, "AAPL", "1h"), (4, "MSFT", "1h"), (8, "MSFT", "1d")]
+        for seed in (
+            _seed({"target": n}, ticker=ticker, interval=interval),
+            _seed({None: n}, reading="mixed", ticker=ticker, interval=interval),
+        )
+    ]
+    section = await _sentiment_section(server_url, tmp_path, seeds, args)
+
+    assert (section["bullish"]["target"], section["mixed"]) == (targets, mixed)
+
+
+async def test_sentiments_from_an_older_version_are_left_out(server_url, tmp_path):
+    seeds = [
+        # Version 0 comes before every Sentiment version.
+        _seed({"target": 1, "stop": 1}),
+        _seed({"target": 5, "stop": 5, "expired": 5, None: 5}, version=0),
+        _seed({"stop": 5}, reading="bearish", version=0),
+        _seed({None: 5}, reading="quiet", version=0),
+    ]
+    section = await _sentiment_section(server_url, tmp_path, seeds)
+
+    assert section["bullish"] == {"target": 1, "stop": 1, "expired": 0, "pending": 0, "hit_rate": None}
+    assert (section["bearish"]["stop"], section["quiet"]) == (0, 0)

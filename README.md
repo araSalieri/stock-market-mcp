@@ -15,7 +15,8 @@ An MCP server that gives coding agents stock market data, indicators and advisor
 | `get_fundamentals` | Name, sector, industry, market cap |
 | `get_signal` | Long-only advice for a ticker: buy, dip (a pullback below the mean while the trend still points up) or hold, plus cut (exit now) if you hold it; dip is never given on a held ticker. Comes with a confidence, a rationale and, for a confident buy, a Trade Plan (entry, stop, target). A dip at or above the Dip Minimum Confidence (shown as `dip_min_confidence` on a ticker not held) gets a Trade Plan whose stop and target are chart levels picked by the classifier below and above the price, with their reward ratio, or none when either level doesn't fit. On a held ticker it also shows your Unrealised P&L, and a confident cut (at or above its Interval's Cut Minimum Confidence, shown as `cut_min_confidence`) gives a Buyback Price (a chart level below the price where buying back is cheaper), the Buyback Quantity (shares the proceeds buy back there, fees left out) and a Cut Stop (a chart level above the price where the cut was wrong), each picked by the classifier with its confidence, or null when no level fits. The pick confidences are not calibrated and set nothing. Needs an OpenRouter key. |
 | `backfill_signals` | Makes Signals on past bars from a date you give (`since`) whose next 20 bars are known, as for a ticker not held, and scores them at once, so Hit Rates and the Minimum Confidence fill in hours instead of months. Pick a `since` after the classifier's training cutoff, or Hit Rates come out too high. One classifier call per bar, at most 50 bars per call, oldest first; bars that already have a Signal are skipped. The reply's `remaining` counts the bars left, so call again until it is 0. Needs an OpenRouter key. |
-| `get_track_record` | How past Signals turned out, by confidence and Verdict, optionally for one ticker or Interval, with the Cut Loss Hit Rate, each band's Cut Break-even and Dip Break-even, the Interval's Cut Minimum Confidence and the Dip Minimum Confidence. A cut is scored at its picked Buyback Price (Target) and Cut Stop (Stop), a dip at its picked Target and Stop, and one missing either level is left out. |
+| `get_track_record` | How past Signals turned out, by confidence and Verdict, optionally for one ticker or Interval, with the Cut Loss Hit Rate, each band's Cut Break-even and Dip Break-even, the Interval's Cut Minimum Confidence and the Dip Minimum Confidence. A cut is scored at its picked Buyback Price (Target) and Cut Stop (Stop), a dip at its picked Target and Stop, and one missing either level is left out. A `sentiment` section gives the same for Sentiments under the same filters: Outcome counts and Hit Rate for bullish and bearish, and how many mixed and quiet were stored. |
+| `get_sentiment` | Sentiment of a ticker: what people on X say about the company over a Lookback of 1 to 7 days (default 1), read by Grok through xAI's X Search. Gives a Reading (bullish, bearish, mixed or quiet), a short summary, up to 5 cited X posts, how many posts were fetched, and the Price and data date on an Interval (default 1d). Each fresh read is logged and scored later, bullish like a buy and bearish like its mirror, and the reply gives the Hit Rate for the ticker, Interval and Reading (null until 10 are scored). It sets nothing for Signals. Needs an xAI key. X Search costs $5 per 1k posts fetched plus Grok tokens, so a read is a few cents. |
 | `set_watchlist` | Save a Watchlist of up to 15 tickers. An empty list deletes it. |
 | `get_watchlists` | Every saved Watchlist |
 | `scan` | Quick numbers (price, ATR, RSI, Gap, Relative Volume, VWAP distance) for a Watchlist or list of tickers, to pick which deserve a Signal |
@@ -24,14 +25,14 @@ An MCP server that gives coding agents stock market data, indicators and advisor
 
 Each tool's arguments and output are described in its MCP schema. Domain terms are defined in [GLOSSARY.md](GLOSSARY.md).
 
-Free Yahoo data is delayed, so check `data_date` before acting on a Signal or Trade Plan. Results are cached in memory for 60 seconds (quotes, history) or 5 minutes (fundamentals, Signals).
+Free Yahoo data is delayed, so check `data_date` before acting on a Signal or Trade Plan. Results are cached in memory for 60 seconds (quotes, history) or 5 minutes (fundamentals, Signals, Sentiments).
 
 ## Run
 
 With Docker:
 
 ```sh
-cp .env.example .env   # add your OpenRouter key
+cp .env.example .env   # add your OpenRouter key, and an xAI key for get_sentiment
 docker compose up -d
 ```
 
@@ -76,6 +77,7 @@ mcp_servers:
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `SMM_OPENROUTER_API_KEY` | none | Required for `get_signal` |
+| `SMM_XAI_API_KEY` | none | Required for `get_sentiment` ($5 per 1k X posts fetched plus Grok tokens) |
 | `SMM_CLASSIFIER_MODEL` | `typesafe/jev-1.13` | Model used for `get_signal` |
 | `SMM_HOST` | `127.0.0.1` | Listen address (compose sets `0.0.0.0`) |
 | `SMM_PORT` | `8000` | Listen port |
@@ -83,7 +85,7 @@ mcp_servers:
 | `SMM_DB_PATH` | `stock-market-mcp.db` | SQLite file for server state (compose sets a path on its volume) |
 | `SMM_LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING` or `ERROR` |
 
-compose reads `SMM_OPENROUTER_API_KEY`, `SMM_CLASSIFIER_MODEL` and `SMM_LOG_LEVEL` from `.env`.
+compose reads `SMM_OPENROUTER_API_KEY`, `SMM_XAI_API_KEY`, `SMM_CLASSIFIER_MODEL` and `SMM_LOG_LEVEL` from `.env`.
 
 ## Development
 
