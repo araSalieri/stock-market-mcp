@@ -16,7 +16,8 @@ from stock_market_mcp.data import DataFetcher
 from stock_market_mcp.errors import InputError
 from stock_market_mcp.portfolio import PortfolioStore
 from stock_market_mcp.prompt import SignalPrompt, signal_prompt
-from stock_market_mcp.signals import OUTCOME_BARS, PLAN_ATR_MULTIPLE, PLAN_REWARD_RATIO, SignalLog
+from stock_market_mcp.signals import SignalLog
+from stock_market_mcp.verdicts import OUTCOME_BARS, PLAN_ATR_MULTIPLE, PLAN_REWARD_RATIO, RULES, Level
 
 PLAN_ARG_MAX = 10
 # Bars one backfill call backfills, so a call stays a bounded number of classifier calls.
@@ -67,7 +68,7 @@ class SignalMaker:
         signal = self._cache.get(prompt.cache_key, self._ttl)
         fresh = signal is None
         if fresh:
-            signal = self._classify(prompt, df, held=held is not None)
+            signal = self._classify(prompt, df)
         fields = self._signals.after_classifier(
             ticker,
             interval,
@@ -83,9 +84,8 @@ class SignalMaker:
         if fresh:
             self._cache.put(prompt.cache_key, signal)
         reply = {**signal, "price": price, **fields}
-        # The cut and dip levels reach the reply only through fields, on a confident cut or dip.
-        reply.pop("cut_levels", None)
-        reply.pop("dip_levels", None)
+        # The levels reach the reply only through fields, on a confident cut or dip.
+        reply.pop("levels")
         if held is not None:
             reply["position"] = {
                 **asdict(held),
@@ -121,35 +121,27 @@ class SignalMaker:
                 seen = seen_at(df, bar, interval)
                 # Not held and no previous Signal, as a ticker's first live Signal.
                 prompt = signal_prompt(ticker, period, seen, interval=interval)
-                self._signals.record_backfilled(ticker, interval, seen, self._classify(prompt, seen, held=False))
+                self._signals.record_backfilled(ticker, interval, seen, self._classify(prompt, seen))
         finally:
             # Scores the bars logged before a failing one too.
             self._signals.score(ticker, interval, df, self._now().isoformat())
         return {"logged": len(bars), "remaining": len(eligible) - len(bars)}
 
-    def _classify(self, prompt: SignalPrompt, df: pd.DataFrame, *, held: bool) -> dict:
-        """A fresh Signal on df's last bar, with its picked cut levels when held or dip levels when not."""
+    def _classify(self, prompt: SignalPrompt, df: pd.DataFrame) -> dict:
+        """A fresh Signal on df's last bar, with the picked levels its Verdict's rule reads."""
         classified = self._classifier.classify(prompt.state, prompt.questions)
         signal = {**classified, "data_date": cast("pd.Timestamp", df.index[-1]).isoformat()}
         # No picks when neither side has a candidate.
         picks = signal.pop("picks", {})
-        if held:
-            signal["cut_levels"] = _levels(picks, prompt.candidates, _CUT_LEVELS)
-        else:
-            signal["dip_levels"] = _levels(picks, prompt.candidates, _DIP_LEVELS)
+        signal["levels"] = _levels(picks, prompt.candidates, RULES[signal["verdict"]].levels)
         return signal
 
 
-# Each level question and the key its picked price goes under.
-_CUT_LEVELS = (("buyback", "buyback_price"), ("cut_stop", "cut_stop"))
-_DIP_LEVELS = (("dip_stop", "stop"), ("dip_target", "target"))
-
-
-def _levels(picks: dict, candidates: dict[str, dict[str, float]], questions: tuple[tuple[str, str], ...]) -> dict:
+def _levels(picks: dict, candidates: dict[str, dict[str, float]], questions: tuple[Level, ...]) -> dict:
     """Each level question's picked price under its key, with the pick's confidence under {question}_confidence, both
     None for a none pick or a side with no candidate (not asked)."""
     levels = {}
-    for question, price_key in questions:
+    for question, price_key, _ in questions:
         offered = candidates[question]
         pick = picks[question] if offered else {"choice": "none"}
         price = offered.get(pick["choice"])
