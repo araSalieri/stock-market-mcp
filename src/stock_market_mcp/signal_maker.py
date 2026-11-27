@@ -69,29 +69,32 @@ class SignalMaker:
         fresh = signal is None
         if fresh:
             signal = self._classify(prompt, df)
-        fields = self._signals.after_classifier(
-            ticker,
-            interval,
-            df,
-            price,
-            signal,
-            fresh=fresh,
-            held=held,
-            atr_multiple=atr_multiple,
-            reward_ratio=reward_ratio,
-        )
-        # Cached only once recorded, so a failed store is retried instead of served from the cache.
+        rule = RULES[signal["verdict"]]
+        measures = self._signals.measures(ticker, interval, signal["verdict"], held is not None)
+        confident = measures.gate is not None and signal["confidence"] >= measures.gate
+        # Built before the record, so a Signal whose Trade Plan can't be made writes nothing.
+        additions = rule.additions(df, price, signal["levels"], held, atr_multiple, reward_ratio) if confident else {}
+        cut_loss = None if held is None else rule.exits and held.losing
         if fresh:
+            self._signals.record(ticker, interval, df, price, signal, cut_loss)
+            # Cached only once recorded, so a failed store is retried instead of served from the cache.
             self._cache.put(prompt.cache_key, signal)
-        reply = {**signal, "price": price, **fields}
-        # The levels reach the reply only through fields, on a confident cut or dip.
-        reply.pop("levels")
+        # The levels reach the reply only through additions, on a confident cut or dip.
+        reply = {key: value for key, value in signal.items() if key != "levels"} | {
+            "price": price,
+            "hit_rate": measures.hit_rate,
+            "min_confidence": measures.min_confidence,
+            "trade_plan": None,
+        }
+        if held is None:
+            reply["dip_min_confidence"] = measures.dip_min_confidence
+        reply |= additions
         if held is not None:
             reply["position"] = {
                 **asdict(held),
-                "cut_loss": reply.pop("cut_loss"),
-                "cut_loss_hit_rate": reply.pop("cut_loss_hit_rate"),
-                "cut_min_confidence": reply.pop("cut_min_confidence"),
+                "cut_loss": confident and cut_loss,
+                "cut_loss_hit_rate": measures.cut_loss_hit_rate,
+                "cut_min_confidence": measures.cut_min_confidence,
             }
         return reply
 
@@ -121,7 +124,8 @@ class SignalMaker:
                 seen = seen_at(df, bar, interval)
                 # Not held and no previous Signal, as a ticker's first live Signal.
                 prompt = signal_prompt(ticker, period, seen, interval=interval)
-                self._signals.record_backfilled(ticker, interval, seen, self._classify(prompt, seen))
+                signal = self._classify(prompt, seen)
+                self._signals.record(ticker, interval, seen, float(seen["Close"].iloc[-1]), signal, None, backfilled=True)
         finally:
             # Scores the bars logged before a failing one too.
             self._signals.score(ticker, interval, df, self._now().isoformat())
