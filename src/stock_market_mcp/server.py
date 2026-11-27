@@ -34,7 +34,8 @@ from stock_market_mcp.portfolio import PortfolioStore
 from stock_market_mcp.prompt import PROMPT_VERSION
 from stock_market_mcp.scan import scan_ticker
 from stock_market_mcp.signal_maker import SignalMaker
-from stock_market_mcp.signals import PLAN_ATR_MULTIPLE, PLAN_REWARD_RATIO, SignalLog
+from stock_market_mcp.signals import SignalLog
+from stock_market_mcp.verdicts import PLAN_ATR_MULTIPLE, PLAN_REWARD_RATIO
 from stock_market_mcp.watchlists import WatchlistStore, normalise_tickers
 
 log = logging.getLogger(__name__)

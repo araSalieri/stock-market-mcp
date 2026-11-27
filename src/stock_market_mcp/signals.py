@@ -1,29 +1,19 @@
-"""Signal log: one row per fresh classifier answer in the server database (ADR-0003), and the Trade Plan maths, default plan included."""
+"""Signal log: one row per fresh classifier answer in the server database (ADR-0003)."""
 
-import math
 import os
 import sqlite3
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from functools import partial
 from typing import cast
 
 import pandas as pd
 
-from stock_market_mcp.bars import Interval, last_value
+from stock_market_mcp.bars import Interval
 from stock_market_mcp.prompt import PROMPT_VERSION, PreviousSignal
 from stock_market_mcp.db import transaction
-from stock_market_mcp.errors import InputError
-from stock_market_mcp.portfolio import PricedPosition
+from stock_market_mcp.verdicts import PLAN_COLUMNS, RULES, TRACKED, default_plans
 
-PLAN_ATR_MULTIPLE = 2.0
-PLAN_REWARD_RATIO = 2.0
-# Hit Rate a default Trade Plan must beat to break even: a Target gains PLAN_REWARD_RATIO times what a Stop loses.
-BREAK_EVEN_HIT_RATE = 1 / (1 + PLAN_REWARD_RATIO)
-
-# Bars after a Signal's own bar within which it gets an Outcome.
-OUTCOME_BARS = 20
 # Scored Signals of one kind (Targets plus Stops, or scored holds) needed before a Hit Rate is reported.
 HIT_RATE_MIN_SCORED = 10
 # Targets plus Stops a Confidence band needs before its Hit Rate can set the Minimum Confidence.
@@ -62,14 +52,19 @@ SCHEMA = """CREATE TABLE IF NOT EXISTS signals (
 _ADDED_COLUMNS = (("cut_loss", "INTEGER"), ("backfilled", "INTEGER"))
 
 
-class SignalLog:
-    """get_signal calls before_classifier then after_classifier once per Signal, cached or fresh; between them they keep these guarantees:
+@dataclass(frozen=True)
+class Measures:
+    """What the Signal log has measured for one Signal: dip_min_confidence only when not held, cut_* only when held, else None."""
 
-    - Pending Signals are scored before any Hit Rate is read, so a Hit Rate never misses an Outcome the current bars give.
-    - The Minimum Confidence is read per call, so a cached Signal gets the current one, and is applied once to the Trade Plan and cut_loss.
-    - The Trade Plan is built before anything is written, and the reads and the record share one transaction, so an error leaves nothing half-written.
-    - Only a fresh Signal is recorded, so one classifier answer is one row.
-    """
+    hit_rate: float | None
+    min_confidence: float | None
+    dip_min_confidence: float | None
+    cut_min_confidence: float | None
+    cut_loss_hit_rate: float | None
+
+
+class SignalLog:
+    """Scores, records and reports what it has measured. The Trade Plan is built before the record, so a failure writes nothing."""
 
     def __init__(self, path: str | os.PathLike):
         self.path = path
@@ -102,67 +97,51 @@ class SignalLog:
             ).fetchone()
         return None if row is None else PreviousSignal(*row)
 
-    def after_classifier(
+    def measures(self, ticker: str, interval: Interval, verdict: str, held: bool) -> Measures:
+        """The Hit Rate and Minimum Confidences a get_signal reply reports for a Signal with this verdict."""
+        with self._open() as conn:
+            return Measures(
+                hit_rate=_hit_rate(conn, ticker, interval, verdict),
+                min_confidence=_min_confidence(conn, "buy", interval),
+                dip_min_confidence=None if held else _min_confidence(conn, "dip", interval),
+                cut_min_confidence=_min_confidence(conn, "cut", interval) if held else None,
+                cut_loss_hit_rate=_cut_loss_hit_rate(conn) if held else None,
+            )
+
+    def record(
         self,
         ticker: str,
         interval: Interval,
         history: pd.DataFrame,
         price: float,
         signal: dict,
+        cut_loss: bool | None,
         *,
-        fresh: bool,
-        held: PricedPosition | None,
-        atr_multiple: float,
-        reward_ratio: float,
-    ) -> dict:
-        """The reply fields for a Signal made on history's last bar: hit_rate, min_confidence, trade_plan,
-        dip_min_confidence when not held, cut_loss, cut_loss_hit_rate and cut_min_confidence when held, and on a
-        confident cut its picked levels with the Buyback Quantity.
-
-        A buy is confident at or above the Minimum Confidence, a dip at or above the Dip Minimum Confidence, a cut at
-        or above its Interval's Cut Minimum Confidence. A confident buy's Trade Plan is from ATR, a confident dip's
-        from its picked levels (none when either is missing).
-
-        A fresh Signal is recorded with both default Trade Plans at price (a dip with its picked levels instead of the
-        long one, a cut instead of the mirrored one) and its cut_loss: a cut on a losing Position at any Confidence,
-        null when not held.
-        """
-        verdict = signal["verdict"]
-        cut_loss = None if held is None else verdict == "cut" and held.losing
+        backfilled: bool = False,
+    ) -> None:
+        """Store one pending Signal made on history's last bar, live or Backfilled (ADR-0013), with the default Trade Plan
+        at price and its mirror, except that its rule's picked levels (null for none) are stored over their plan columns.
+        cut_loss: a cut on a losing Position at any Confidence, null when not held."""
+        levels = signal["levels"]
+        plan = default_plans(history, price) | {level.column: levels[level.key] for level in RULES[signal["verdict"]].levels}
         with self._open() as conn:
-            min_confidence = _min_confidence(conn)
-            cut_min_confidence = None if held is None else _picked_min_confidence(conn, "cut", interval)
-            dip_min_confidence = None if held is not None else _picked_min_confidence(conn, "dip", None)
-            hit_rate = _hit_rate(conn, ticker, interval, verdict)
-            required = {"cut": cut_min_confidence, "dip": dip_min_confidence}.get(verdict, min_confidence)
-            confident = required is not None and signal["confidence"] >= required
-            plan = None
-            if confident and verdict == "buy":
-                plan = _trade_plan(history, price, atr_multiple, reward_ratio)
-            elif confident and verdict == "dip":
-                plan = _dip_plan(price, signal["dip_levels"])
-            if fresh:
-                _record(conn, ticker, interval, signal, history, price, cut_loss)
-            fields = {"hit_rate": hit_rate, "min_confidence": min_confidence, "trade_plan": plan}
-            if held is None:
-                fields["dip_min_confidence"] = dip_min_confidence
-            if cut_loss is not None:
-                fields |= {
-                    "cut_loss": confident and cut_loss,
-                    "cut_loss_hit_rate": _cut_loss_hit_rate(conn),
-                    "cut_min_confidence": cut_min_confidence,
-                }
-        if confident and verdict == "cut" and held is not None:
-            cut_levels = signal["cut_levels"]
-            buyback = cut_levels["buyback_price"]
-            quantity = None if buyback is None else math.floor(held.quantity * price / buyback)
-            fields |= {**cut_levels, "buyback_quantity": quantity}
-        return fields
-
-    def record_backfilled(self, ticker: str, interval: str, history: pd.DataFrame, signal: dict) -> None:
-        """Store a Backfilled Signal made on history's last bar, as after_classifier stores a fresh one not held, at that bar's close."""
-        with self._open() as conn:
-            _record(conn, ticker, interval, signal, history, float(history["Close"].iloc[-1]), None, backfilled=True)
+            conn.execute(
+                "INSERT INTO signals (ticker, interval, prompt_version, data_date, verdict, confidence, price, "
+                "long_stop, long_target, short_stop, short_target, cut_loss, backfilled) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    ticker,
+                    interval,
+                    PROMPT_VERSION,
+                    signal["data_date"],
+                    signal["verdict"],
+                    signal["confidence"],
+                    price,
+                    *(plan[column] for column in PLAN_COLUMNS),
+                    cut_loss,
+                    backfilled or None,
+                ),
+            )
 
     def data_dates(self, ticker: str, interval: str) -> set[str]:
         """The data_date of every Signal, live or backfilled, for the ticker and Interval under the current Prompt Version."""
@@ -184,54 +163,11 @@ class SignalLog:
         with self._open() as conn:
             return {
                 "bands": _bands(conn, ticker, interval),
-                "min_confidence": _min_confidence(conn),
+                "min_confidence": _min_confidence(conn, "buy", interval),
                 "cut_loss_hit_rate": _cut_loss_hit_rate(conn),
-                "cut_min_confidence": _picked_min_confidence(conn, "cut", interval) if interval else None,
-                "dip_min_confidence": _picked_min_confidence(conn, "dip", None),
+                "cut_min_confidence": _min_confidence(conn, "cut", interval) if interval else None,
+                "dip_min_confidence": _min_confidence(conn, "dip", interval),
             }
-
-
-def _record(
-    conn: sqlite3.Connection,
-    ticker: str,
-    interval: str,
-    signal: dict,
-    history: pd.DataFrame,
-    price: float,
-    cut_loss: bool | None,
-    *,
-    backfilled: bool | None = None,
-) -> None:
-    """Store one pending Signal at its data_date, with the default Trade Plan at price and its mirror, except that a
-    dip's Stop and Target are its picked ones, and a cut's mirrored Stop and Target its picked Cut Stop and Buyback
-    Price (null for none)."""
-    long_stop, long_target = _default_plan(history, price, long=True)
-    short_stop, short_target = _default_plan(history, price, long=False)
-    if signal["verdict"] == "dip":
-        dip_levels = signal["dip_levels"]
-        long_stop, long_target = dip_levels["stop"], dip_levels["target"]
-    if signal["verdict"] == "cut":
-        cut_levels = signal["cut_levels"]
-        short_stop, short_target = cut_levels["cut_stop"], cut_levels["buyback_price"]
-    conn.execute(
-        "INSERT INTO signals (ticker, interval, prompt_version, data_date, verdict, confidence, price, "
-        "long_stop, long_target, short_stop, short_target, cut_loss, backfilled) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (
-            ticker,
-            interval,
-            PROMPT_VERSION,
-            signal["data_date"],
-            signal["verdict"],
-            signal["confidence"],
-            price,
-            long_stop,
-            long_target,
-            short_stop,
-            short_target,
-            cut_loss,
-            backfilled,
-        ),
-    )
 
 
 def _score(conn: sqlite3.Connection, ticker: str, interval: str, history: pd.DataFrame, scored_at: str) -> None:
@@ -240,7 +176,7 @@ def _score(conn: sqlite3.Connection, ticker: str, interval: str, history: pd.Dat
     A Signal whose bar isn't in history, or without enough later bars or a default plan, stays pending.
     """
     pending = conn.execute(
-        f"SELECT id, data_date, verdict, {', '.join(_PLAN_COLUMNS)} FROM signals "
+        f"SELECT id, data_date, verdict, {', '.join(PLAN_COLUMNS)} FROM signals "
         "WHERE ticker = ? AND interval = ? AND outcome IS NULL",
         (ticker, interval),
     ).fetchall()
@@ -249,8 +185,8 @@ def _score(conn: sqlite3.Connection, ticker: str, interval: str, history: pd.Dat
         if bar not in history.index:
             continue
         later = cast("pd.DataFrame", history[history.index > bar])
-        rule = _RULES[verdict]
-        plan: dict[str, float | None] = dict(zip(_PLAN_COLUMNS, prices, strict=True))
+        rule = RULES[verdict]
+        plan: dict[str, float | None] = dict(zip(PLAN_COLUMNS, prices, strict=True))
         outcome = rule.outcome(later, *(plan[column] for column in rule.plan))
         if outcome is not None:
             conn.execute("UPDATE signals SET outcome = ?, scored_at = ? WHERE id = ?", (outcome, scored_at, id_))
@@ -258,7 +194,7 @@ def _score(conn: sqlite3.Connection, ticker: str, interval: str, history: pd.Dat
 
 def _hit_rate(conn: sqlite3.Connection, ticker: str, interval: str, verdict: str) -> float | None:
     """Hit Rate of the current prompt version's Signals with this verdict; None under HIT_RATE_MIN_SCORED."""
-    rule = _RULES[verdict]
+    rule = RULES[verdict]
     right, wrong = conn.execute(
         "SELECT COUNT(*) FILTER (WHERE outcome = ?), COUNT(*) FILTER (WHERE outcome = ?) "
         "FROM signals WHERE ticker = ? AND interval = ? AND prompt_version = ? AND verdict = ?",
@@ -267,24 +203,27 @@ def _hit_rate(conn: sqlite3.Connection, ticker: str, interval: str, verdict: str
     return _rate(right, wrong)
 
 
-def _min_confidence(conn: sqlite3.Connection) -> float | None:
-    """Lowest Confidence band of the current prompt version's buys whose Hit Rate is above BREAK_EVEN_HIT_RATE (see _lowest_band)."""
-    return _lowest_band(_band_counts(conn, "buy", None), lambda _: BREAK_EVEN_HIT_RATE)
-
-
-def _picked_min_confidence(conn: sqlite3.Connection, verdict: str, interval: str | None) -> float | None:
-    """Lowest Confidence band of the current prompt version's Signals with this picked-levels verdict, optionally on
-    one Interval, whose Hit Rate is above its break-even (see _lowest_band, _break_evens): the Cut Minimum Confidence
-    per Interval, the Dip Minimum Confidence across all."""
-    break_evens = _break_evens(conn, verdict, None, interval)
-    # A band with scored Signals always has a break-even, and only those reach break_even.
-    return _lowest_band(_band_counts(conn, verdict, interval), lambda band: cast("float", break_evens[band]))
+def _min_confidence(conn: sqlite3.Connection, verdict: str, interval: str | None) -> float | None:
+    """Lowest Confidence band of the current prompt version's Signals with this verdict whose Hit Rate is above its
+    rule's break-even (see _lowest_band, _break_evens), on interval when the rule's scope is per Interval, else
+    server-wide: the Minimum Confidence, Dip Minimum Confidence or Cut Minimum Confidence. None for a rule with no Minimum Confidence."""
+    rule = RULES[verdict]
+    if rule.scope is None or rule.break_even is None:
+        return None
+    if rule.scope == "server":
+        interval = None
+    fixed = rule.break_even
+    if fixed == "picked":
+        break_evens = _break_evens(conn, verdict, None, interval)
+        # A band with scored Signals always has a break-even, and only those reach break_even.
+        return _lowest_band(_band_counts(conn, verdict, interval), lambda band: cast("float", break_evens[band]))
+    return _lowest_band(_band_counts(conn, verdict, interval), lambda _: fixed)
 
 
 def _band_counts(conn: sqlite3.Connection, verdict: str, interval: str | None) -> list[tuple[int, int, int]]:
     """(band, hits, misses) per Confidence band of the current prompt version's Signals with this verdict, optionally on
     one Interval, ascending."""
-    rule = _RULES[verdict]
+    rule = RULES[verdict]
     return conn.execute(
         f"SELECT {BAND} AS band, COUNT(*) FILTER (WHERE outcome = ?), COUNT(*) FILTER (WHERE outcome = ?) "
         "FROM signals WHERE prompt_version = ? AND verdict = ? AND (? IS NULL OR interval = ?) GROUP BY band ORDER BY band",
@@ -308,10 +247,10 @@ def _lowest_band(bands: list[tuple[int, int, int]], break_even: Callable[[int], 
 def _break_evens(
     conn: sqlite3.Connection, verdict: str, ticker: str | None, interval: str | None
 ) -> dict[int, float | None]:
-    """Break-even per Confidence band of the current prompt version's Signals with this verdict (one whose Rule's plan
+    """Break-even per Confidence band of the current prompt version's Signals with this verdict (one whose rule's plan
     is its picked Stop and Target: cut's Cut Break-even, dip's Dip Break-even), optionally for one ticker and/or Interval, over their
     hits and misses; None in a band without any."""
-    rule = _RULES[verdict]
+    rule = RULES[verdict]
     stop, target = rule.plan
     return dict(
         conn.execute(
@@ -331,8 +270,8 @@ def _bands(conn: sqlite3.Connection, ticker: str | None, interval: str | None) -
     Leaves out Signals that can never be scored: those missing a price their Outcome rule is judged by.
     """
     scorable = " OR ".join(
-        f"(verdict = '{verdict}' AND {' AND '.join(f'{column} IS NOT NULL' for column in _RULES[verdict].plan)})"
-        for verdict in _TRACKED
+        f"(verdict = '{verdict}' AND {' AND '.join(f'{column} IS NOT NULL' for column in RULES[verdict].plan)})"
+        for verdict in TRACKED
     )
     rows = conn.execute(
         f"SELECT {BAND} AS band, verdict, COALESCE(outcome, 'pending'), COUNT(*) FROM signals "
@@ -342,16 +281,18 @@ def _bands(conn: sqlite3.Connection, ticker: str | None, interval: str | None) -
     ).fetchall()
     tallies: dict[int, dict[str, dict[str, int]]] = {}
     for band, verdict, outcome, count in rows:
-        tallies.setdefault(band, {v: {} for v in _TRACKED})[verdict][outcome] = count
-    buy = _RULES["buy"]
-    break_evens = {verdict: _break_evens(conn, verdict, ticker, interval) for verdict in _PICKED}
+        tallies.setdefault(band, {v: {} for v in TRACKED})[verdict][outcome] = count
+    buy = RULES["buy"]
+    break_evens = {
+        verdict: _break_evens(conn, verdict, ticker, interval) for verdict in TRACKED if RULES[verdict].break_even == "picked"
+    }
     return [
         {
             "band": band / BANDS_PER_CONFIDENCE,
             **{
                 verdict: _counts(verdict, tally[verdict])
                 | ({"break_even": break_evens[verdict][band]} if verdict in break_evens else {})
-                for verdict in _TRACKED
+                for verdict in TRACKED
                 if tally[verdict]
             },
             "buy_hit_rate": _rate(tally["buy"].get(buy.hit, 0), tally["buy"].get(buy.miss, 0), BAND_MIN_SCORED),
@@ -363,7 +304,7 @@ def _bands(conn: sqlite3.Connection, ticker: str | None, interval: str | None) -
 def _cut_loss_hit_rate(conn: sqlite3.Connection) -> float | None:
     """Targets / (Targets + Stops) over the current prompt version's Signals stored with cut_loss = 1, all tickers and
     Intervals; None under CUT_LOSS_MIN_SCORED."""
-    cut = _RULES["cut"]
+    cut = RULES["cut"]
     targets, stops = conn.execute(
         "SELECT COUNT(*) FILTER (WHERE outcome = ?), COUNT(*) FILTER (WHERE outcome = ?) "
         "FROM signals WHERE prompt_version = ? AND cut_loss = 1",
@@ -381,100 +322,6 @@ def _rate(hits: int, misses: int, min_scored: int = HIT_RATE_MIN_SCORED) -> floa
 
 def _counts(verdict: str, tally: dict[str, int]) -> dict:
     """One Verdict's Outcome counts and Hit Rate in a Track Record band."""
-    rule = _RULES[verdict]
+    rule = RULES[verdict]
     counts = {outcome: tally.get(outcome, 0) for outcome in (rule.hit, rule.miss, *rule.other, "pending")}
     return {**counts, "hit_rate": _rate(counts[rule.hit], counts[rule.miss])}
-
-
-def _trade_plan(
-    history: pd.DataFrame, entry: float, atr_multiple: float, reward_ratio: float, *, long: bool = True
-) -> dict:
-    """Stop and Target around entry (the Price) from the last ATR(14) of history; long=False mirrors them, to score a cut."""
-    atr = last_value("atr", history)
-    if not math.isfinite(atr):
-        raise InputError(f"latest row has a non-finite ATR (atr={atr})")
-    stop = entry - (1 if long else -1) * atr_multiple * atr
-    # Same line both ways: mirrored Target = Entry - ratio * (Stop - Entry).
-    target = entry + reward_ratio * (entry - stop)
-    if stop <= 0 or target <= 0:
-        raise InputError(
-            f"plan has non-positive prices (stop={stop}, target={target}); "
-            "ATR is too large relative to the last close"
-        )
-    return {
-        "entry": entry,
-        "stop": stop,
-        "target": target,
-        "atr": atr,
-        "atr_multiple": atr_multiple,
-        "reward_ratio": reward_ratio,
-    }
-
-
-def _dip_plan(entry: float, dip_levels: dict) -> dict | None:
-    """A dip's Trade Plan at entry (the Price) from its picked Stop and Target, with their Reward Ratio; None without both."""
-    stop, target = dip_levels["stop"], dip_levels["target"]
-    if stop is None or target is None:
-        return None
-    return {"entry": entry, "stop": stop, "target": target, "reward_ratio": (target - entry) / (entry - stop)}
-
-
-def _default_plan(history: pd.DataFrame, entry: float, *, long: bool) -> tuple[float | None, float | None]:
-    """Stop and Target of the default Trade Plan stored with a Signal, or mirrored; nulls when that plan can't be made."""
-    try:
-        plan = _trade_plan(history, entry, PLAN_ATR_MULTIPLE, PLAN_REWARD_RATIO, long=long)
-    except InputError:
-        return None, None
-    return plan["stop"], plan["target"]
-
-
-def _outcome(later: pd.DataFrame, stop: float | None, target: float | None, *, long: bool) -> str | None:
-    """Target, Stop (also when both fall in one bar) or Expired within OUTCOME_BARS; None while pending."""
-    if stop is None or target is None:
-        return None
-    for high, low in zip(later["High"].iloc[:OUTCOME_BARS], later["Low"].iloc[:OUTCOME_BARS], strict=True):
-        if (low <= stop) if long else (high >= stop):
-            return "stop"
-        if (high >= target) if long else (low <= target):
-            return "target"
-    return "expired" if len(later) >= OUTCOME_BARS else None
-
-
-def _hold_outcome(later: pd.DataFrame, long_target: float | None, short_target: float | None) -> str | None:
-    """Missed if either default Target is reached within OUTCOME_BARS, else Quiet; None while pending."""
-    if long_target is None or short_target is None:
-        return None
-    window = later.iloc[:OUTCOME_BARS]
-    if (window["High"] >= long_target).any() or (window["Low"] <= short_target).any():
-        return "missed"
-    return "quiet" if len(later) >= OUTCOME_BARS else None
-
-
-@dataclass(frozen=True)
-class _Rule:
-    """How one Verdict is scored: the stored prices passed to outcome, and which Outcomes are hits, misses or neither."""
-
-    plan: tuple[str, ...]
-    outcome: Callable[..., str | None]
-    hit: str
-    miss: str
-    other: tuple[str, ...] = ()
-
-
-# long_* is the default Trade Plan, or on a dip its picked Stop and Target; short_* the same distances mirrored, or on a
-# cut its picked Cut Stop and Buyback Price.
-_PLAN_COLUMNS = ("long_stop", "long_target", "short_stop", "short_target")
-_LONG = _Rule(("long_stop", "long_target"), partial(_outcome, long=True), "target", "stop", ("expired",))
-_CUT = _Rule(("short_stop", "short_target"), partial(_outcome, long=False), "target", "stop", ("expired",))
-_RULES = {
-    "buy": _LONG,
-    "dip": _LONG,
-    "cut": _CUT,
-    "hold": _Rule(("long_target", "short_target"), _hold_outcome, "quiet", "missed"),
-    # Older prompt versions' sell exited the long, as cut does now.
-    "sell": _CUT,
-}
-# Verdicts the current prompt version gives, each reported in a Track Record band.
-_TRACKED = ("buy", "dip", "cut", "hold")
-# Verdicts whose Stop and Target are picked levels, each with its own Break-even.
-_PICKED = ("cut", "dip")
