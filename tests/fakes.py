@@ -9,6 +9,7 @@ from mcp.client.streamable_http import streamable_http_client
 from mcp.types import CallToolResult
 
 from stock_market_mcp.prompt import PROMPT_VERSION, level_questions
+from stock_market_mcp.sentiment import SENTIMENT_VERSION, SentimentLog
 from stock_market_mcp.signals import SignalLog
 
 
@@ -49,6 +50,20 @@ def seed_signals(db, outcomes, *, verdict="buy", confidence=0.7, prompt_version=
                 (ticker, interval, prompt_version, verdict, confidence, outcome, cut_loss, *long, *short)
                 for outcome in outcomes
             ],
+        )
+
+
+def seed_sentiments(db, outcomes, *, reading="bullish", version=SENTIMENT_VERSION, ticker="AAPL", interval="1d", days=1):
+    """Store one Sentiment per Outcome (None for pending), at a Price of 100: scoring dozens over MCP would take dozens of calls.
+
+    The only test code that knows the sentiments schema; SentimentLog(db).hit_rate creates the table first.
+    """
+    SentimentLog(db).hit_rate(ticker, interval, reading)
+    with closing(sqlite3.connect(db)) as conn, conn:
+        conn.executemany(
+            "INSERT INTO sentiments (ticker, interval, days, version, data_date, reading, price, outcome) "
+            "VALUES (?, ?, ?, ?, '2023-01-01T00:00:00', ?, 100.0, ?)",
+            [(ticker, interval, days, version, reading, outcome) for outcome in outcomes],
         )
 
 

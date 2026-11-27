@@ -8,7 +8,7 @@ ANY_TEST = {"bars", "errors", "portfolio", "prompt", "watchlists"}
 # Files that need more, each for a reason no tool can give.
 EXCEPTIONS = {
     "conftest.py": {"cache", "server", "signal_maker"},  # builds the fixtures
-    "fakes.py": {"signals"},  # seed_signals creates the signals table
+    "fakes.py": {"sentiment", "signals"},  # seed_signals and seed_sentiments create their tables
     "test_classifier.py": {"classifier"},  # tests the OpenRouter transport itself
     "test_golden_prompt.py": {"classifier"},  # pins what the real transport sends
     "test_golden_sentiment.py": {"sentiment"},  # pins the request to the Sentiment version

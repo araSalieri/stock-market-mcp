@@ -200,7 +200,7 @@ def _hit_rate(conn: sqlite3.Connection, ticker: str, interval: str, verdict: str
         "FROM signals WHERE ticker = ? AND interval = ? AND prompt_version = ? AND verdict = ?",
         (rule.hit, rule.miss, ticker, interval, PROMPT_VERSION, verdict),
     ).fetchone()
-    return _rate(right, wrong)
+    return rate(right, wrong)
 
 
 def _min_confidence(conn: sqlite3.Connection, verdict: str, interval: str | None) -> float | None:
@@ -237,9 +237,9 @@ def _lowest_band(bands: list[tuple[int, int, int]], break_even: Callable[[int], 
     Only bands with BAND_MIN_SCORED hits plus misses count: MIN_CONFIDENCE while none has that many,
     None when some do but none is above its break_even.
     """
-    scored = [(band, rate) for band, hits, misses in bands if (rate := _rate(hits, misses, BAND_MIN_SCORED)) is not None]
-    for band, rate in scored:
-        if rate > break_even(band):
+    scored = [(band, hit_rate) for band, hits, misses in bands if (hit_rate := rate(hits, misses, BAND_MIN_SCORED)) is not None]
+    for band, hit_rate in scored:
+        if hit_rate > break_even(band):
             return band / BANDS_PER_CONFIDENCE
     return None if scored else MIN_CONFIDENCE
 
@@ -295,7 +295,7 @@ def _bands(conn: sqlite3.Connection, ticker: str | None, interval: str | None) -
                 for verdict in TRACKED
                 if tally[verdict]
             },
-            "buy_hit_rate": _rate(tally["buy"].get(buy.hit, 0), tally["buy"].get(buy.miss, 0), BAND_MIN_SCORED),
+            "buy_hit_rate": rate(tally["buy"].get(buy.hit, 0), tally["buy"].get(buy.miss, 0), BAND_MIN_SCORED),
         }
         for band, tally in tallies.items()
     ]
@@ -310,10 +310,10 @@ def _cut_loss_hit_rate(conn: sqlite3.Connection) -> float | None:
         "FROM signals WHERE prompt_version = ? AND cut_loss = 1",
         (cut.hit, cut.miss, PROMPT_VERSION),
     ).fetchone()
-    return _rate(targets, stops, CUT_LOSS_MIN_SCORED)
+    return rate(targets, stops, CUT_LOSS_MIN_SCORED)
 
 
-def _rate(hits: int, misses: int, min_scored: int = HIT_RATE_MIN_SCORED) -> float | None:
+def rate(hits: int, misses: int, min_scored: int = HIT_RATE_MIN_SCORED) -> float | None:
     """hits / (hits + misses); None under min_scored."""
     if hits + misses < min_scored:
         return None
@@ -324,4 +324,4 @@ def _counts(verdict: str, tally: dict[str, int]) -> dict:
     """One Verdict's Outcome counts and Hit Rate in a Track Record band."""
     rule = RULES[verdict]
     counts = {outcome: tally.get(outcome, 0) for outcome in (rule.hit, rule.miss, *rule.other, "pending")}
-    return {**counts, "hit_rate": _rate(counts[rule.hit], counts[rule.miss])}
+    return {**counts, "hit_rate": rate(counts[rule.hit], counts[rule.miss])}

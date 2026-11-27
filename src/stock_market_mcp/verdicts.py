@@ -64,7 +64,7 @@ def default_plans(history: pd.DataFrame, entry: float) -> dict[str, float | None
     return plans
 
 
-def _outcome(later: pd.DataFrame, stop: float | None, target: float | None, *, long: bool) -> str | None:
+def outcome(later: pd.DataFrame, stop: float | None, target: float | None, *, long: bool) -> str | None:
     """Target, Stop (also when both fall in one bar) or Expired within OUTCOME_BARS; None while pending."""
     if stop is None or target is None:
         return None
@@ -150,7 +150,7 @@ class Rule:
 
 _CUT = Rule(
     plan=("short_stop", "short_target"),
-    outcome=partial(_outcome, long=False),
+    outcome=partial(outcome, long=False),
     hit="target",
     miss="stop",
     other=("expired",),
@@ -165,7 +165,7 @@ _CUT = Rule(
 RULES = {
     "buy": Rule(
         plan=("long_stop", "long_target"),
-        outcome=partial(_outcome, long=True),
+        outcome=partial(outcome, long=True),
         hit="target",
         miss="stop",
         other=("expired",),
@@ -177,7 +177,7 @@ RULES = {
     ),
     "dip": Rule(
         plan=("long_stop", "long_target"),
-        outcome=partial(_outcome, long=True),
+        outcome=partial(outcome, long=True),
         hit="target",
         miss="stop",
         other=("expired",),
