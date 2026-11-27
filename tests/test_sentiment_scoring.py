@@ -127,5 +127,8 @@ async def test_a_sentiment_never_changes_a_signal_hit_rate_or_minimum_confidence
     await _scored(server_url, tmp_path, "bullish", flat_history(), _later(FLAT, (101.0, 95.0)))
     after = json.loads(text_of(await call_tool(track_record, "get_track_record", {})))
 
+    # Only the sentiment section may move.
+    assert after["sentiment"] != before.pop("sentiment")
+    after.pop("sentiment")
     assert after == before
     assert before["bands"][0]["buy"]["hit_rate"] == pytest.approx(2 / 3)

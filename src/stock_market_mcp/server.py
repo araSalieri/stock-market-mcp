@@ -35,6 +35,7 @@ from stock_market_mcp.prompt import PROMPT_VERSION
 from stock_market_mcp.scan import scan_ticker
 from stock_market_mcp.sentiment import (
     EnforcingSentimentReader,
+    SentimentLog,
     SentimentMaker,
     SentimentReader,
     XaiSentimentReader,
@@ -124,6 +125,7 @@ def build_server(
     watchlists = WatchlistStore(db_path)
     portfolio = PortfolioStore(db_path)
     signal_log = SignalLog(db_path)
+    sentiment_log = SentimentLog(db_path)
     signal_maker = SignalMaker(fetcher, signal_classifier, db_path, signal_ttl, now)
     reader = EnforcingSentimentReader(sentiment_reader if sentiment_reader is not None else XaiSentimentReader())
     sentiment_maker = SentimentMaker(fetcher, reader, db_path, sentiment_ttl, now)
@@ -161,13 +163,14 @@ def build_server(
 
     @audited_tool
     def get_track_record(ticker: str | None = None, interval: Interval | None = None) -> dict:
-        """Track Record of the current prompt version's Signals, from the server's Signal log; no market data or classifier call. Optional ticker and interval narrow it and are echoed back (null when not given) with prompt_version. bands lists each 0.1 Confidence band that has Signals, ascending, as band (its lower bound) plus each Verdict the band has: buy, dip and cut {target, stop, expired, pending, hit_rate} and hold {quiet, missed, pending, hit_rate}; and buy_hit_rate, the rate min_confidence is set from. hit_rate is Targets / (Targets + Stops), or Quiet / (Quiet + Missed) for hold, null until enough are scored (more for buy_hit_rate). A cut is scored at its picked Buyback Price (Target) and Cut Stop (Stop), a dip at its picked Target and Stop. Each cut and dip also has break_even, its Cut or Dip Break-even over the scored ones the counts cover (null with none). Signals that can never be scored (no default Trade Plan, or a cut or dip missing a picked level) are left out. min_confidence and cut_loss_hit_rate are the server-wide values get_signal reports. cut_min_confidence is the given interval's value get_signal reports, null when no interval is given. dip_min_confidence is the value get_signal reports, across all Intervals. An empty bands list means no Signals were logged for that filter, not that the ticker is unknown."""
+        """Track Record of the current prompt version's Signals, from the server's Signal log; no market data or classifier call. Optional ticker and interval narrow it and are echoed back (null when not given) with prompt_version. bands lists each 0.1 Confidence band that has Signals, ascending, as band (its lower bound) plus each Verdict the band has: buy, dip and cut {target, stop, expired, pending, hit_rate} and hold {quiet, missed, pending, hit_rate}; and buy_hit_rate, the rate min_confidence is set from. hit_rate is Targets / (Targets + Stops), or Quiet / (Quiet + Missed) for hold, null until enough are scored (more for buy_hit_rate). A cut is scored at its picked Buyback Price (Target) and Cut Stop (Stop), a dip at its picked Target and Stop. Each cut and dip also has break_even, its Cut or Dip Break-even over the scored ones the counts cover (null with none). Signals that can never be scored (no default Trade Plan, or a cut or dip missing a picked level) are left out. min_confidence and cut_loss_hit_rate are the server-wide values get_signal reports. cut_min_confidence is the given interval's value get_signal reports, null when no interval is given. dip_min_confidence is the value get_signal reports, across all Intervals. An empty bands list means no Signals were logged for that filter, not that the ticker is unknown. sentiment is the Track Record of the current Sentiment version's Sentiments under the same filters: bullish and bearish {target, stop, expired, pending, hit_rate}, with hit_rate as above (expired and pending left out), and mixed and quiet, how many are stored (they are never scored)."""
         ticker = ticker.upper() if ticker is not None else None
         return {
             "prompt_version": PROMPT_VERSION,
             "ticker": ticker,
             "interval": interval,
             **signal_log.track_record(ticker, interval),
+            "sentiment": sentiment_log.track_record(ticker, interval),
         }
 
     @audited_tool
