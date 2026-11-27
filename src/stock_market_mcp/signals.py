@@ -9,6 +9,7 @@ from typing import cast
 
 import pandas as pd
 
+from stock_market_mcp.bars import Interval
 from stock_market_mcp.prompt import PROMPT_VERSION, PreviousSignal
 from stock_market_mcp.db import transaction
 from stock_market_mcp.verdicts import PLAN_COLUMNS, RULES, TRACKED, default_plans
@@ -53,20 +54,17 @@ _ADDED_COLUMNS = (("cut_loss", "INTEGER"), ("backfilled", "INTEGER"))
 
 @dataclass(frozen=True)
 class Measures:
-    """What the Signal log has measured for one Signal: its Hit Rate, the Minimum Confidence, the Dip Minimum Confidence
-    when not held, the Cut Minimum Confidence and Cut Loss Hit Rate when held (else None), and gate, the Minimum
-    Confidence its Verdict's rule is gated by (None for an ungated rule)."""
+    """What the Signal log has measured for one Signal: dip_min_confidence only when not held, cut_* only when held, else None."""
 
     hit_rate: float | None
     min_confidence: float | None
     dip_min_confidence: float | None
     cut_min_confidence: float | None
     cut_loss_hit_rate: float | None
-    gate: float | None
 
 
 class SignalLog:
-    """Scores, records and reports what it has measured, one transaction per call."""
+    """Scores, records and reports what it has measured. The Trade Plan is built before the record, so a failure writes nothing."""
 
     def __init__(self, path: str | os.PathLike):
         self.path = path
@@ -99,23 +97,21 @@ class SignalLog:
             ).fetchone()
         return None if row is None else PreviousSignal(*row)
 
-    def measures(self, ticker: str, interval: str, verdict: str, held: bool) -> Measures:
+    def measures(self, ticker: str, interval: Interval, verdict: str, held: bool) -> Measures:
         """The Hit Rate and Minimum Confidences a get_signal reply reports for a Signal with this verdict."""
         with self._open() as conn:
-            gates = {v: _min_confidence(conn, v, interval) for v in ("buy", "cut" if held else "dip")}
             return Measures(
                 hit_rate=_hit_rate(conn, ticker, interval, verdict),
-                min_confidence=gates["buy"],
-                dip_min_confidence=gates.get("dip"),
-                cut_min_confidence=gates.get("cut"),
+                min_confidence=_min_confidence(conn, "buy", interval),
+                dip_min_confidence=None if held else _min_confidence(conn, "dip", interval),
+                cut_min_confidence=_min_confidence(conn, "cut", interval) if held else None,
                 cut_loss_hit_rate=_cut_loss_hit_rate(conn) if held else None,
-                gate=gates[verdict] if verdict in gates else _min_confidence(conn, verdict, interval),
             )
 
     def record(
         self,
         ticker: str,
-        interval: str,
+        interval: Interval,
         history: pd.DataFrame,
         price: float,
         signal: dict,
@@ -210,7 +206,7 @@ def _hit_rate(conn: sqlite3.Connection, ticker: str, interval: str, verdict: str
 def _min_confidence(conn: sqlite3.Connection, verdict: str, interval: str | None) -> float | None:
     """Lowest Confidence band of the current prompt version's Signals with this verdict whose Hit Rate is above its
     rule's break-even (see _lowest_band, _break_evens), on interval when the rule's scope is per Interval, else
-    server-wide: the Minimum Confidence, Dip Minimum Confidence or Cut Minimum Confidence. None for an ungated rule."""
+    server-wide: the Minimum Confidence, Dip Minimum Confidence or Cut Minimum Confidence. None for a rule with no Minimum Confidence."""
     rule = RULES[verdict]
     if rule.scope is None or rule.break_even is None:
         return None
