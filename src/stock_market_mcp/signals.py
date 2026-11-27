@@ -4,14 +4,13 @@ import os
 import sqlite3
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from typing import cast
 
 import pandas as pd
 
-from stock_market_mcp.bars import Interval
 from stock_market_mcp.prompt import PROMPT_VERSION, PreviousSignal
 from stock_market_mcp.db import transaction
-from stock_market_mcp.portfolio import PricedPosition
 from stock_market_mcp.verdicts import PLAN_COLUMNS, RULES, TRACKED, default_plans
 
 # Scored Signals of one kind (Targets plus Stops, or scored holds) needed before a Hit Rate is reported.
@@ -52,14 +51,22 @@ SCHEMA = """CREATE TABLE IF NOT EXISTS signals (
 _ADDED_COLUMNS = (("cut_loss", "INTEGER"), ("backfilled", "INTEGER"))
 
 
-class SignalLog:
-    """get_signal calls before_classifier then after_classifier once per Signal, cached or fresh; between them they keep these guarantees:
+@dataclass(frozen=True)
+class Measures:
+    """What the Signal log has measured for one Signal: its Hit Rate, the Minimum Confidence, the Dip Minimum Confidence
+    when not held, the Cut Minimum Confidence and Cut Loss Hit Rate when held (else None), and gate, the Minimum
+    Confidence its Verdict's rule is gated by (None for an ungated rule)."""
 
-    - Pending Signals are scored before any Hit Rate is read, so a Hit Rate never misses an Outcome the current bars give.
-    - The Minimum Confidence is read per call, so a cached Signal gets the current one, and is applied once to the Trade Plan and cut_loss.
-    - The Trade Plan is built before anything is written, and the reads and the record share one transaction, so an error leaves nothing half-written.
-    - Only a fresh Signal is recorded, so one classifier answer is one row.
-    """
+    hit_rate: float | None
+    min_confidence: float | None
+    dip_min_confidence: float | None
+    cut_min_confidence: float | None
+    cut_loss_hit_rate: float | None
+    gate: float | None
+
+
+class SignalLog:
+    """Scores, records and reports what it has measured, one transaction per call."""
 
     def __init__(self, path: str | os.PathLike):
         self.path = path
@@ -92,61 +99,53 @@ class SignalLog:
             ).fetchone()
         return None if row is None else PreviousSignal(*row)
 
-    def after_classifier(
+    def measures(self, ticker: str, interval: str, verdict: str, held: bool) -> Measures:
+        """The Hit Rate and Minimum Confidences a get_signal reply reports for a Signal with this verdict."""
+        with self._open() as conn:
+            gates = {v: _min_confidence(conn, v, interval) for v in ("buy", "cut" if held else "dip")}
+            return Measures(
+                hit_rate=_hit_rate(conn, ticker, interval, verdict),
+                min_confidence=gates["buy"],
+                dip_min_confidence=gates.get("dip"),
+                cut_min_confidence=gates.get("cut"),
+                cut_loss_hit_rate=_cut_loss_hit_rate(conn) if held else None,
+                gate=gates[verdict] if verdict in gates else _min_confidence(conn, verdict, interval),
+            )
+
+    def record(
         self,
         ticker: str,
-        interval: Interval,
+        interval: str,
         history: pd.DataFrame,
         price: float,
         signal: dict,
+        cut_loss: bool | None,
         *,
-        fresh: bool,
-        held: PricedPosition | None,
-        atr_multiple: float,
-        reward_ratio: float,
-    ) -> dict:
-        """The reply fields for a Signal made on history's last bar: hit_rate, min_confidence, trade_plan,
-        dip_min_confidence when not held, cut_loss, cut_loss_hit_rate and cut_min_confidence when held, and on a
-        confident cut its picked levels with the Buyback Quantity.
-
-        A buy is confident at or above the Minimum Confidence, a dip at or above the Dip Minimum Confidence, a cut at
-        or above its Interval's Cut Minimum Confidence. A confident buy's Trade Plan is from ATR, a confident dip's
-        from its picked levels (none when either is missing).
-
-        A fresh Signal is recorded with both default Trade Plans at price (a dip with its picked levels instead of the
-        long one, a cut instead of the mirrored one) and its cut_loss: a cut on a losing Position at any Confidence,
-        null when not held.
-        """
-        verdict = signal["verdict"]
-        rule = RULES[verdict]
-        cut_loss = None if held is None else rule.exits and held.losing
+        backfilled: bool = False,
+    ) -> None:
+        """Store one pending Signal made on history's last bar, live or Backfilled (ADR-0013), with the default Trade Plan
+        at price and its mirror, except that its rule's picked levels (null for none) are stored over their plan columns.
+        cut_loss: a cut on a losing Position at any Confidence, null when not held."""
+        levels = signal["levels"]
+        plan = default_plans(history, price) | {level.column: levels[level.key] for level in RULES[signal["verdict"]].levels}
         with self._open() as conn:
-            min_confidence = _min_confidence(conn, "buy", interval)
-            cut_min_confidence = None if held is None else _min_confidence(conn, "cut", interval)
-            dip_min_confidence = None if held is not None else _min_confidence(conn, "dip", interval)
-            hit_rate = _hit_rate(conn, ticker, interval, verdict)
-            required = _min_confidence(conn, verdict, interval)
-            confident = required is not None and signal["confidence"] >= required
-            additions = (
-                rule.additions(history, price, signal["levels"], held, atr_multiple, reward_ratio) if confident else {}
+            conn.execute(
+                "INSERT INTO signals (ticker, interval, prompt_version, data_date, verdict, confidence, price, "
+                "long_stop, long_target, short_stop, short_target, cut_loss, backfilled) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    ticker,
+                    interval,
+                    PROMPT_VERSION,
+                    signal["data_date"],
+                    signal["verdict"],
+                    signal["confidence"],
+                    price,
+                    *(plan[column] for column in PLAN_COLUMNS),
+                    cut_loss,
+                    backfilled or None,
+                ),
             )
-            if fresh:
-                _record(conn, ticker, interval, signal, history, price, cut_loss)
-            fields = {"hit_rate": hit_rate, "min_confidence": min_confidence, "trade_plan": None}
-            if held is None:
-                fields["dip_min_confidence"] = dip_min_confidence
-            if cut_loss is not None:
-                fields |= {
-                    "cut_loss": confident and cut_loss,
-                    "cut_loss_hit_rate": _cut_loss_hit_rate(conn),
-                    "cut_min_confidence": cut_min_confidence,
-                }
-        return fields | additions
-
-    def record_backfilled(self, ticker: str, interval: str, history: pd.DataFrame, signal: dict) -> None:
-        """Store a Backfilled Signal made on history's last bar, as after_classifier stores a fresh one not held, at that bar's close."""
-        with self._open() as conn:
-            _record(conn, ticker, interval, signal, history, float(history["Close"].iloc[-1]), None, backfilled=True)
 
     def data_dates(self, ticker: str, interval: str) -> set[str]:
         """The data_date of every Signal, live or backfilled, for the ticker and Interval under the current Prompt Version."""
@@ -173,39 +172,6 @@ class SignalLog:
                 "cut_min_confidence": _min_confidence(conn, "cut", interval) if interval else None,
                 "dip_min_confidence": _min_confidence(conn, "dip", interval),
             }
-
-
-def _record(
-    conn: sqlite3.Connection,
-    ticker: str,
-    interval: str,
-    signal: dict,
-    history: pd.DataFrame,
-    price: float,
-    cut_loss: bool | None,
-    *,
-    backfilled: bool | None = None,
-) -> None:
-    """Store one pending Signal at its data_date, with the default Trade Plan at price and its mirror, except that its
-    rule's picked levels (null for none) are stored over their plan columns."""
-    levels = signal["levels"]
-    plan = default_plans(history, price) | {level.column: levels[level.key] for level in RULES[signal["verdict"]].levels}
-    conn.execute(
-        "INSERT INTO signals (ticker, interval, prompt_version, data_date, verdict, confidence, price, "
-        "long_stop, long_target, short_stop, short_target, cut_loss, backfilled) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (
-            ticker,
-            interval,
-            PROMPT_VERSION,
-            signal["data_date"],
-            signal["verdict"],
-            signal["confidence"],
-            price,
-            *(plan[column] for column in PLAN_COLUMNS),
-            cut_loss,
-            backfilled,
-        ),
-    )
 
 
 def _score(conn: sqlite3.Connection, ticker: str, interval: str, history: pd.DataFrame, scored_at: str) -> None:
