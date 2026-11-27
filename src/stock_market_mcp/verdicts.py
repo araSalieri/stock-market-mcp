@@ -1,4 +1,4 @@
-"""Verdict rules: one rule per Verdict, saying how its levels are read, stored, scored and gated, and what a confident one adds to the get_signal reply, plus the Trade Plan maths."""
+"""Verdict rules: one rule per Verdict, saying how its levels are read, stored, scored and given a Minimum Confidence, and what a confident one adds to the get_signal reply, plus the Trade Plan maths."""
 
 import math
 from collections.abc import Callable
@@ -104,11 +104,9 @@ def _dip_additions(
 
 
 def _cut_additions(
-    history: pd.DataFrame, price: float, levels: dict, held: PricedPosition | None, atr_multiple: float, reward_ratio: float
+    history: pd.DataFrame, price: float, levels: dict, held: PricedPosition, atr_multiple: float, reward_ratio: float
 ) -> dict:
     """A confident cut's picked levels with the Buyback Quantity the Position's proceeds buy at the Buyback Price."""
-    if held is None:
-        return {}
     buyback = levels["buyback_price"]
     quantity = None if buyback is None else math.floor(held.quantity * price / buyback)
     return {**levels, "buyback_quantity": quantity}
@@ -130,14 +128,11 @@ class Level(NamedTuple):
 
 @dataclass(frozen=True)
 class Rule:
-    """How one Verdict is read, stored, scored and gated.
+    """How one Verdict is read, stored, scored and given a Minimum Confidence.
 
-    plan: the stored plan columns passed to outcome. hit, miss, other: its Outcomes. levels: the level questions it
-    reads from the classifier's picks, each stored over its default plan column. break_even: the Hit Rate a Confidence
-    band must beat, "picked" for one per band from the stored picked levels (the Dip and Cut Break-even), None when
-    ungated. scope: whether the Minimum Confidence counts Signals server-wide or per Interval, None when ungated.
-    additions: what a confident Signal adds to the get_signal reply. exits: whether it exits the long, so on a losing
-    Position it is a Cut Loss.
+    break_even "picked" is one per Confidence band from the stored picked levels (the Dip and Cut Break-even). scope:
+    whether the Minimum Confidence counts Signals server-wide or per Interval. min_confidence: the Measures field holding
+    it. None for no Minimum Confidence.
     """
 
     plan: tuple[str, str]
@@ -148,49 +143,64 @@ class Rule:
     levels: tuple[Level, ...]
     break_even: float | Literal["picked"] | None
     scope: Literal["server", "interval"] | None
+    min_confidence: str | None
     additions: Callable[..., dict]
     exits: bool = False
 
 
 _CUT = Rule(
-    ("short_stop", "short_target"),
-    partial(_outcome, long=False),
-    "target",
-    "stop",
-    ("expired",),
-    (Level("buyback", "buyback_price", "short_target"), Level("cut_stop", "cut_stop", "short_stop")),
-    "picked",
+    plan=("short_stop", "short_target"),
+    outcome=partial(_outcome, long=False),
+    hit="target",
+    miss="stop",
+    other=("expired",),
+    levels=(Level("buyback", "buyback_price", "short_target"), Level("cut_stop", "cut_stop", "short_stop")),
+    break_even="picked",
     # Per Interval, so one Interval's record doesn't silence another (ADR-0011).
-    "interval",
-    _cut_additions,
+    scope="interval",
+    min_confidence="cut_min_confidence",
+    additions=_cut_additions,
     exits=True,
 )
 RULES = {
     "buy": Rule(
-        ("long_stop", "long_target"),
-        partial(_outcome, long=True),
-        "target",
-        "stop",
-        ("expired",),
-        (),
-        BREAK_EVEN_HIT_RATE,
-        "server",
-        _buy_additions,
+        plan=("long_stop", "long_target"),
+        outcome=partial(_outcome, long=True),
+        hit="target",
+        miss="stop",
+        other=("expired",),
+        levels=(),
+        break_even=BREAK_EVEN_HIT_RATE,
+        scope="server",
+        min_confidence="min_confidence",
+        additions=_buy_additions,
     ),
     "dip": Rule(
-        ("long_stop", "long_target"),
-        partial(_outcome, long=True),
-        "target",
-        "stop",
-        ("expired",),
-        (Level("dip_stop", "stop", "long_stop"), Level("dip_target", "target", "long_target")),
-        "picked",
+        plan=("long_stop", "long_target"),
+        outcome=partial(_outcome, long=True),
+        hit="target",
+        miss="stop",
+        other=("expired",),
+        levels=(Level("dip_stop", "stop", "long_stop"), Level("dip_target", "target", "long_target")),
+        break_even="picked",
         # Across all Intervals, since one alone would take long to fill (ADR-0012).
-        "server",
-        _dip_additions,
+        scope="server",
+        min_confidence="dip_min_confidence",
+        additions=_dip_additions,
     ),
     "cut": _CUT,
-    "hold": Rule(("long_target", "short_target"), _hold_outcome, "quiet", "missed", (), (), None, None, _no_additions),
+    "hold": Rule(
+        plan=("long_target", "short_target"),
+        outcome=_hold_outcome,
+        hit="quiet",
+        miss="missed",
+        other=(),
+        levels=(),
+        break_even=None,
+        scope=None,
+        min_confidence=None,
+        additions=_no_additions,
+    ),
     # Older prompt versions' sell exited the long, as cut does now.
     "sell": _CUT,
 }

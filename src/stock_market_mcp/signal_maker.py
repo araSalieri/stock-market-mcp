@@ -71,7 +71,8 @@ class SignalMaker:
             signal = self._classify(prompt, df)
         rule = RULES[signal["verdict"]]
         measures = self._signals.measures(ticker, interval, signal["verdict"], held is not None)
-        confident = measures.gate is not None and signal["confidence"] >= measures.gate
+        min_confidence = None if rule.min_confidence is None else getattr(measures, rule.min_confidence)
+        confident = min_confidence is not None and signal["confidence"] >= min_confidence
         # Built before the record, so a Signal whose Trade Plan can't be made writes nothing.
         additions = rule.additions(df, price, signal["levels"], held, atr_multiple, reward_ratio) if confident else {}
         cut_loss = None if held is None else rule.exits and held.losing
@@ -145,10 +146,10 @@ def _levels(picks: dict, candidates: dict[str, dict[str, float]], questions: tup
     """Each level question's picked price under its key, with the pick's confidence under {question}_confidence, both
     None for a none pick or a side with no candidate (not asked)."""
     levels = {}
-    for question, price_key, _ in questions:
-        offered = candidates[question]
-        pick = picks[question] if offered else {"choice": "none"}
+    for level in questions:
+        offered = candidates[level.question]
+        pick = picks[level.question] if offered else {"choice": "none"}
         price = offered.get(pick["choice"])
-        levels[price_key] = price
-        levels[f"{question}_confidence"] = None if price is None else pick["confidence"]
+        levels[level.key] = price
+        levels[f"{level.question}_confidence"] = None if price is None else pick["confidence"]
     return levels
