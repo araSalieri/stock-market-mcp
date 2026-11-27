@@ -245,6 +245,24 @@ class SentimentLog:
             ).fetchone()
         return rate(targets, stops)
 
+    def track_record(self, ticker: str | None, interval: str | None) -> dict:
+        """The current Sentiment version's Outcome counts and Hit Rate per scored Reading, and how many mixed and quiet
+        are stored, optionally for one ticker and/or Interval."""
+        with transaction(self.path, SCHEMA) as conn:
+            tally = {
+                (reading, outcome or "pending"): n
+                for reading, outcome, n in conn.execute(
+                    "SELECT reading, outcome, COUNT(*) FROM sentiments WHERE version = ? "
+                    "AND (? IS NULL OR ticker = ?) AND (? IS NULL OR interval = ?) GROUP BY reading, outcome",
+                    (SENTIMENT_VERSION, ticker, ticker, interval, interval),
+                )
+            }
+        section: dict = {}
+        for reading in _SIDES:
+            counts = {outcome: tally.get((reading, outcome), 0) for outcome in ("target", "stop", "expired", "pending")}
+            section[reading] = {**counts, "hit_rate": rate(counts["target"], counts["stop"])}
+        return section | {reading: tally.get((reading, "pending"), 0) for reading in ("mixed", "quiet")}
+
 
 class SentimentMaker:
     def __init__(
