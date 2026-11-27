@@ -16,7 +16,10 @@ import requests
 from stock_market_mcp.bars import Interval, finite, history
 from stock_market_mcp.cache import TTLCache
 from stock_market_mcp.data import DataFetcher
+from stock_market_mcp.db import transaction
 from stock_market_mcp.errors import InputError
+from stock_market_mcp.signals import rate
+from stock_market_mcp.verdicts import PLAN_COLUMNS, default_plans, outcome
 
 # Names what Grok is asked and how; bump it whenever the request sent to xAI changes.
 SENTIMENT_VERSION = 1
@@ -166,15 +169,98 @@ class XaiSentimentReader:
         return {**answer, "posts": posts[:POSTS_MAX], "posts_fetched": fetched}
 
 
+# Kept apart from signals (ADR-0015). Outcome is null while pending and always on mixed and quiet rows; a bullish row
+# stores the default Trade Plan in long_*, a bearish one its mirror in short_*, the other side null.
+SCHEMA = """CREATE TABLE IF NOT EXISTS sentiments (
+    id INTEGER PRIMARY KEY,
+    ticker TEXT NOT NULL,
+    interval TEXT NOT NULL,
+    days INTEGER NOT NULL,
+    version INTEGER NOT NULL,
+    data_date TEXT NOT NULL,
+    reading TEXT NOT NULL,
+    price REAL NOT NULL,
+    long_stop REAL,
+    long_target REAL,
+    short_stop REAL,
+    short_target REAL,
+    outcome TEXT,
+    scored_at TEXT
+)"""
+
+
+# Readings that get an Outcome: bullish judged like a buy, bearish like its mirror below the Price.
+_SIDES = {"bullish": "long", "bearish": "short"}
+
+
+class SentimentLog:
+    """Records fresh Sentiments, scores them and reports their Hit Rate."""
+
+    def __init__(self, path: str | os.PathLike):
+        self.path = path
+
+    def record(self, ticker: str, interval: str, days: int, history: pd.DataFrame, price: float, reading: str) -> None:
+        """Store one pending Sentiment made on history's last bar, with its side's default Trade Plan levels at price."""
+        side = _SIDES.get(reading)
+        plan = default_plans(history, price)
+        levels = [plan[column] if side and column.startswith(side) else None for column in PLAN_COLUMNS]
+        data_date = cast("pd.Timestamp", history.index[-1]).isoformat()
+        with transaction(self.path, SCHEMA) as conn:
+            conn.execute(
+                "INSERT INTO sentiments (ticker, interval, days, version, data_date, reading, price, "
+                f"{', '.join(PLAN_COLUMNS)}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (ticker, interval, days, SENTIMENT_VERSION, data_date, reading, price, *levels),
+            )
+
+    def score(self, ticker: str, interval: str, history: pd.DataFrame, scored_at: str) -> None:
+        """Give pending bullish and bearish Sentiments for the ticker and Interval an Outcome from the bars after their own.
+
+        One whose bar isn't in history, or without enough later bars or a default plan, stays pending.
+        """
+        with transaction(self.path, SCHEMA) as conn:
+            pending = conn.execute(
+                f"SELECT id, data_date, reading, {', '.join(PLAN_COLUMNS)} FROM sentiments "
+                "WHERE ticker = ? AND interval = ? AND outcome IS NULL AND reading IN ('bullish', 'bearish')",
+                (ticker, interval),
+            ).fetchall()
+            for id_, data_date, reading, *prices in pending:
+                bar = pd.Timestamp(data_date)
+                if bar not in history.index:
+                    continue
+                plan: dict[str, float | None] = dict(zip(PLAN_COLUMNS, prices, strict=True))
+                side = _SIDES[reading]
+                later = cast("pd.DataFrame", history[history.index > bar])
+                result = outcome(later, plan[f"{side}_stop"], plan[f"{side}_target"], long=side == "long")
+                if result is not None:
+                    conn.execute("UPDATE sentiments SET outcome = ?, scored_at = ? WHERE id = ?", (result, scored_at, id_))
+
+    def hit_rate(self, ticker: str, interval: str, reading: str) -> float | None:
+        """Targets / (Targets + Stops) of the current Sentiment version's Sentiments with this reading, ticker and
+        Interval, all Lookbacks together; None under the minimum scored."""
+        with transaction(self.path, SCHEMA) as conn:
+            targets, stops = conn.execute(
+                "SELECT COUNT(*) FILTER (WHERE outcome = 'target'), COUNT(*) FILTER (WHERE outcome = 'stop') "
+                "FROM sentiments WHERE ticker = ? AND interval = ? AND version = ? AND reading = ?",
+                (ticker, interval, SENTIMENT_VERSION, reading),
+            ).fetchone()
+        return rate(targets, stops)
+
+
 class SentimentMaker:
     def __init__(
-        self, fetcher: DataFetcher, reader: SentimentReader, ttl: float, now: Callable[[], datetime]
+        self,
+        fetcher: DataFetcher,
+        reader: SentimentReader,
+        db_path: str | os.PathLike,
+        ttl: float,
+        now: Callable[[], datetime],
     ) -> None:
         self._fetcher = fetcher
         self._reader = reader
         self._ttl = ttl
         self._now = now
         self._cache = TTLCache()
+        self._log = SentimentLog(db_path)
 
     def make(self, ticker: str, interval: Interval = "1d", days: int = 1) -> dict:
         """The get_sentiment reply: the Reading over the Lookback with the Price on the Interval."""
@@ -182,6 +268,8 @@ class SentimentMaker:
             raise InputError(f"days must be 1 to {LOOKBACK_MAX_DAYS}, got {days}")
         ticker = ticker.upper()
         df = history(self._fetcher, ticker, interval, None)
+        price = finite(float(df["Close"].iloc[-1]))
+        self._log.score(ticker, interval, df, self._now().isoformat())
         try:
             name = self._fetcher.fetch_fundamentals(ticker).get("long_name")
         except LookupError:
@@ -192,15 +280,21 @@ class SentimentMaker:
         # X Search's to_date is exclusive, so tomorrow takes in all of today.
         to_date = (today + timedelta(days=1)).isoformat()
         prompt = sentiment_prompt(ticker, name)
-        sentiment = self._cache.get_or_fetch(
-            (ticker, days, interval), self._ttl, lambda: self._reader.read(prompt, from_date, to_date)
-        )
+        key = (ticker, days, interval)
+        sentiment = self._cache.get(key, self._ttl)
+        if sentiment is None:
+            sentiment = self._reader.read(prompt, from_date, to_date)
+            self._cache.put(key, sentiment)
+            # A Sentiment with no Price can't be scored.
+            if price is not None:
+                self._log.record(ticker, interval, days, df, price, sentiment["reading"])
         return {
             "ticker": ticker,
             "interval": interval,
             "days": days,
             **sentiment,
-            "price": finite(float(df["Close"].iloc[-1])),
+            "price": price,
             "data_date": cast("pd.Timestamp", df.index[-1]).isoformat(),
+            "hit_rate": self._log.hit_rate(ticker, interval, sentiment["reading"]),
             "note": "A Reading is not a Signal and sets nothing for Signals.",
         }

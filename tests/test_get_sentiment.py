@@ -34,6 +34,7 @@ async def test_the_reading_comes_back_with_the_price_on_the_interval(server_url)
         "posts_fetched": 42,
         "price": 104.0,
         "data_date": "2026-11-27T00:00:00+07:00",
+        "hit_rate": None,
         "note": "A Reading is not a Signal and sets nothing for Signals.",
     }
 
@@ -172,3 +173,13 @@ async def test_the_description_uses_the_glossary_and_sets_nothing_for_signals(se
         assert term in tool.description
     props = tool.input_schema["properties"]
     assert {k: v.get("default") for k, v in props.items()} == {"ticker": None, "interval": "1d", "days": 1}
+
+
+async def test_a_non_finite_last_close_comes_back_as_a_null_price(server_url):
+    reader = FakeSentimentReader()
+    url = server_url(_fetcher([100.0] * 59 + [float("nan")]), sentiment_reader=reader, now=lambda: NOW)
+
+    result = await call_tool(url, "get_sentiment", {"ticker": "BBCA.JK"})
+
+    assert not result.is_error, text_of(result)
+    assert json.loads(text_of(result))["price"] is None
