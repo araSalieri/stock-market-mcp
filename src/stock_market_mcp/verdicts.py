@@ -143,7 +143,7 @@ class Rule:
     levels: tuple[Level, ...]
     break_even: float | Literal["picked"] | None
     scope: Literal["server", "interval"] | None
-    min_confidence: str | None
+    min_confidence: Literal["min_confidence", "dip_min_confidence", "cut_min_confidence"] | None
     additions: Callable[..., dict]
     exits: bool = False
 
