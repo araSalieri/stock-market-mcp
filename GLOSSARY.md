@@ -72,6 +72,10 @@ _Avoid_: Mood, lean, verdict, score
 The whole UTC days of X posts a Sentiment reads, 1 to 7, ending today.
 _Avoid_: Window, period, range
 
+**Sentiment Version**:
+The number stored with each Sentiment that names what Grok was asked: the question, the Readings it may answer with, and how X is searched. It changes whenever any of that changes, so Sentiment Hit Rates count only Sentiments asked the same way.
+_Avoid_: Prompt Version, model version, schema version
+
 ### Trade Plan
 
 **Trade Plan**:

@@ -46,7 +46,7 @@ ROOT = Path(__file__).resolve().parent.parent
 # Without a project, compose derives it from ROOT, as in the README run.
 COMPOSE = ["docker", "compose", *(["-p", PROJECT] if PROJECT else [])]
 RETRIES = 30  # one-second tries for the server to come back after the restart
-TOOLS = ["get_fundamentals", "get_portfolio", "get_quote", "get_sentiment", "get_signal", "get_track_record", "get_watchlists", "scan", "set_position", "set_watchlist"]
+TOOLS = ["backfill_signals", "get_fundamentals", "get_portfolio", "get_quote", "get_sentiment", "get_signal", "get_track_record", "get_watchlists", "scan", "set_position", "set_watchlist"]
 
 KEY_SETUP = (
     "STOP: real-classifier smoke needs an OpenRouter key on the host.\n"
