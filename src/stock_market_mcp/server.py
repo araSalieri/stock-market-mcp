@@ -33,6 +33,12 @@ from stock_market_mcp.errors import InputError
 from stock_market_mcp.portfolio import PortfolioStore
 from stock_market_mcp.prompt import PROMPT_VERSION
 from stock_market_mcp.scan import scan_ticker
+from stock_market_mcp.sentiment import (
+    EnforcingSentimentReader,
+    SentimentMaker,
+    SentimentReader,
+    XaiSentimentReader,
+)
 from stock_market_mcp.signal_maker import SignalMaker
 from stock_market_mcp.signals import SignalLog
 from stock_market_mcp.verdicts import PLAN_ATR_MULTIPLE, PLAN_REWARD_RATIO
@@ -96,6 +102,8 @@ def build_server(
     history_ttl: float = HISTORY_TTL_SECONDS,
     fundamentals_ttl: float = FUNDAMENTALS_TTL_SECONDS,
     signal_ttl: float = SIGNAL_TTL_SECONDS,
+    sentiment_reader: SentimentReader | None = None,
+    sentiment_ttl: float = SIGNAL_TTL_SECONDS,
     db_path: str | os.PathLike | None = None,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> MCPServer:
@@ -103,7 +111,7 @@ def build_server(
 
     The TTL parameters exist so tests can shrink the cache windows; production
     callers use the module-level defaults (60s quotes and history, 300s the rest).
-    `now` is the clock the Scan uses to tell which session is current.
+    `now` is the clock the Scan uses to tell which session is current, and the day a Sentiment's Lookback ends on.
     """
     fetcher = CachingFetcher(
         fetcher,
@@ -117,6 +125,8 @@ def build_server(
     portfolio = PortfolioStore(db_path)
     signal_log = SignalLog(db_path)
     signal_maker = SignalMaker(fetcher, signal_classifier, db_path, signal_ttl, now)
+    reader = EnforcingSentimentReader(sentiment_reader if sentiment_reader is not None else XaiSentimentReader())
+    sentiment_maker = SentimentMaker(fetcher, reader, sentiment_ttl, now)
     mcp = MCPServer("stock-market-mcp")
 
     def audited_tool[F: Callable](fn: F) -> F:
@@ -159,6 +169,11 @@ def build_server(
             "interval": interval,
             **signal_log.track_record(ticker, interval),
         }
+
+    @audited_tool
+    def get_sentiment(ticker: str, interval: Interval = "1d", days: int = 1) -> dict:
+        """Sentiment of one ticker: what people on X say about the company over the Lookback, read by Grok through xAI's X Search for the cashtag without the exchange suffix ($BBCA for BBCA.JK) and the company name. days is the Lookback, whole UTC days of posts ending today (default 1); a Lookback past the server's limit is rejected before any search. reading is bullish, bearish, mixed (both sides heard, neither leads) or quiet (too few posts about the company to say); summary says what people are saying; posts lists a few cited X posts (possibly none); posts_fetched is how many posts X Search fetched, not de-duplicated. price and data_date are the last close and its bar on the Interval (default 1d). A repeat call for the same ticker, days and Interval within the Sentiment cache window reuses the read with a fresh price. A Reading is not a Signal and sets nothing for Signals: no Verdict, Confidence, Minimum Confidence or Trade Plan. Needs SMM_XAI_API_KEY; each read is billed per post fetched plus Grok tokens."""
+        return sentiment_maker.make(ticker, interval, days)
 
     @audited_tool
     def scan(watchlist: str | None = None, tickers: list[str] | None = None) -> list[dict]:

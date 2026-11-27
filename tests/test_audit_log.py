@@ -39,6 +39,7 @@ EVERY_TOOL_ARGS = {
     "get_portfolio": {},
     "get_track_record": {},
     "backfill_signals": {"ticker": "AAPL", "interval": "1d", "since": "not a date"},
+    "get_sentiment": {"ticker": "AAPL", "days": 0},
 }
 
 

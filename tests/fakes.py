@@ -205,3 +205,27 @@ def five_minute_bars(
     )
     df.attrs["regular_periods"] = [(pd.Timestamp(s, tz=tz), pd.Timestamp(e, tz=tz)) for s, e in regular]
     return df
+
+
+class FakeSentimentReader:
+    """Fake transport below the Sentiment reader boundary; no network, records each read as (prompt, from_date, to_date).
+
+    replies (optional) is a sequence of replies handed out one per read; without it every read returns reply.
+    """
+
+    def __init__(self, reply=None, error=None, replies=None):
+        self.reply = reply or {
+            "reading": "bullish",
+            "summary": "Traders expect strong loan growth.",
+            "posts": ["https://x.com/trader/status/1"],
+            "posts_fetched": 42,
+        }
+        self.error = error
+        self.replies = list(replies) if replies is not None else None
+        self.reads = []
+
+    def read(self, prompt, from_date, to_date):
+        self.reads.append((prompt, from_date, to_date))
+        if self.error is not None:
+            raise self.error
+        return self.replies.pop(0) if self.replies is not None else self.reply

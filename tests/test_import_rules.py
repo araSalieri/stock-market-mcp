@@ -11,6 +11,7 @@ EXCEPTIONS = {
     "fakes.py": {"signals"},  # seed_signals creates the signals table
     "test_classifier.py": {"classifier"},  # tests the OpenRouter transport itself
     "test_golden_prompt.py": {"classifier"},  # pins what the real transport sends
+    "test_golden_sentiment.py": {"sentiment"},  # pins the request to the Sentiment version
     "test_logging_setup.py": {"__main__"},  # logging is set up at the entry point
 }
 
