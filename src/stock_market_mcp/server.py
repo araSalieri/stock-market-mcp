@@ -19,6 +19,7 @@ from stock_market_mcp.cache import (
     FUNDAMENTALS_TTL_SECONDS,
     HISTORY_TTL_SECONDS,
     QUOTE_TTL_SECONDS,
+    SENTIMENT_TTL_SECONDS,
     SIGNAL_TTL_SECONDS,
     CachingFetcher,
 )
@@ -104,7 +105,7 @@ def build_server(
     fundamentals_ttl: float = FUNDAMENTALS_TTL_SECONDS,
     signal_ttl: float = SIGNAL_TTL_SECONDS,
     sentiment_reader: SentimentReader | None = None,
-    sentiment_ttl: float = SIGNAL_TTL_SECONDS,
+    sentiment_ttl: float = SENTIMENT_TTL_SECONDS,
     db_path: str | os.PathLike | None = None,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> MCPServer:
@@ -175,7 +176,7 @@ def build_server(
 
     @audited_tool
     def get_sentiment(ticker: str, interval: Interval = "1d", days: int = 1) -> dict:
-        """Sentiment of one ticker: what people on X say about the company over the Lookback, read by Grok through xAI's X Search for the cashtag without the exchange suffix ($BBCA for BBCA.JK) and the company name. days is the Lookback, whole UTC days of posts ending today (default 1); a Lookback past the server's limit is rejected before any search. reading is bullish, bearish, mixed (both sides heard, neither leads) or quiet (too few posts about the company to say); summary says what people are saying; posts lists a few cited X posts (possibly none); posts_fetched is how many posts X Search fetched, not de-duplicated. price and data_date are the last close and its bar on the Interval (default 1d). A repeat call for the same ticker, days and Interval within the Sentiment cache window reuses the read with a fresh price. Each fresh read is logged and later given an Outcome: bullish judged like a buy against the default Trade Plan, bearish against its mirror below the price, mixed and quiet never; pending ones are scored only when get_sentiment is called again for the ticker and Interval. hit_rate is Targets / (Targets + Stops) of the current Sentiment version's Sentiments with this ticker, Interval and Reading, all Lookbacks together, null until enough are scored. A Reading is not a Signal and sets nothing for Signals: no Verdict, Confidence, Minimum Confidence or Trade Plan. Needs SMM_XAI_API_KEY; each read is billed per post fetched plus Grok tokens."""
+        """Sentiment of one ticker: what people on X say about the company over the Lookback, read by Grok through xAI's X Search for the cashtag without the exchange suffix ($BBCA for BBCA.JK) and the company name. days is the Lookback, whole UTC days of posts ending today (default 1); a Lookback past the server's limit is rejected before any search. reading is bullish, bearish, mixed (both sides heard, neither leads) or quiet (too few posts about the company to say); summary says what people are saying; posts lists a few cited X posts (possibly none); posts_fetched is how many posts X Search fetched, not de-duplicated. price and data_date are the last close and its bar on the Interval (default 1d). A repeat call for the same ticker, days and Interval within the Sentiment cache window reuses the read with a fresh price. Each fresh read is logged and later given an Outcome: bullish judged like a buy against the default Trade Plan, bearish against its mirror below the price, mixed and quiet never; pending ones are scored only when get_sentiment is called again for the ticker and Interval. hit_rate is Targets / (Targets + Stops) of the current Sentiment version's Sentiments with this ticker, Interval and Reading, all Lookbacks together, null until enough are scored and always null for mixed and quiet. A Reading is not a Signal and sets nothing for Signals: no Verdict, Confidence, Minimum Confidence or Trade Plan. Needs SMM_XAI_API_KEY; each read is billed per post fetched plus Grok tokens."""
         return sentiment_maker.make(ticker, interval, days)
 
     @audited_tool

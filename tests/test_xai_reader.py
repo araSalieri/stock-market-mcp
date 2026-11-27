@@ -120,11 +120,25 @@ async def test_posts_are_x_status_urls_from_annotations_and_citations_deduplicat
 
     assert json.loads(text_of(result))["posts"] == [
         "https://x.com/a/status/1",
-        "https://twitter.com/b/status/2",
+        "https://x.com/b/status/2",
         "https://x.com/d/status/4",
         "https://x.com/f/status/6",
         "https://x.com/g/status/7",
     ]
+
+
+async def test_status_urls_with_a_query_a_trailing_path_or_a_mobile_host_come_back_canonical(xai):
+    annotations = [
+        "https://x.com/a/status/1?s=20",
+        "https://twitter.com/a/status/1/photo/1",
+        "https://mobile.twitter.com/b/status/2",
+        "https://x.com/c/status/3abc",
+    ]
+    url, _ = xai(_body(annotations=annotations))
+
+    result = await call_tool(url, "get_sentiment", {"ticker": "BBCA.JK"})
+
+    assert json.loads(text_of(result))["posts"] == ["https://x.com/a/status/1", "https://x.com/b/status/2"]
 
 
 async def test_no_cited_posts_is_an_empty_list(xai):
@@ -139,11 +153,13 @@ async def test_no_cited_posts_is_an_empty_list(xai):
     ("body", "named"),
     [
         (_body(usage={}), "x_posts_fetched"),
+        ({**_body(), "usage": None}, "x_posts_fetched"),
+        ({**_body(), "citations": None}, "citations"),
         ({"output": [{"type": "reasoning"}], "usage": {}}, "message"),
         (_body(answer={**ANSWER, "posts": ["https://x.com/a/status/1"]}), "posts"),
         ({**_body(), "output": [{"type": "message", "content": [{"type": "output_text", "text": "bullish!"}]}]}, "JSON"),
     ],
-    ids=["no-posts-fetched", "no-message", "extra-key", "not-json"],
+    ids=["no-posts-fetched", "null-usage", "null-citations", "no-message", "extra-key", "not-json"],
 )
 async def test_a_reply_breaking_the_contract_is_retried_once_then_named(xai, body, named):
     url, posts = xai(body, body)
