@@ -31,19 +31,19 @@ The lowest Confidence at which a dip gets a Trade Plan. Set by the server from s
 _Avoid_: Dip threshold, dip gate
 
 **Price**:
-The last close in the data the Signal was made from; during the session that is the close of the bar still forming. Every Signal has one; on buy it equals the Entry.
+The last close in the data the Signal or Sentiment was made from; during the session that is the close of the bar still forming. Every Signal has one; on buy it equals the Entry.
 _Avoid_: Current price, last price, quote
 
 **Outcome**:
-What happened to a Signal within 20 bars of its Interval, scored even when it was below the Minimum Confidence. A buy is judged against the default Trade Plan, a dip against its picked Stop and Target: Target (reached first), Stop (reached first, or on the same bar as the Target), or Expired (neither); a dip missing either is never scored. A cut is judged against its Buyback Price and Cut Stop: Target (Buyback Price reached first), Stop (Cut Stop reached first, or on the same bar), or Expired (neither); a cut missing either is never scored. A hold's Outcome is Quiet (price moved the Target distance neither up nor down) or Missed (it did).
+What happened to a Signal within 20 bars of its Interval, scored even when it was below the Minimum Confidence. A buy is judged against the default Trade Plan, a dip against its picked Stop and Target: Target (reached first), Stop (reached first, or on the same bar as the Target), or Expired (neither); a dip missing either is never scored. A cut is judged against its Buyback Price and Cut Stop: Target (Buyback Price reached first), Stop (Cut Stop reached first, or on the same bar), or Expired (neither); a cut missing either is never scored. A hold's Outcome is Quiet (price moved the Target distance neither up nor down) or Missed (it did). A bullish Sentiment is judged like a buy against the default Trade Plan, a bearish one against its mirror below the Price; mixed and quiet Sentiments are never scored.
 _Avoid_: Result, win/loss
 
 **Hit Rate**:
-For buy, dip and cut, Targets divided by Targets plus Stops over a set of scored Signals, Expired left out; for hold, Quiet divided by all scored holds. The measured counterpart to Confidence.
+For buy, dip and cut, and for bullish and bearish Sentiments, Targets divided by Targets plus Stops over a set of scored Signals, Expired left out; for hold, Quiet divided by all scored holds. The measured counterpart to Confidence.
 _Avoid_: Win rate, accuracy
 
 **Track Record**:
-The Outcome counts and Hit Rates of the current prompt version's Signals, by Confidence band and Verdict, optionally for one ticker, one Interval, or both. Shows how Confidence compares with Hit Rate and why the Minimum Confidence sits where it does.
+The Outcome counts and Hit Rates of the current prompt version's Signals, by Confidence band and Verdict, optionally for one ticker, one Interval, or both. Also the Outcome counts and Hit Rates of the current Sentiments by Reading. Shows how Confidence compares with Hit Rate and why the Minimum Confidence sits where it does.
 _Avoid_: Stats, performance, backtest, scorecard
 
 **Backfilled Signal**:
@@ -51,12 +51,26 @@ A Signal the server makes on a past bar on or after a date the caller gives, for
 _Avoid_: Backtest, replay, simulated Signal
 
 **Interval**:
-The length of one bar in the price history a Signal is made from: 1m, 5m, 15m, 1h, or 1d.
+The length of one bar in the price history a Signal or Sentiment is made from: 1m, 5m, 15m, 1h, or 1d.
 _Avoid_: Timeframe, resolution, granularity
 
 **Prompt Version**:
 The number stored with each Signal that names what the classifier was shown and asked: the bars and indicators, the Position, the previous Signal, and the questions. It changes whenever any of that changes, so Hit Rates and the Minimum Confidence count only Signals asked the same way.
 _Avoid_: Model version, schema version
+
+### Sentiment
+
+**Sentiment**:
+A read of what people on X say about a ticker over a Lookback, made of a Reading, a short summary, the number of posts read, cited posts, the Price and data date on an Interval, and the Hit Rate for its ticker, Interval and Reading (none until enough are scored). It has no Verdict, Confidence or Trade Plan, and it never changes a Signal.
+_Avoid_: Social signal, buzz, hype
+
+**Reading**:
+A Sentiment's word for the mood on X: bullish, bearish, mixed (both sides heard, neither leads), or quiet (too few posts about the company to say).
+_Avoid_: Mood, lean, verdict, score
+
+**Lookback**:
+The whole UTC days of X posts a Sentiment reads, 1 to 7, ending today.
+_Avoid_: Window, period, range
 
 ### Trade Plan
 
