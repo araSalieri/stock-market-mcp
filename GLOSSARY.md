@@ -73,7 +73,7 @@ The whole UTC days of X posts a Sentiment reads, 1 to 7, ending today.
 _Avoid_: Window, period, range
 
 **Sentiment Version**:
-The number stored with each Sentiment that names what Grok was asked: the question, the Readings it may answer with, and how X is searched. It changes whenever any of that changes, so Sentiment Hit Rates count only Sentiments asked the same way.
+The number stored with each Sentiment that names what Grok was asked and which Grok model answers: the question, the Readings it may answer with, how X is searched, and the model. It changes whenever any of that changes, so Sentiment Hit Rates count only Sentiments asked the same way.
 _Avoid_: Prompt Version, model version, schema version
 
 ### Trade Plan
