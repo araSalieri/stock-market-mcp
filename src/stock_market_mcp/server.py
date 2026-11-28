@@ -112,7 +112,7 @@ def build_server(
     """Assemble the MCP server over an injectable fetcher and classifier.
 
     The TTL parameters exist so tests can shrink the cache windows; production
-    callers use the module-level defaults (60s quotes and history, 300s the rest).
+    callers use the module-level defaults (60s quotes and history, 3600s Sentiments, 300s the rest).
     `now` is the clock the Scan uses to tell which session is current, and the day a Sentiment's Lookback ends on.
     """
     fetcher = CachingFetcher(
