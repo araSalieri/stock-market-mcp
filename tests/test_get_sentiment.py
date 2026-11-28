@@ -228,6 +228,7 @@ async def test_a_non_finite_last_close_comes_back_as_a_null_price(server_url):
 
 async def test_a_database_from_before_fetch_counts_gets_them_with_null_on_old_rows(server_url, tmp_path):
     db = tmp_path / "server.db"
+    # Raw sqlite3, since the store can't build an old-schema file and no tool replies with the fetch counts.
     with closing(sqlite3.connect(db)) as conn, conn:
         conn.execute(
             "CREATE TABLE sentiments (id INTEGER PRIMARY KEY, ticker TEXT NOT NULL, interval TEXT NOT NULL, "

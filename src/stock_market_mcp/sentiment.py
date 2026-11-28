@@ -66,7 +66,7 @@ def sentiment_prompt(ticker: str, name: str | None) -> str:
 class SentimentReader(Protocol):
     def read(self, prompt: str, from_date: str, to_date: str) -> dict:
         """The Sentiment for prompt over X posts from from_date up to (not including) to_date: reading, summary, posts,
-        posts_fetched and users_fetched (profiles fetched)."""
+        posts_fetched and users_fetched."""
         ...
 
 
@@ -175,8 +175,8 @@ class XaiSentimentReader:
         urls = [a.get("url") for a in texts[0].get("annotations", []) if a.get("type") == "url_citation"] + citations
         matches = [_POST_URL.fullmatch(url) for url in urls if isinstance(url, str)]
         posts = list(dict.fromkeys(f"https://x.com/{m[1]}/status/{m[2]}" for m in matches if m))
-        # xAI may leave x_users_fetched out when no profiles were searched.
-        users = details.get("x_users_fetched", 0)
+        # xAI may leave x_users_fetched out, or null, when no users were searched.
+        users = details.get("x_users_fetched") or 0
         return {**answer, "posts": posts[:POSTS_MAX], "posts_fetched": fetched, "users_fetched": users}
 
 
@@ -225,10 +225,19 @@ class SentimentLog:
                     conn.execute(f"ALTER TABLE sentiments ADD COLUMN {name} {type_}")
             yield conn
 
-    def record(self, ticker: str, interval: str, days: int, history: pd.DataFrame, price: float, sentiment: dict) -> None:
+    def record(
+        self,
+        ticker: str,
+        interval: str,
+        days: int,
+        history: pd.DataFrame,
+        price: float,
+        reading: str,
+        posts_fetched: int,
+        users_fetched: int,
+    ) -> None:
         """Store one pending fresh Sentiment made on history's last bar, with its side's default Trade Plan levels at price
-        and the posts and profiles X Search fetched."""
-        reading = sentiment["reading"]
+        and the posts and users X Search fetched."""
         side = _SIDES.get(reading)
         plan = default_plans(history, price)
         levels = [plan[column] if side and column.startswith(side) else None for column in PLAN_COLUMNS]
@@ -246,8 +255,8 @@ class SentimentLog:
                     reading,
                     price,
                     *levels,
-                    sentiment["posts_fetched"],
-                    sentiment["users_fetched"],
+                    posts_fetched,
+                    users_fetched,
                 ),
             )
 
@@ -343,7 +352,16 @@ class SentimentMaker:
             sentiment = self._reader.read(sentiment_prompt(ticker, name), from_date, to_date)
             # A Sentiment with no Price can't be scored.
             if price is not None:
-                self._log.record(ticker, interval, days, df, price, sentiment)
+                self._log.record(
+                    ticker,
+                    interval,
+                    days,
+                    df,
+                    price,
+                    sentiment["reading"],
+                    sentiment["posts_fetched"],
+                    sentiment["users_fetched"],
+                )
             # Stored, not returned.
             sentiment = {key: value for key, value in sentiment.items() if key != "users_fetched"}
             # Cached only once recorded, so a failed store is retried instead of served from the cache.

@@ -152,11 +152,12 @@ async def test_no_cited_posts_is_an_empty_list(xai):
 
 
 def _stored_counts(db):
+    # Raw sqlite3, since no tool replies with the fetch counts.
     with closing(sqlite3.connect(db)) as conn:
         return conn.execute("SELECT posts_fetched, users_fetched FROM sentiments").fetchall()
 
 
-async def test_a_fresh_sentiment_stores_the_posts_and_profiles_fetched_but_replies_without_profiles(xai, tmp_path):
+async def test_a_fresh_sentiment_stores_the_fetch_counts_but_replies_without_users_fetched(xai, tmp_path):
     url, _ = xai(_body())
 
     fresh = await call_tool(url, "get_sentiment", {"ticker": "BBCA.JK"})
@@ -168,8 +169,11 @@ async def test_a_fresh_sentiment_stores_the_posts_and_profiles_fetched_but_repli
         assert "users_fetched" not in json.loads(text_of(result))
 
 
-async def test_a_reply_without_profiles_fetched_stores_zero(xai, tmp_path):
-    url, _ = xai(_body(usage={"server_side_tool_usage_details": {"x_posts_fetched": 37}}))
+@pytest.mark.parametrize(
+    "details", [{"x_posts_fetched": 37}, {"x_posts_fetched": 37, "x_users_fetched": None}], ids=["missing", "null"]
+)
+async def test_a_reply_without_users_fetched_stores_zero(xai, tmp_path, details):
+    url, _ = xai(_body(usage={"server_side_tool_usage_details": details}))
 
     result = await call_tool(url, "get_sentiment", {"ticker": "BBCA.JK"})
 
