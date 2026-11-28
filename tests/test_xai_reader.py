@@ -81,9 +81,9 @@ async def test_the_request_is_one_x_search_call_with_the_window_and_a_json_schem
     assert kwargs["headers"]["Authorization"] == "Bearer test-key"
     assert kwargs["timeout"] > 0
     request = kwargs["json"]
-    assert request["model"] == "grok-4.7"
+    assert request["model"] == "grok-4.3"
     assert request["tools"] == [{"type": "x_search", "from_date": "2026-11-25", "to_date": "2026-11-28"}]
-    assert request["max_turns"] == 2
+    assert request["max_turns"] == 1
     assert request["include"] == ["no_inline_citations"]
     text_format = request["text"]["format"]
     assert (text_format["type"], text_format["strict"]) == ("json_schema", True)

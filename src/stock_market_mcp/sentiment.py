@@ -24,16 +24,16 @@ from stock_market_mcp.signals import rate
 from stock_market_mcp.verdicts import PLAN_COLUMNS, default_plans, outcome
 
 # Names what Grok is asked and how; bump it whenever the request sent to xAI changes.
-SENTIMENT_VERSION = 1
+SENTIMENT_VERSION = 2
 READINGS = ("bullish", "bearish", "mixed", "quiet")
 LOOKBACK_MAX_DAYS = 7
 POSTS_MAX = 5
 
-# Pinned, https only, as the classifier's endpoint. grok-4.7 is the only model the X Search docs show.
+# Pinned, https only, as the classifier's endpoint. grok-4.3 is cheaper than grok-4.7 in tokens.
 XAI_RESPONSES_URL = "https://api.x.ai/v1/responses"
-XAI_MODEL = "grok-4.7"
-# Caps X Search's agentic rounds, so one read costs a few cents, not an unknown amount.
-X_SEARCH_MAX_TURNS = 2
+XAI_MODEL = "grok-4.3"
+# One round of X Search: xAI charges per post fetched, and each extra round fetches more.
+X_SEARCH_MAX_TURNS = 1
 # No pattern or other features xAI rejects with a 400.
 _ANSWER_SCHEMA = {
     "type": "object",

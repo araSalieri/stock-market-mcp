@@ -12,6 +12,7 @@ from stock_market_mcp.sentiment import SENTIMENT_VERSION
 # One fingerprint per Sentiment version. Never edit an existing one: add the new version's instead.
 FINGERPRINTS = {
     1: "7056a0b1a397811bb53b0fa4515ec132f83d98653eb6f2f46756ce1e8e1df319",
+    2: "f5de4f886df67b1358899cabb463b8143a5f2930e546257a7cb7c5570a1fd6c3",
 }
 
 
