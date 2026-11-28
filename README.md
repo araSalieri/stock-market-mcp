@@ -25,7 +25,7 @@ An MCP server that gives coding agents stock market data, indicators and advisor
 
 Each tool's arguments and output are described in its MCP schema. Domain terms are defined in [GLOSSARY.md](GLOSSARY.md).
 
-Free Yahoo data is delayed, so check `data_date` before acting on a Signal or Trade Plan. Results are cached in memory for 60 seconds (quotes, history) or 5 minutes (fundamentals, Signals, Sentiments).
+Free Yahoo data is delayed, so check `data_date` before acting on a Signal or Trade Plan. Results are cached in memory for 60 seconds (quotes, history), 5 minutes (fundamentals, Signals) or 1 hour (Sentiments).
 
 ## Run
 

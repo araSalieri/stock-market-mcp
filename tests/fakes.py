@@ -234,6 +234,7 @@ class FakeSentimentReader:
             "summary": "Traders expect strong loan growth.",
             "posts": ["https://x.com/trader/status/1"],
             "posts_fetched": 42,
+            "users_fetched": 3,
         }
         self.error = error
         self.replies = list(replies) if replies is not None else None

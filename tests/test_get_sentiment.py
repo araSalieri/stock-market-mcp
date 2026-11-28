@@ -1,6 +1,8 @@
 """get_sentiment through the MCP surface: the Reading from the Sentiment reader with the Price on the Interval."""
 
 import json
+import sqlite3
+from contextlib import closing
 from datetime import UTC, datetime
 
 import pytest
@@ -222,3 +224,27 @@ async def test_a_non_finite_last_close_comes_back_as_a_null_price(server_url):
 
     assert not result.is_error, text_of(result)
     assert json.loads(text_of(result))["price"] is None
+
+
+async def test_a_database_from_before_fetch_counts_gets_them_with_null_on_old_rows(server_url, tmp_path):
+    db = tmp_path / "server.db"
+    # Raw sqlite3, since the store can't build an old-schema file and no tool replies with the fetch counts.
+    with closing(sqlite3.connect(db)) as conn, conn:
+        conn.execute(
+            "CREATE TABLE sentiments (id INTEGER PRIMARY KEY, ticker TEXT NOT NULL, interval TEXT NOT NULL, "
+            "days INTEGER NOT NULL, version INTEGER NOT NULL, data_date TEXT NOT NULL, reading TEXT NOT NULL, "
+            "price REAL NOT NULL, long_stop REAL, long_target REAL, short_stop REAL, short_target REAL, outcome TEXT, "
+            "scored_at TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO sentiments (ticker, interval, days, version, data_date, reading, price) "
+            "VALUES ('BBCA.JK', '1d', 1, 1, '2026-11-20T00:00:00+07:00', 'quiet', 100.0)"
+        )
+    url = server_url(_fetcher(), sentiment_reader=FakeSentimentReader(), now=lambda: NOW)
+
+    result = await call_tool(url, "get_sentiment", {"ticker": "BBCA.JK"})
+
+    assert not result.is_error, text_of(result)
+    with closing(sqlite3.connect(db)) as conn:
+        rows = conn.execute("SELECT reading, posts_fetched, users_fetched FROM sentiments ORDER BY id").fetchall()
+    assert rows == [("quiet", None, None), ("bullish", 42, 3)]

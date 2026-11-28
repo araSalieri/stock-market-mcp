@@ -1,6 +1,8 @@
 """The real xAI transport behind get_sentiment, with requests.post patched: what is sent and how the reply is read."""
 
 import json
+import sqlite3
+from contextlib import closing
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
@@ -31,7 +33,7 @@ def _body(answer=None, annotations=(), citations=None, usage=None):
             {"type": "custom_tool_call", "name": "x_keyword_search", "input": "$BBCA"},
             message,
         ],
-        "usage": {"server_side_tool_usage_details": {"x_posts_fetched": 37}} if usage is None else usage,
+        "usage": {"server_side_tool_usage_details": {"x_posts_fetched": 37, "x_users_fetched": 4}} if usage is None else usage,
     }
     if citations is not None:
         body["citations"] = citations
@@ -79,9 +81,9 @@ async def test_the_request_is_one_x_search_call_with_the_window_and_a_json_schem
     assert kwargs["headers"]["Authorization"] == "Bearer test-key"
     assert kwargs["timeout"] > 0
     request = kwargs["json"]
-    assert request["model"] == "grok-4.7"
+    assert request["model"] == "grok-4.3"
     assert request["tools"] == [{"type": "x_search", "from_date": "2026-11-25", "to_date": "2026-11-28"}]
-    assert request["max_turns"] == 2
+    assert request["max_turns"] == 1
     assert request["include"] == ["no_inline_citations"]
     text_format = request["text"]["format"]
     assert (text_format["type"], text_format["strict"]) == ("json_schema", True)
@@ -149,17 +151,49 @@ async def test_no_cited_posts_is_an_empty_list(xai):
     assert json.loads(text_of(result))["posts"] == []
 
 
+def _stored_counts(db):
+    # Raw sqlite3, since no tool replies with the fetch counts.
+    with closing(sqlite3.connect(db)) as conn:
+        return conn.execute("SELECT posts_fetched, users_fetched FROM sentiments").fetchall()
+
+
+async def test_a_fresh_sentiment_stores_the_fetch_counts_but_replies_without_users_fetched(xai, tmp_path):
+    url, _ = xai(_body())
+
+    fresh = await call_tool(url, "get_sentiment", {"ticker": "BBCA.JK"})
+    cached = await call_tool(url, "get_sentiment", {"ticker": "BBCA.JK"})
+
+    assert _stored_counts(tmp_path / "server.db") == [(37, 4)]
+    for result in (fresh, cached):
+        assert not result.is_error, text_of(result)
+        assert "users_fetched" not in json.loads(text_of(result))
+
+
+@pytest.mark.parametrize(
+    "details", [{"x_posts_fetched": 37}, {"x_posts_fetched": 37, "x_users_fetched": None}], ids=["missing", "null"]
+)
+async def test_a_reply_without_users_fetched_stores_zero(xai, tmp_path, details):
+    url, _ = xai(_body(usage={"server_side_tool_usage_details": details}))
+
+    result = await call_tool(url, "get_sentiment", {"ticker": "BBCA.JK"})
+
+    assert not result.is_error, text_of(result)
+    assert _stored_counts(tmp_path / "server.db") == [(37, 0)]
+
+
 @pytest.mark.parametrize(
     ("body", "named"),
     [
         (_body(usage={}), "x_posts_fetched"),
+        (_body(usage={"server_side_tool_usage_details": {"x_posts_fetched": 1, "x_users_fetched": -1}}), "users_fetched"),
+        (_body(usage={"server_side_tool_usage_details": {"x_posts_fetched": 1, "x_users_fetched": 1.5}}), "users_fetched"),
         ({**_body(), "usage": None}, "x_posts_fetched"),
         ({**_body(), "citations": None}, "citations"),
         ({"output": [{"type": "reasoning"}], "usage": {}}, "message"),
         (_body(answer={**ANSWER, "posts": ["https://x.com/a/status/1"]}), "posts"),
         ({**_body(), "output": [{"type": "message", "content": [{"type": "output_text", "text": "bullish!"}]}]}, "JSON"),
     ],
-    ids=["no-posts-fetched", "null-usage", "null-citations", "no-message", "extra-key", "not-json"],
+    ids=["no-posts-fetched", "negative-users-fetched", "fractional-users-fetched", "null-usage", "null-citations", "no-message", "extra-key", "not-json"],
 )
 async def test_a_reply_breaking_the_contract_is_retried_once_then_named(xai, body, named):
     url, posts = xai(body, body)
