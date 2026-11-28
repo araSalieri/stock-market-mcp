@@ -6,7 +6,9 @@ SentimentReader is the injectable seam; XaiSentimentReader below is the only xAI
 import json
 import os
 import re
-from collections.abc import Callable
+import sqlite3
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Protocol, cast
 
@@ -63,8 +65,8 @@ def sentiment_prompt(ticker: str, name: str | None) -> str:
 
 class SentimentReader(Protocol):
     def read(self, prompt: str, from_date: str, to_date: str) -> dict:
-        """The Sentiment for prompt over X posts from from_date up to (not including) to_date: reading, summary, posts
-        and posts_fetched."""
+        """The Sentiment for prompt over X posts from from_date up to (not including) to_date: reading, summary, posts,
+        posts_fetched and users_fetched (profiles fetched)."""
         ...
 
 
@@ -72,7 +74,7 @@ class SentimentContractError(Exception):
     """A Sentiment reply breaks the reply contract (retryable once)."""
 
 
-_SENTIMENT_KEYS = {"reading", "summary", "posts", "posts_fetched"}
+_SENTIMENT_KEYS = {"reading", "summary", "posts", "posts_fetched", "users_fetched"}
 
 
 def validate_sentiment(payload: object) -> dict:
@@ -90,9 +92,10 @@ def validate_sentiment(payload: object) -> dict:
     posts = payload["posts"]
     if not isinstance(posts, list) or not all(isinstance(post, str) for post in posts):
         raise SentimentContractError(f"posts must be a list of URLs, got: {posts!r}")
-    fetched = payload["posts_fetched"]
-    if isinstance(fetched, bool) or not isinstance(fetched, int) or fetched < 0:
-        raise SentimentContractError(f"posts_fetched must be a whole number, got: {fetched!r}")
+    for key in ("posts_fetched", "users_fetched"):
+        fetched = payload[key]
+        if isinstance(fetched, bool) or not isinstance(fetched, int) or fetched < 0:
+            raise SentimentContractError(f"{key} must be a whole number, got: {fetched!r}")
     return payload
 
 
@@ -161,7 +164,8 @@ class XaiSentimentReader:
         if not isinstance(answer, dict) or answer.keys() != {"reading", "summary"}:
             raise SentimentContractError(f"answer must have exactly reading and summary, got: {answer!r}")
         try:
-            fetched = body["usage"]["server_side_tool_usage_details"]["x_posts_fetched"]
+            details = body["usage"]["server_side_tool_usage_details"]
+            fetched = details["x_posts_fetched"]
         except (KeyError, TypeError):
             raise SentimentContractError(f"xAI reply has no usage x_posts_fetched: {body.get('usage')!r}") from None
         citations = body.get("citations", [])
@@ -171,7 +175,9 @@ class XaiSentimentReader:
         urls = [a.get("url") for a in texts[0].get("annotations", []) if a.get("type") == "url_citation"] + citations
         matches = [_POST_URL.fullmatch(url) for url in urls if isinstance(url, str)]
         posts = list(dict.fromkeys(f"https://x.com/{m[1]}/status/{m[2]}" for m in matches if m))
-        return {**answer, "posts": posts[:POSTS_MAX], "posts_fetched": fetched}
+        # xAI may leave x_users_fetched out when no profiles were searched.
+        users = details.get("x_users_fetched", 0)
+        return {**answer, "posts": posts[:POSTS_MAX], "posts_fetched": fetched, "users_fetched": users}
 
 
 # Kept apart from signals (ADR-0015). Outcome is null while pending and always on mixed and quiet rows; a bullish row
@@ -190,8 +196,12 @@ SCHEMA = """CREATE TABLE IF NOT EXISTS sentiments (
     short_stop REAL,
     short_target REAL,
     outcome TEXT,
-    scored_at TEXT
+    scored_at TEXT,
+    posts_fetched INTEGER,
+    users_fetched INTEGER
 )"""
+# Columns a file from before them lacks, added on open with null on old rows.
+_ADDED_COLUMNS = (("posts_fetched", "INTEGER"), ("users_fetched", "INTEGER"))
 
 
 # Readings that get an Outcome: bullish judged like a buy, bearish like its mirror below the Price.
@@ -204,17 +214,41 @@ class SentimentLog:
     def __init__(self, path: str | os.PathLike):
         self.path = path
 
-    def record(self, ticker: str, interval: str, days: int, history: pd.DataFrame, price: float, reading: str) -> None:
-        """Store one pending Sentiment made on history's last bar, with its side's default Trade Plan levels at price."""
+    @contextmanager
+    def _open(self) -> Iterator[sqlite3.Connection]:
+        """A transaction on the sentiments table, adding columns a file from before them lacks (null on old rows)."""
+        with transaction(self.path, SCHEMA) as conn:
+            have = {column[1] for column in conn.execute("PRAGMA table_info(sentiments)")}
+            for name, type_ in _ADDED_COLUMNS:
+                # shortcut: two servers upgrading one file at once can fail one call on a duplicate column; retry succeeds.
+                if name not in have:
+                    conn.execute(f"ALTER TABLE sentiments ADD COLUMN {name} {type_}")
+            yield conn
+
+    def record(self, ticker: str, interval: str, days: int, history: pd.DataFrame, price: float, sentiment: dict) -> None:
+        """Store one pending fresh Sentiment made on history's last bar, with its side's default Trade Plan levels at price
+        and the posts and profiles X Search fetched."""
+        reading = sentiment["reading"]
         side = _SIDES.get(reading)
         plan = default_plans(history, price)
         levels = [plan[column] if side and column.startswith(side) else None for column in PLAN_COLUMNS]
         data_date = cast("pd.Timestamp", history.index[-1]).isoformat()
-        with transaction(self.path, SCHEMA) as conn:
+        with self._open() as conn:
             conn.execute(
                 "INSERT INTO sentiments (ticker, interval, days, version, data_date, reading, price, "
-                f"{', '.join(PLAN_COLUMNS)}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (ticker, interval, days, SENTIMENT_VERSION, data_date, reading, price, *levels),
+                f"{', '.join(PLAN_COLUMNS)}, posts_fetched, users_fetched) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    ticker,
+                    interval,
+                    days,
+                    SENTIMENT_VERSION,
+                    data_date,
+                    reading,
+                    price,
+                    *levels,
+                    sentiment["posts_fetched"],
+                    sentiment["users_fetched"],
+                ),
             )
 
     def score(self, ticker: str, interval: str, history: pd.DataFrame, scored_at: str) -> None:
@@ -222,7 +256,7 @@ class SentimentLog:
 
         One whose bar isn't in history, or without enough later bars or a default plan, stays pending.
         """
-        with transaction(self.path, SCHEMA) as conn:
+        with self._open() as conn:
             pending = conn.execute(
                 f"SELECT id, data_date, reading, {', '.join(PLAN_COLUMNS)} FROM sentiments "
                 f"WHERE ticker = ? AND interval = ? AND outcome IS NULL AND reading IN ({', '.join('?' * len(_SIDES))})",
@@ -242,7 +276,7 @@ class SentimentLog:
     def hit_rate(self, ticker: str, interval: str, reading: str) -> float | None:
         """Targets / (Targets + Stops) of the current Sentiment version's Sentiments with this reading, ticker and
         Interval, all Lookbacks together; None under the minimum scored."""
-        with transaction(self.path, SCHEMA) as conn:
+        with self._open() as conn:
             targets, stops = conn.execute(
                 "SELECT COUNT(*) FILTER (WHERE outcome = 'target'), COUNT(*) FILTER (WHERE outcome = 'stop') "
                 "FROM sentiments WHERE ticker = ? AND interval = ? AND version = ? AND reading = ?",
@@ -253,7 +287,7 @@ class SentimentLog:
     def track_record(self, ticker: str | None, interval: str | None) -> dict:
         """The current Sentiment version's Outcome counts and Hit Rate per scored Reading, and how many mixed and quiet
         are stored, optionally for one ticker and/or Interval."""
-        with transaction(self.path, SCHEMA) as conn:
+        with self._open() as conn:
             tally = {
                 (reading, outcome or "pending"): n
                 for reading, outcome, n in conn.execute(
@@ -309,7 +343,9 @@ class SentimentMaker:
             sentiment = self._reader.read(sentiment_prompt(ticker, name), from_date, to_date)
             # A Sentiment with no Price can't be scored.
             if price is not None:
-                self._log.record(ticker, interval, days, df, price, sentiment["reading"])
+                self._log.record(ticker, interval, days, df, price, sentiment)
+            # Stored, not returned.
+            sentiment = {key: value for key, value in sentiment.items() if key != "users_fetched"}
             # Cached only once recorded, so a failed store is retried instead of served from the cache.
             self._cache.put(key, sentiment)
         return {
